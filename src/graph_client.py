@@ -1,0 +1,328 @@
+import uuid
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
+import httpx
+import msal
+
+from src.config import config
+from src.logger import logger
+
+GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+GRAPH_SCOPES = ["https://graph.microsoft.com/.default"]
+
+_msal_app: Optional[msal.ConfidentialClientApplication] = None
+
+
+def get_msal_app() -> msal.ConfidentialClientApplication:
+    """Initialize or get the MSAL ConfidentialClientApplication."""
+    global _msal_app
+    if _msal_app is not None:
+        return _msal_app
+
+    tenant_id = config.microsoft.tenant_id
+    client_id = config.microsoft.client_id
+    client_secret = config.microsoft.client_secret
+
+    if not tenant_id or not client_id or not client_secret:
+        err = RuntimeError("Microsoft Graph credentials are not configured. Check .env file.")
+        logger.error(str(err), extra={"event": "AUTHENTICATION_ERROR"})
+        raise err
+
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+    _msal_app = msal.ConfidentialClientApplication(
+        client_id=client_id,
+        client_credential=client_secret,
+        authority=authority,
+    )
+    logger.info("Microsoft Graph MSAL client initialized", extra={"event": "GRAPH_CLIENT_INIT"})
+    return _msal_app
+
+
+def get_access_token() -> str:
+    """Acquire a Microsoft Graph access token using client credentials flow with caching."""
+    app = get_msal_app()
+
+    # Try silent token acquisition from cache first
+    result = app.acquire_token_silent(GRAPH_SCOPES, account=None)
+    if not result:
+        result = app.acquire_token_for_client(scopes=GRAPH_SCOPES)
+
+    if "access_token" in result:
+        return result["access_token"]
+
+    error_description = result.get("error_description", result.get("error", "Unknown MSAL error"))
+    logger.error(
+        f"Failed to acquire Microsoft Graph token: {error_description}",
+        extra={"event": "AUTHENTICATION_ERROR", "details": result},
+    )
+    raise RuntimeError(f"MSAL authentication failed: {error_description}")
+
+
+def _handle_graph_error(response: httpx.Response, context: Optional[Dict[str, Any]] = None):
+    """Handle and log Microsoft Graph API HTTP errors with structured context."""
+    context = context or {}
+    status_code = response.status_code
+    error_text = response.text
+
+    try:
+        error_json = response.json()
+        message = error_json.get("error", {}).get("message", error_text)
+    except Exception:
+        message = error_text
+
+    context_info = {
+        "statusCode": status_code,
+        "message": message,
+        **context,
+    }
+
+    if status_code in (401, 403):
+        logger.error("Graph authentication/permission failure", extra={"event": "AUTHENTICATION_ERROR", **context_info})
+    elif status_code == 404:
+        logger.error("Graph resource not found", extra={"event": "GRAPH_API_ERROR", **context_info})
+    elif status_code == 429:
+        retry_after = response.headers.get("retry-after", "unknown")
+        logger.warning("Graph API throttled", extra={"event": "GRAPH_API_ERROR", "retryAfter": retry_after, **context_info})
+    else:
+        logger.error("Graph API error", extra={"event": "GRAPH_API_ERROR", **context_info})
+
+    response.raise_for_status()
+
+
+# --- Async Methods for Webhook and App ---
+
+async def get_channel_message(team_id: str, channel_id: str, message_id: str) -> Dict[str, Any]:
+    """Retrieve a specific Teams channel message asynchronously."""
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages/{message_id}"
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(url, headers=headers)
+        if response.is_error:
+            _handle_graph_error(response, {"teamId": team_id, "channelId": channel_id, "messageId": message_id})
+
+        logger.info(
+            "Teams message retrieved from Graph",
+            extra={
+                "event": "TEAMS_MESSAGE_RETRIEVED",
+                "messageId": message_id,
+                "teamId": team_id,
+                "channelId": channel_id,
+            },
+        )
+        return response.json()
+
+
+async def get_channel_message_reply(
+    team_id: str, channel_id: str, parent_message_id: str, reply_message_id: str
+) -> Dict[str, Any]:
+    """Retrieve a reply message within a channel thread asynchronously."""
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages/{parent_message_id}/replies/{reply_message_id}"
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(url, headers=headers)
+        if response.is_error:
+            _handle_graph_error(
+                response,
+                {
+                    "teamId": team_id,
+                    "channelId": channel_id,
+                    "parentMessageId": parent_message_id,
+                    "replyMessageId": reply_message_id,
+                },
+            )
+
+        logger.info(
+            "Teams reply message retrieved from Graph",
+            extra={
+                "event": "TEAMS_MESSAGE_RETRIEVED",
+                "messageId": reply_message_id,
+                "parentMessageId": parent_message_id,
+                "teamId": team_id,
+                "channelId": channel_id,
+            },
+        )
+        return response.json()
+
+
+async def get_chat_message(chat_id: str, message_id: str) -> Dict[str, Any]:
+    """Retrieve a specific Teams group/1:1 chat message asynchronously."""
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{GRAPH_BASE_URL}/chats/{chat_id}/messages/{message_id}"
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(url, headers=headers)
+        if response.is_error:
+            _handle_graph_error(response, {"chatId": chat_id, "messageId": message_id})
+
+        logger.info(
+            "Teams chat message retrieved from Graph",
+            extra={
+                "event": "TEAMS_MESSAGE_RETRIEVED",
+                "messageId": message_id,
+                "chatId": chat_id,
+            },
+        )
+        return response.json()
+
+
+# --- Subscription Management Methods (Sync / CLI compatible) ---
+
+def generate_client_state() -> str:
+    """Generate a random client state string for subscription validation."""
+    return str(uuid.uuid4())
+
+
+def create_subscription(
+    team_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    chat_id: Optional[str] = None,
+    notification_url: str = "",
+    expiration_minutes: int = 60,
+) -> Dict[str, Any]:
+    """Create a Microsoft Graph subscription for channel or chat messages."""
+    token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    url = f"{GRAPH_BASE_URL}/subscriptions"
+
+    expiration_date_time = (
+        datetime.now(timezone.utc) + timedelta(minutes=expiration_minutes)
+    ).isoformat().replace("+00:00", "Z")
+
+    if chat_id:
+        resource_path = f"/chats/{chat_id}/messages"
+    elif team_id and channel_id:
+        resource_path = f"/teams/{team_id}/channels/{channel_id}/messages"
+    else:
+        raise ValueError("Either chat_id or both team_id and channel_id must be provided")
+
+    payload = {
+        "changeType": "created,updated",
+        "notificationUrl": notification_url,
+        "resource": resource_path,
+        "expirationDateTime": expiration_date_time,
+        "clientState": generate_client_state(),
+    }
+
+    with httpx.Client(timeout=15.0) as client:
+        response = client.post(url, headers=headers, json=payload)
+        if response.is_error:
+            _handle_graph_error(response, {"resource": payload["resource"]})
+
+        result = response.json()
+        logger.info(
+            "Graph subscription created",
+            extra={
+                "event": "SUBSCRIPTION_CREATED",
+                "subscriptionId": result.get("id"),
+                "resource": result.get("resource"),
+                "expirationDateTime": result.get("expirationDateTime"),
+            },
+        )
+        return result
+
+
+def renew_subscription(subscription_id: str, expiration_minutes: int = 58) -> Dict[str, Any]:
+    """Renew an existing subscription (defaults to 58 minutes to prevent Graph clock-skew rejections)."""
+    token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    url = f"{GRAPH_BASE_URL}/subscriptions/{subscription_id}"
+
+    # Graph chat subscriptions have 60m hard limit. Clamp to 58 to ensure no clock drift errors.
+    effective_minutes = min(expiration_minutes, 58)
+    expiration_date_time = (
+        datetime.now(timezone.utc) + timedelta(minutes=effective_minutes)
+    ).isoformat().replace("+00:00", "Z")
+
+    payload = {"expirationDateTime": expiration_date_time}
+
+    with httpx.Client(timeout=15.0) as client:
+        response = client.patch(url, headers=headers, json=payload)
+        if response.is_error:
+            _handle_graph_error(response, {"subscriptionId": subscription_id})
+
+        result = response.json()
+        logger.info(
+            "Graph subscription renewed",
+            extra={
+                "event": "SUBSCRIPTION_RENEWED",
+                "subscriptionId": subscription_id,
+                "expirationDateTime": result.get("expirationDateTime"),
+            },
+        )
+        return result
+
+
+async def list_chat_messages(chat_id: str, top: int = 15) -> List[Dict[str, Any]]:
+    """Retrieve recent messages from a Teams group/1:1 chat."""
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{GRAPH_BASE_URL}/chats/{chat_id}/messages?$top={top}"
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(url, headers=headers)
+        if response.is_error:
+            _handle_graph_error(response, {"chatId": chat_id})
+        data = response.json()
+        return data.get("value", [])
+
+
+async def list_channel_messages(team_id: str, channel_id: str, top: int = 15) -> List[Dict[str, Any]]:
+    """Retrieve recent messages from a Teams channel."""
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages?$top={top}"
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(url, headers=headers)
+        if response.is_error:
+            _handle_graph_error(response, {"teamId": team_id, "channelId": channel_id})
+        data = response.json()
+        return data.get("value", [])
+
+
+def list_subscriptions() -> List[Dict[str, Any]]:
+    """List all active subscriptions."""
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{GRAPH_BASE_URL}/subscriptions"
+
+    with httpx.Client(timeout=15.0) as client:
+        response = client.get(url, headers=headers)
+        if response.is_error:
+            _handle_graph_error(response)
+
+        data = response.json()
+        return data.get("value", [])
+
+
+def delete_subscription(subscription_id: str) -> None:
+    """Delete a subscription."""
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{GRAPH_BASE_URL}/subscriptions/{subscription_id}"
+
+    with httpx.Client(timeout=15.0) as client:
+        response = client.delete(url, headers=headers)
+        if response.is_error:
+            _handle_graph_error(response, {"subscriptionId": subscription_id})
+
+        logger.info(
+            "Graph subscription deleted",
+            extra={
+                "event": "SUBSCRIPTION_DELETED",
+                "subscriptionId": subscription_id,
+            },
+        )

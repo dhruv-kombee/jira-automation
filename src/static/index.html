@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jira Automation Hub — Teams to Jira Live Monitor</title>
+  <meta name="description" content="Real-time monitoring dashboard for Microsoft Teams to Jira automation with Microsoft Graph integration.">
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- Background Glow Accents -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-container">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="logo-title">JiraAutomation <span>Hub</span></h1>
+          <p class="logo-subtitle">Teams → Jira Live Pipeline</p>
+        </div>
+      </div>
+
+      <div class="target-badge" id="targetBadge">
+        <span class="teams-icon">💬</span>
+        <span id="targetName">Team To Jira Ticket Creation</span>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <div class="status-pill status-pill-online" id="connectionStatus">
+        <span class="status-dot"></span>
+        <span id="connectionText">SYSTEM ONLINE</span>
+      </div>
+
+      <button id="btnOpenSimulator" class="btn btn-secondary">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Simulate Message
+      </button>
+
+      <button id="btnRefresh" class="btn btn-icon" title="Refresh Data">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="main-content">
+    
+    <!-- System Health & Graph Subscription Banner -->
+    <section class="glass-panel banner-panel" id="healthBanner">
+      <div class="banner-grid">
+        <!-- Tunnel Card -->
+        <div class="banner-item">
+          <div class="banner-label">
+            <span class="label-dot dot-green"></span>
+            PUBLIC WEBHOOK TUNNEL
+          </div>
+          <div class="banner-val-row">
+            <a id="tunnelUrlLink" href="#" target="_blank" class="tunnel-url truncate">Detecting tunnel...</a>
+            <button id="btnCopyTunnel" class="btn-copy" title="Copy URL">Copy</button>
+          </div>
+          <span class="banner-subtext" id="tunnelSubtext">Forwarding to port 3000</span>
+        </div>
+
+        <!-- Subscription Card -->
+        <div class="banner-item">
+          <div class="banner-label">
+            <span class="label-dot dot-purple"></span>
+            GRAPH SUBSCRIPTION
+            <span class="badge-mini badge-auto-renew" id="badgeAutoRenew" title="Auto-renews when remaining time is under 30 minutes">AUTO-RENEW ON (&lt;30m)</span>
+          </div>
+          <div class="banner-val-row">
+            <span class="sub-countdown" id="subCountdown">--m --s remaining</span>
+            <div class="sub-progress-bar"><div class="sub-progress-fill" id="subProgressFill"></div></div>
+          </div>
+          <div class="banner-subtext-row">
+            <span class="banner-subtext" id="subIdText">ID: Loading...</span>
+            <span class="banner-subtext sub-auto-info" id="subAutoRenewInfo" title="Continuous background worker ensures zero downtime">• Auto-renews at &lt;30m (every 30s)</span>
+          </div>
+        </div>
+
+        <!-- Actions Card -->
+        <div class="banner-actions">
+          <button id="btnRenewSub" class="btn btn-outline-cyan" title="Manually extend subscription by +60m now">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+            Renew (+60m)
+          </button>
+          <button id="btnSyncMessages" class="btn btn-outline-green" title="Fetch recent messages directly from Teams to ensure none are missed">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Sync Teams
+          </button>
+          <button id="btnRecreateSub" class="btn btn-outline-purple" title="Create a fresh subscription">
+            Re-create
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Metrics Cards Grid -->
+    <section class="metrics-grid">
+      <div class="metric-card metric-total" id="cardTotal">
+        <div class="metric-icon">📊</div>
+        <div class="metric-body">
+          <span class="metric-label">Total Messages Captured</span>
+          <span class="metric-value" id="valTotal">0</span>
+          <span class="metric-meta">Saved in SQLite WAL</span>
+        </div>
+      </div>
+
+      <div class="metric-card metric-client" id="cardClient">
+        <div class="metric-icon">👤</div>
+        <div class="metric-body">
+          <span class="metric-label">Client (Dhruv dobariya)</span>
+          <span class="metric-value" id="valClient">0</span>
+          <span class="metric-meta role-tag role-client">CLIENT TICKET REQUESTS</span>
+        </div>
+      </div>
+
+      <div class="metric-card metric-pm" id="cardPm">
+        <div class="metric-icon">⭐</div>
+        <div class="metric-body">
+          <span class="metric-label">PM (Santosh Yadav)</span>
+          <span class="metric-value" id="valPm">0</span>
+          <span class="metric-meta role-tag role-pm">PM APPROVALS</span>
+        </div>
+      </div>
+
+      <div class="metric-card metric-dev" id="cardDev">
+        <div class="metric-icon">💻</div>
+        <div class="metric-body">
+          <span class="metric-label">Developer (Musaib Khan)</span>
+          <span class="metric-value" id="valDev">0</span>
+          <span class="metric-meta role-tag role-dev">ENGINEER UPDATES</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Two-Column Workspace -->
+    <div class="workspace-grid">
+      
+      <!-- Left Column: Messages Feed -->
+      <section class="glass-panel feed-section">
+        <div class="feed-header">
+          <div class="feed-title-wrap">
+            <h2>Live Teams Message Stream</h2>
+            <span class="feed-badge" id="feedCountBadge">0 messages</span>
+          </div>
+
+          <!-- Filters -->
+          <div class="feed-controls">
+            <div class="search-wrap">
+              <input type="text" id="feedSearch" placeholder="Search message text or sender..." class="input-search">
+            </div>
+            <div class="filter-pills" id="roleFilterPills">
+              <button class="pill active" data-filter="ALL">All</button>
+              <button class="pill" data-filter="CLIENT">Client</button>
+              <button class="pill" data-filter="PM">PM</button>
+              <button class="pill" data-filter="DEVELOPER">Developer</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Feed List -->
+        <div class="message-list" id="messageList">
+          <div class="empty-state" id="feedEmptyState">
+            <div class="empty-icon">💬</div>
+            <h3>Waiting for incoming Teams messages...</h3>
+            <p>Send a message in the <strong>"Team To Jira Ticket Creation"</strong> Teams group chat or click <em>Simulate Message</em> to test immediately.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Column: Sidebar Panels -->
+      <aside class="sidebar-column">
+        
+        <!-- Jira Automation Pipeline Status Card -->
+        <div class="glass-panel side-panel">
+          <div class="panel-header">
+            <h3>Automation Pipeline</h3>
+            <span class="badge-mini badge-phase">PHASE 1-4</span>
+          </div>
+
+          <div class="pipeline-steps">
+            <div class="pipe-step step-done">
+              <div class="step-num">✓</div>
+              <div class="step-info">
+                <h4>1. Message Detection</h4>
+                <p>Microsoft Graph Webhook & Auth</p>
+                <span class="status-tag status-active">ACTIVE & PERSISTING</span>
+              </div>
+            </div>
+
+            <div class="pipe-step step-done">
+              <div class="step-num">✓</div>
+              <div class="step-info">
+                <h4>2. AI Ticket Extraction</h4>
+                <p>Gemini / LLM Classification</p>
+                <span class="status-tag status-active">ACTIVE & EXTRACTING</span>
+              </div>
+            </div>
+
+            <div class="pipe-step step-done">
+              <div class="step-num">✓</div>
+              <div class="step-info">
+                <h4>3. PM Approval Workflow</h4>
+                <p>Teams Reaction / Card Approval</p>
+                <span class="status-tag status-active">ACTIVE & DETECTING</span>
+              </div>
+            </div>
+
+            <div class="pipe-step step-pending">
+              <div class="step-num">4</div>
+              <div class="step-info">
+                <h4>4. Jira Ticket Creation</h4>
+                <p>Atlassian Jira Cloud REST API</p>
+                <span class="status-tag status-pending">PENDING JIRA KEYS</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Configured Team Roles Reference -->
+        <div class="glass-panel side-panel">
+          <div class="panel-header">
+            <h3>Configured User Roles</h3>
+          </div>
+
+          <div class="role-list">
+            <div class="role-row">
+              <div class="role-avatar role-avatar-client">DD</div>
+              <div class="role-details">
+                <span class="role-name">Dhruv dobariya</span>
+                <span class="role-type role-client">CLIENT</span>
+                <span class="role-id font-mono">35e03956...66ed</span>
+              </div>
+            </div>
+
+            <div class="role-row">
+              <div class="role-avatar role-avatar-pm">SY</div>
+              <div class="role-details">
+                <span class="role-name">Santosh Yadav</span>
+                <span class="role-type role-pm">PM</span>
+                <span class="role-id font-mono">d7bc3c28...6b8b</span>
+              </div>
+            </div>
+
+            <div class="role-row">
+              <div class="role-avatar role-avatar-dev">MK</div>
+              <div class="role-details">
+                <span class="role-name">Musaib Khan</span>
+                <span class="role-type role-dev">DEVELOPER</span>
+                <span class="role-id font-mono">c5a63f53...c974</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </aside>
+    </div>
+  </main>
+
+  <!-- Simulator Modal -->
+  <div class="modal-overlay" id="simulatorModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Simulate Teams Message</h3>
+        <button class="modal-close" id="btnCloseSimulator">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">Test message detection, role assignment, and pipeline drafting instantly without opening Teams.</p>
+        
+        <div class="form-group">
+          <label>Sender Role:</label>
+          <div class="role-picker">
+            <label class="role-option">
+              <input type="radio" name="simRole" value="CLIENT" checked>
+              <span class="role-pill-opt pill-client">Client (Dhruv)</span>
+            </label>
+            <label class="role-option">
+              <input type="radio" name="simRole" value="PM">
+              <span class="role-pill-opt pill-pm">PM (Santosh)</span>
+            </label>
+            <label class="role-option">
+              <input type="radio" name="simRole" value="DEVELOPER">
+              <span class="role-pill-opt pill-dev">Developer (Musaib)</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="simMessageText">Message Content:</label>
+          <textarea id="simMessageText" rows="4" class="input-textarea" placeholder="e.g.: Hey team, the payment gateway is throwing a 500 error on checkout. Please create a critical bug ticket."></textarea>
+        </div>
+
+        <div class="sample-chips">
+          <span>Quick samples:</span>
+          <button class="chip-sample" data-text="Bug report: Users cannot reset password when clicking forgot link.">Password Bug</button>
+          <button class="chip-sample" data-text="Approved by PM. Please proceed with creating the Jira ticket for the checkout fix.">PM Approval</button>
+          <button class="chip-sample" data-text="Can we add dark mode support in the Q3 release?">Feature Request</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btnCancelSim" class="btn btn-secondary">Cancel</button>
+        <button id="btnSubmitSim" class="btn btn-primary">Send Test Message</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JSON Payload Inspector Modal -->
+  <div class="modal-overlay" id="payloadModal">
+    <div class="modal-card modal-card-lg">
+      <div class="modal-header">
+        <h3>Normalized Message Payload</h3>
+        <button class="modal-close" id="btnClosePayload">&times;</button>
+      </div>
+      <div class="modal-body">
+        <pre class="json-code" id="payloadCode"></pre>
+      </div>
+      <div class="modal-footer">
+        <button id="btnCopyPayload" class="btn btn-secondary">Copy JSON</button>
+        <button id="btnClosePayloadBtn" class="btn btn-primary">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
