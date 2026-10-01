@@ -76,30 +76,68 @@ def store_message(normalized_message: Dict[str, Any]) -> Dict[str, Any]:
     except sqlite3.IntegrityError as err:
         err_msg = str(err)
         if "UNIQUE constraint failed" in err_msg or "messages.team_id" in err_msg or "messages.message_id" in err_msg:
-            # Update existing message with updated reactions, ai_ticket, and modifiedAt
+            msg_id = normalized_message.get("messageId")
             try:
-                cursor.execute(
-                    """
-                    UPDATE messages
-                    SET reactions = COALESCE(?, reactions),
-                        ai_ticket = COALESCE(?, ai_ticket),
-                        modified_at = COALESCE(?, modified_at)
-                    WHERE message_id = ?
-                    """,
-                    (reactions_json, ai_ticket_json, message_data.get("modifiedAt"), normalized_message.get("messageId")),
-                )
-            except Exception as upd_err:
-                logger.debug(f"Failed to update reactions/ai_ticket: {upd_err}")
+                row = cursor.execute(
+                    "SELECT reactions, message_text, modified_at, jira_issue_key FROM messages WHERE message_id = ?",
+                    (msg_id,),
+                ).fetchone()
 
-            logger.info(
-                "Message updated with latest reactions/edits",
-                extra={
-                    "event": "MESSAGE_UPDATED",
-                    "messageId": normalized_message.get("messageId"),
-                    "reactions": reactions,
-                },
-            )
-            return {"stored": False, "duplicate": True, "updated": True, "record": None}
+                prev_reactions = row["reactions"] if row else None
+                prev_text = row["message_text"] if row else None
+                prev_jira_key = row["jira_issue_key"] if row else None
+
+                reactions_changed = False
+                if reactions_json != prev_reactions:
+                    try:
+                        r1 = json.loads(reactions_json) if reactions_json else []
+                        r2 = json.loads(prev_reactions) if prev_reactions else []
+                        reactions_changed = (r1 != r2)
+                    except Exception:
+                        reactions_changed = (reactions_json != prev_reactions)
+
+                text_changed = bool(message_data.get("text") and message_data.get("text") != prev_text)
+
+                if reactions_changed or text_changed:
+                    cursor.execute(
+                        """
+                        UPDATE messages
+                        SET reactions = COALESCE(?, reactions),
+                            message_text = COALESCE(?, message_text),
+                            ai_ticket = COALESCE(?, ai_ticket),
+                            modified_at = COALESCE(?, modified_at)
+                        WHERE message_id = ?
+                        """,
+                        (reactions_json, message_data.get("text"), ai_ticket_json, message_data.get("modifiedAt"), msg_id),
+                    )
+                    logger.info(
+                        "Message updated with latest reactions/edits",
+                        extra={
+                            "event": "MESSAGE_UPDATED",
+                            "messageId": msg_id,
+                            "reactionsChanged": reactions_changed,
+                        },
+                    )
+                    return {
+                        "stored": False,
+                        "duplicate": True,
+                        "updated": True,
+                        "reactions_changed": reactions_changed,
+                        "prev_jira_key": prev_jira_key,
+                        "record": None,
+                    }
+                else:
+                    return {
+                        "stored": False,
+                        "duplicate": True,
+                        "updated": False,
+                        "reactions_changed": False,
+                        "prev_jira_key": prev_jira_key,
+                        "record": None,
+                    }
+            except Exception as upd_err:
+                logger.debug(f"Failed to check/update message: {upd_err}")
+                return {"stored": False, "duplicate": True, "updated": False, "reactions_changed": False, "record": None}
 
         logger.error(
             "Database failure while storing message",

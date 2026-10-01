@@ -40,15 +40,19 @@ def get_active_subscription_info() -> Dict[str, Any]:
     try:
         subs = list_subscriptions()
         target_chat = config.teams.chat_id
-        target_resource_prefix = f"/chats/{target_chat}" if target_chat else None
+        target_channel = config.teams.channel_id
 
         active_sub = None
         for sub in subs:
             res = sub.get("resource", "")
-            if target_resource_prefix and target_resource_prefix in res:
+            # Resilient check for target chat or channel ID anywhere in the resource path
+            if target_chat and target_chat in res:
                 active_sub = sub
                 break
-            elif not target_resource_prefix:
+            elif target_channel and target_channel in res:
+                active_sub = sub
+                break
+            elif not target_chat and not target_channel:
                 active_sub = sub
                 break
 
@@ -102,15 +106,28 @@ def ensure_subscription_online(public_url: Optional[str] = None) -> Dict[str, An
     status = get_active_subscription_info()
 
     if status.get("active"):
-        # If less than 30 minutes left, renew immediately
-        if status.get("remainingSeconds", 0) <= AUTO_RENEW_THRESHOLD_SECONDS:
+        current_sub_url = (status.get("notificationUrl") or "").rstrip('/')
+        # Verify the subscription is pointing to the current active tunnel
+        if current_sub_url != notification_url.rstrip('/'):
+            logger.info(
+                f"Subscription points to outdated tunnel ({current_sub_url}). Re-creating for {notification_url}...",
+                extra={"event": "SUBSCRIPTION_URL_MISMATCH"},
+            )
             try:
-                renewed = renew_subscription(status["id"], expiration_minutes=58)
-                _last_renewed_at = datetime.now(timezone.utc).isoformat()
-                return {"status": "renewed", "subscription": renewed}
-            except Exception as err:
-                logger.error(f"Failed to renew active subscription: {err}")
-        return {"status": "active", "subscription": status}
+                delete_subscription(status["id"])
+            except Exception as del_err:
+                logger.warning(f"Could not delete outdated subscription: {del_err}")
+            # Will proceed to create fresh below
+        else:
+            # If less than 30 minutes left, renew immediately
+            if status.get("remainingSeconds", 0) <= AUTO_RENEW_THRESHOLD_SECONDS:
+                try:
+                    renewed = renew_subscription(status["id"], expiration_minutes=58)
+                    _last_renewed_at = datetime.now(timezone.utc).isoformat()
+                    return {"status": "renewed", "subscription": renewed}
+                except Exception as err:
+                    logger.error(f"Failed to renew active subscription: {err}")
+            return {"status": "active", "subscription": status}
 
     # Create new subscription
     try:
@@ -200,12 +217,6 @@ async def auto_renew_loop():
                 )
                 ensure_subscription_online()
 
-            # Background message sync so messages sent during any downtime are never missed
-            try:
-                from src.services.message_service import sync_recent_messages
-                await sync_recent_messages(top=5)
-            except Exception:
-                pass
 
         except asyncio.CancelledError:
             break

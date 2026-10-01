@@ -641,6 +641,11 @@ body {
   align-items: center;
   gap: 0.75rem;
 }
+.user-info-col {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
 .user-avatar {
   width: 34px;
   height: 34px;
@@ -662,57 +667,115 @@ body {
   font-weight: 600;
   color: #F8FAFC;
 }
+.card-top-right {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
 .card-time {
   font-size: 0.75rem;
   color: var(--text-faint);
   font-family: 'JetBrains Mono', monospace;
 }
 
+.btn-inspect-subtle {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.5;
+  transition: all 0.2s ease;
+}
+.btn-inspect-subtle:hover {
+  opacity: 1;
+  color: #38BDF8;
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .card-body {
-  font-size: 0.92rem;
-  color: #E2E8F0;
-  line-height: 1.5;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 0.75rem 1rem;
+  font-size: 0.94rem;
+  color: #F1F5F9;
+  line-height: 1.55;
+  background: rgba(0, 0, 0, 0.22);
+  padding: 0.85rem 1rem;
   border-radius: var(--radius-sm);
   border-left: 3px solid var(--accent-primary);
+  word-break: break-word;
   white-space: pre-wrap;
 }
 
-.card-footer {
+/* Reactions strip */
+.reactions-strip {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  font-size: 0.75rem;
-  color: var(--text-faint);
-  margin-top: 0.25rem;
-}
-.card-meta-tags {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-.meta-tag {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.7rem;
-  background: rgba(255, 255, 255, 0.04);
-  padding: 0.15rem 0.4rem;
-  border-radius: 4px;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.15rem;
 }
 
-.card-actions {
-  display: flex;
-  gap: 0.5rem;
-}
-.btn-text {
-  background: transparent;
-  border: none;
-  color: #38BDF8;
+.reaction-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   font-size: 0.75rem;
-  cursor: pointer;
-  font-weight: 500;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--radius-full);
+  color: #E2E8F0;
 }
-.btn-text:hover { text-decoration: underline; }
+
+.reaction-pm {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #FBBF24;
+}
+
+.reaction-user {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.badge-approved {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: rgba(16, 185, 129, 0.15);
+  color: #34D399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--radius-full);
+}
+
+/* Jira Ticket Link Strip */
+.jira-created-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(0, 82, 204, 0.12);
+  border: 1px solid rgba(0, 82, 204, 0.3);
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--radius-sm);
+  margin-top: 0.2rem;
+  width: fit-content;
+}
+
+.jira-created-icon {
+  font-size: 0.9rem;
+}
+
+.jira-created-label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #94A3B8;
+}
 
 /* Empty state */
 .empty-state {

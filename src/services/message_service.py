@@ -32,35 +32,22 @@ def strip_html(html_str: str) -> str:
     return text.strip()
 
 
-def parse_resource_path(resource: str) -> Optional[Dict[str, Optional[str]]]:
+def parse_resource_path(resource: str, resource_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Optional[str]]]:
     """Parse a Microsoft Graph resource path to extract Teams identifiers.
 
     Handles group chats, top-level channel messages, and thread replies:
       /chats('...')/messages('...')
+      /chats/.../messages/...
       /teams('...')/channels('...')/messages('...')
       /teams('...')/channels('...')/messages('...')/replies('...')
+      Also supports resource = 'chats(...)/messages' with message_id in resource_data
     """
     if not resource:
         return None
 
-    # Match chat message pattern: /chats('...')/messages('...')
-    chat_pattern = re.compile(
-        r"chats\(?'?([^'/)]+)'?\)?/messages\(?'?([^'/)]+)'?\)?",
-        re.IGNORECASE,
-    )
-    match = chat_pattern.search(resource)
-    if match:
-        return {
-            "type": "chat",
-            "chat_id": match.group(1),
-            "team_id": None,
-            "channel_id": None,
-            "message_id": match.group(2),
-            "parent_message_id": None,
-            "reply_message_id": None,
-        }
+    import urllib.parse
 
-    # Match reply pattern first (more specific)
+    # 1. Match reply pattern first (more specific)
     reply_pattern = re.compile(
         r"teams\(?'?([^'/)]+)'?\)?/channels\(?'?([^'/)]+)'?\)?/messages\(?'?([^'/)]+)'?\)?/replies\(?'?([^'/)]+)'?\)?",
         re.IGNORECASE,
@@ -70,26 +57,77 @@ def parse_resource_path(resource: str) -> Optional[Dict[str, Optional[str]]]:
         return {
             "type": "channel",
             "chat_id": None,
-            "team_id": match.group(1),
-            "channel_id": match.group(2),
-            "message_id": match.group(4),  # The reply ID is the actual message
-            "parent_message_id": match.group(3),
-            "reply_message_id": match.group(4),
+            "team_id": urllib.parse.unquote(match.group(1)),
+            "channel_id": urllib.parse.unquote(match.group(2)),
+            "message_id": urllib.parse.unquote(match.group(4)),
+            "parent_message_id": urllib.parse.unquote(match.group(3)),
+            "reply_message_id": urllib.parse.unquote(match.group(4)),
         }
 
-    # Match top-level channel message pattern
-    message_pattern = re.compile(
+    # 2. Match channel message with message ID in path
+    channel_pattern = re.compile(
         r"teams\(?'?([^'/)]+)'?\)?/channels\(?'?([^'/)]+)'?\)?/messages\(?'?([^'/)]+)'?\)?",
         re.IGNORECASE,
     )
-    match = message_pattern.search(resource)
+    match = channel_pattern.search(resource)
     if match:
         return {
             "type": "channel",
             "chat_id": None,
-            "team_id": match.group(1),
-            "channel_id": match.group(2),
-            "message_id": match.group(3),
+            "team_id": urllib.parse.unquote(match.group(1)),
+            "channel_id": urllib.parse.unquote(match.group(2)),
+            "message_id": urllib.parse.unquote(match.group(3)),
+            "parent_message_id": None,
+            "reply_message_id": None,
+        }
+
+    # 3. Match chat message with message ID in path: /chats('...')/messages('...')
+    chat_pattern = re.compile(
+        r"chats\(?'?([^'/)]+)'?\)?/messages\(?'?([^'/)]+)'?\)?",
+        re.IGNORECASE,
+    )
+    match = chat_pattern.search(resource)
+    if match:
+        return {
+            "type": "chat",
+            "chat_id": urllib.parse.unquote(match.group(1)),
+            "team_id": None,
+            "channel_id": None,
+            "message_id": urllib.parse.unquote(match.group(2)),
+            "parent_message_id": None,
+            "reply_message_id": None,
+        }
+
+    # 4. Fallback: match chat path /chats('...')/messages and extract message_id from resource_data
+    chat_base_pattern = re.compile(
+        r"chats\(?'?([^'/)]+)'?\)?/messages",
+        re.IGNORECASE,
+    )
+    match = chat_base_pattern.search(resource)
+    if match and resource_data and resource_data.get("id"):
+        return {
+            "type": "chat",
+            "chat_id": urllib.parse.unquote(match.group(1)),
+            "team_id": None,
+            "channel_id": None,
+            "message_id": str(resource_data["id"]),
+            "parent_message_id": None,
+            "reply_message_id": None,
+        }
+
+    # 5. Fallback: match channel path /teams('...')/channels('...')/messages and extract message_id from resource_data
+    channel_base_pattern = re.compile(
+        r"teams\(?'?([^'/)]+)'?\)?/channels\(?'?([^'/)]+)'?\)?/messages",
+        re.IGNORECASE,
+    )
+    match = channel_base_pattern.search(resource)
+    if match and resource_data and resource_data.get("id"):
+        return {
+            "type": "channel",
+            "chat_id": None,
+            "team_id": urllib.parse.unquote(match.group(1)),
+            "channel_id": urllib.parse.unquote(match.group(2)),
+            "message_id": str(resource_data["id"]),
             "parent_message_id": None,
             "reply_message_id": None,
         }
@@ -126,15 +164,19 @@ def normalize_message(
     ]
 
     reactions_raw = graph_msg.get("reactions") or []
-    reactions = [
-        {
-            "reactionType": r.get("reactionType"),
-            "displayName": r.get("displayName") or "Like",
-            "userId": (r.get("user") or {}).get("user", {}).get("id"),
+    reactions = []
+    for r in reactions_raw:
+        # In Graph API, user info is located in r.user.user
+        user_identity = (r.get("user") or {}).get("user") or {}
+        user_name = user_identity.get("displayName") or r.get("displayName") or ""
+        user_id = user_identity.get("id") or (r.get("user") or {}).get("id") or r.get("userId")
+        reaction_type = r.get("reactionType") or "like"
+        reactions.append({
+            "reactionType": reaction_type,
+            "displayName": user_name,
+            "userId": user_id,
             "createdDateTime": r.get("createdDateTime"),
-        }
-        for r in reactions_raw
-    ]
+        })
 
     return {
         "messageId": graph_msg.get("id"),
@@ -200,7 +242,8 @@ def print_message_summary(normalized: Dict[str, Any], sender_role: str) -> None:
 async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     """Process a single Graph change notification for a Teams message (chat or channel)."""
     resource = notification.get("resource")
-    ids = parse_resource_path(resource)
+    resource_data = notification.get("resourceData") or {}
+    ids = parse_resource_path(resource, resource_data)
 
     if not ids:
         logger.error(
@@ -214,11 +257,14 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
 
     if msg_type == "chat":
         chat_id = ids["chat_id"]
-        if config.teams.chat_id and chat_id != config.teams.chat_id:
+        import urllib.parse
+        clean_expected = urllib.parse.unquote(config.teams.chat_id or "").strip().lower()
+        clean_received = urllib.parse.unquote(chat_id or "").strip().lower()
+        if clean_expected and clean_received != clean_expected:
             logger.warning(
                 "Notification for unexpected chat",
                 extra={
-                    "event": "GRAPH_API_ERROR",
+                    "event": "GRAPH_API_WARNING",
                     "expected": config.teams.chat_id,
                     "received": chat_id,
                 },
@@ -313,11 +359,16 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     # Persist in SQLite
     result = store_message(normalized)
 
-    # Closed-loop: Automatically create Jira ticket if PM (Santosh Yadav) reacted with approval
-    jira_created = await check_and_auto_create_jira_ticket(normalized, sender_role)
-    if jira_created:
-        normalized["jira_issue_key"] = jira_created.get("key")
-        normalized["jira_issue_url"] = jira_created.get("url")
+    # Closed-loop: Automatically create Jira ticket ONLY when PM (Santosh Yadav) reacted with approval
+    # Strictly do NOT run on brand new "created" messages (must have PM emoji approval first),
+    # and only trigger if reactions actually changed or if this was an update notification with reactions.
+    change_type = (notification.get("changeType") or "").lower()
+    jira_created = None
+    if change_type != "created" and result.get("reactions_changed", False):
+        jira_created = await check_and_auto_create_jira_ticket(normalized, sender_role)
+        if jira_created:
+            normalized["jira_issue_key"] = jira_created.get("key")
+            normalized["jira_issue_url"] = jira_created.get("url")
 
     is_new = bool(result.get("stored")) and not bool(result.get("duplicate"))
     event_type = "NEW_MESSAGE" if is_new else "MESSAGE_UPDATED"
@@ -510,11 +561,8 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
 
         result = store_message(normalized)
 
-        # Closed-loop: Automatically create Jira ticket if PM approved via reaction
-        jira_created = await check_and_auto_create_jira_ticket(normalized, sender_role)
-        if jira_created:
-            normalized["jira_issue_key"] = jira_created.get("key")
-            normalized["jira_issue_url"] = jira_created.get("url")
+        # Do NOT auto-create Jira tickets during background sync.
+        # Auto-creation is strictly reserved for live incoming PM reaction events.
 
         if result.get("stored"):
             new_count += 1
@@ -530,9 +578,9 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
                 })
             except Exception:
                 pass
-        elif result.get("updated"):
+        elif result.get("updated") and result.get("reactions_changed"):
             updated_count += 1
-            # Broadcast updated reaction/edit
+            # Broadcast updated reaction/edit only if reactions genuinely changed
             try:
                 from src.services.broadcaster import broadcast_message
                 await broadcast_message({

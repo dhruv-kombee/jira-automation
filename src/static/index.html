@@ -100,9 +100,6 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Sync Teams
           </button>
-          <button id="btnRecreateSub" class="btn btn-outline-purple" title="Create a fresh subscription">
-            Re-create
-          </button>
         </div>
       </div>
     </section>
@@ -114,7 +111,7 @@
         <div class="metric-body">
           <span class="metric-label">Total Messages Captured</span>
           <span class="metric-value" id="valTotal">0</span>
-          <span class="metric-meta">Saved in SQLite WAL</span>
+          <span class="metric-meta">Saved in SQLite</span>
         </div>
       </div>
 
@@ -123,7 +120,7 @@
         <div class="metric-body">
           <span class="metric-label">Client (Dhruv dobariya)</span>
           <span class="metric-value" id="valClient">0</span>
-          <span class="metric-meta role-tag role-client">CLIENT TICKET REQUESTS</span>
+          <span class="metric-meta role-tag role-client">Client Messages</span>
         </div>
       </div>
 
@@ -132,7 +129,7 @@
         <div class="metric-body">
           <span class="metric-label">PM (Santosh Yadav)</span>
           <span class="metric-value" id="valPm">0</span>
-          <span class="metric-meta role-tag role-pm">PM APPROVALS</span>
+          <span class="metric-meta role-tag role-pm">PM Approvals</span>
         </div>
       </div>
 
@@ -141,7 +138,7 @@
         <div class="metric-body">
           <span class="metric-label">Developer (Musaib Khan)</span>
           <span class="metric-value" id="valDev">0</span>
-          <span class="metric-meta role-tag role-dev">ENGINEER UPDATES</span>
+          <span class="metric-meta role-tag role-dev">Developer Updates</span>
         </div>
       </div>
     </section>
@@ -328,6 +325,7 @@
         <button class="modal-close" id="btnClosePayload">&times;</button>
       </div>
       <div class="modal-body">
+        <div id="payloadActionsBar" style="display: flex; gap: 8px; margin-bottom: 12px;"></div>
         <pre class="json-code" id="payloadCode"></pre>
       </div>
       <div class="modal-footer">

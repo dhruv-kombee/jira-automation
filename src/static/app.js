@@ -50,8 +50,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   await fetchStatus();
   await fetchMessages();
 
-  // Periodic status poll as background sync
-  setInterval(fetchStatus, 15000);
+  // Periodic status poll as background sync (30s)
+  setInterval(fetchStatus, 30000);
 });
 
 // Setup Events
@@ -449,66 +449,39 @@ function createMessageCard(msg, role) {
   const pmId = (systemStatus?.roles?.pm?.id || '').toLowerCase().trim();
   const pmApproved = reactions.some(r => {
     const uId = (r.userId || '').toLowerCase().trim();
-    const type = (r.reactionType || r.displayName || '').toLowerCase();
-    return uId === pmId && (type === 'like' || type.includes('like') || type.includes('👍') || type === 'heart');
+    const dispName = (r.displayName || '').toLowerCase().trim();
+    const type = (r.reactionType || '').toLowerCase();
+    const isPm = (pmId && uId === pmId) || dispName.includes('santosh');
+    const isPos = ['like', '👍', 'heart', 'thumbsup'].some(p => type.includes(p));
+    return isPm && isPos;
   });
 
-  // Build reaction badges HTML
+  // Build reaction badges HTML - ONLY if reactions exist
   let reactionsHtml = '';
   if (reactions.length > 0) {
     reactionsHtml = `
       <div class="reactions-strip">
         ${reactions.map(r => {
-      const isPm = (r.userId || '').toLowerCase().trim() === pmId;
-      const emoji = (r.reactionType === 'like' || r.reactionType === '👍' || (r.displayName || '').toLowerCase() === 'like') ? '👍' : (r.reactionType === 'heart' ? '❤️' : (r.reactionType || '👍'));
-      return `<span class="reaction-badge ${isPm ? 'reaction-pm' : ''}" title="${isPm ? 'PM Approved (Santosh)' : 'Reaction'}">${emoji}</span>`;
-    }).join('')}
-        ${pmApproved ? '<span class="badge-approved">✓ APPROVED BY PM (Santosh)</span>' : ''}
-      </div>
-    `;
-  } else if (role === 'CLIENT') {
-    reactionsHtml = `
-      <div class="reactions-strip">
-        <span class="badge-pending-reaction">⏳ Awaiting PM Reaction (👍) in Teams</span>
+          const isPm = ((r.userId || '').toLowerCase().trim() === pmId) || (r.displayName || '').toLowerCase().includes('santosh');
+          const emoji = (r.reactionType === 'like' || r.reactionType === '👍') ? '👍' : (r.reactionType === 'heart' ? '❤️' : (r.reactionType || '👍'));
+          const userName = r.displayName ? ` <span class="reaction-user">(${escapeHtml(r.displayName)})</span>` : '';
+          return `<span class="reaction-badge ${isPm ? 'reaction-pm' : ''}" title="${isPm ? 'PM Approved (Santosh)' : 'Reaction'}">${emoji}${userName}</span>`;
+        }).join('')}
+        ${pmApproved ? '<span class="badge-approved">✓ APPROVED BY PM</span>' : ''}
       </div>
     `;
   }
 
-  // Parse AI-extracted Jira ticket
-  let aiTicket = null;
-  try {
-    if (typeof msg.ai_ticket === 'string') {
-      aiTicket = JSON.parse(msg.ai_ticket);
-    } else if (msg.ai_ticket && typeof msg.ai_ticket === 'object') {
-      aiTicket = msg.ai_ticket;
-    }
-  } catch (e) {
-    aiTicket = null;
-  }
-
-  let aiTicketHtml = '';
-  if (aiTicket && aiTicket.is_ticket_request) {
-    const isBug = (aiTicket.issue_type || '').toLowerCase() === 'bug';
-    const typeColor = isBug ? '#EF4444' : '#3B82F6';
-    const isHighPrio = ['high', 'highest'].includes((aiTicket.priority || '').toLowerCase());
-    const prioColor = isHighPrio ? '#F59E0B' : '#10B981';
-
-    aiTicketHtml = `
-      <div class="ai-ticket-box">
-        <div class="ai-ticket-header">
-          <div class="ai-ticket-title-row">
-            <span class="ai-sparkle">✨</span>
-            <span class="ai-header-badge">AI EXTRACTED JIRA TICKET</span>
-            <span class="ai-type-badge" style="background: ${typeColor}22; color: ${typeColor}; border: 1px solid ${typeColor}55;">${escapeHtml(aiTicket.issue_type || 'Task')}</span>
-            <span class="ai-prio-badge" style="background: ${prioColor}22; color: ${prioColor}; border: 1px solid ${prioColor}55;">${escapeHtml(aiTicket.priority || 'Medium')}</span>
-          </div>
-          <span class="ai-extractor-tag font-mono">${escapeHtml(aiTicket.extractor || 'Gemini')}</span>
-        </div>
-        <div class="ai-ticket-summary">${escapeHtml(aiTicket.summary || '')}</div>
-        <div class="ai-ticket-details">
-          ${aiTicket.suggested_assignee ? `<span class="ai-assignee-tag">👤 Assignee: <strong>${escapeHtml(aiTicket.suggested_assignee)}</strong></span>` : ''}
-          ${(aiTicket.labels || []).map(l => `<span class="ai-label-pill">#${escapeHtml(l)}</span>`).join('')}
-        </div>
+  // Jira Ticket Status - ONLY show if a Jira ticket was actually created
+  let jiraTicketHtml = '';
+  if (msg.jira_issue_key) {
+    jiraTicketHtml = `
+      <div class="jira-created-strip">
+        <span class="jira-created-icon">🎟️</span>
+        <span class="jira-created-label">Jira Issue:</span>
+        <a href="${escapeHtml(msg.jira_issue_url || '#')}" target="_blank" class="jira-ticket-link-badge">
+          ${escapeHtml(msg.jira_issue_key)} ↗
+        </a>
       </div>
     `;
   }
@@ -517,115 +490,114 @@ function createMessageCard(msg, role) {
     <div class="card-top">
       <div class="card-user">
         <div class="user-avatar ${avatarClass}">${initials}</div>
-        <div>
+        <div class="user-info-col">
           <span class="user-name">${escapeHtml(msg.sender_display_name || 'Unknown User')}</span>
-          <span class="role-tag ${roleClass}" style="margin-left: 0.5rem;">${role}</span>
+          <span class="role-tag ${roleClass}">${role}</span>
         </div>
       </div>
-      <span class="card-time">${formattedTime}</span>
+      <div class="card-top-right">
+        <span class="card-time">${escapeHtml(formattedTime)}</span>
+        <button class="btn-inspect-subtle btn-inspect" title="Inspect Message Details" data-id="${msg.id}">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+        </button>
+      </div>
     </div>
 
     <div class="card-body">${escapeHtml(msg.message_text || '')}</div>
-    ${aiTicketHtml}
     ${reactionsHtml}
-
-    <div class="card-footer">
-      <div class="card-meta-tags">
-        <span class="meta-tag">MSG: ${msg.message_id ? msg.message_id.slice(-6) : 'N/A'}</span>
-        ${msg.chat_id ? '<span class="meta-tag">Group Chat</span>' : '<span class="meta-tag">Channel</span>'}
-      </div>
-      <div class="card-actions">
-        ${msg.jira_issue_key ? `<a href="${escapeHtml(msg.jira_issue_url || '#')}" target="_blank" class="jira-ticket-link-badge">🎟️ Jira: ${escapeHtml(msg.jira_issue_key)} ↗</a>` : ''}
-        ${!msg.jira_issue_key && aiTicket && aiTicket.is_ticket_request ? `
-          <button class="btn-text btn-create-jira" data-mid="${msg.message_id}">🚀 Create in Jira</button>
-          <button class="btn-text btn-sim-pm" data-mid="${msg.message_id}">👍 PM Approve</button>
-        ` : ''}
-        ${!aiTicket ? `<button class="btn-text btn-extract-ai" data-mid="${msg.message_id}">✨ Extract Jira Ticket</button>` : ''}
-        <button class="btn-text btn-inspect" data-id="${msg.id}">Inspect Payload</button>
-      </div>
-    </div>
+    ${jiraTicketHtml}
   `;
 
-  // Attach button listeners
-  const btnSimPm = card.querySelector('.btn-sim-pm');
-  if (btnSimPm) {
-    btnSimPm.addEventListener('click', async () => {
-      try {
-        btnSimPm.disabled = true;
-        btnSimPm.innerText = 'Approving...';
-        const res = await fetch(`/api/test/simulate-pm-approval/${btnSimPm.dataset.mid}`, { method: 'POST' });
-        const data = await res.json();
-        if (res.ok) {
-          showToast('✓ PM Santosh Yadav approved with 👍 in Teams!', 'success');
-          if (data.ticket && data.ticket.key) {
-            showToast(`🎉 Auto-created Jira Ticket: ${data.ticket.key}!`, 'success');
-          }
-          await fetchMessages();
-        } else {
-          showToast(data.detail || 'Approval failed', 'error');
-        }
-      } catch (err) {
-        showToast('Approval network error', 'error');
-      } finally {
-        btnSimPm.disabled = false;
-        btnSimPm.innerText = '👍 PM Approve';
-      }
+  // Attach inspect button listener
+  const btnInspect = card.querySelector('.btn-inspect');
+  if (btnInspect) {
+    btnInspect.addEventListener('click', () => {
+      openPayloadModal(msg);
     });
   }
-
-  const btnCreateJira = card.querySelector('.btn-create-jira');
-  if (btnCreateJira) {
-    btnCreateJira.addEventListener('click', async () => {
-      try {
-        btnCreateJira.disabled = true;
-        btnCreateJira.innerText = 'Creating in Jira...';
-        const res = await fetch(`/api/jira/create-from-message/${btnCreateJira.dataset.mid}`, { method: 'POST' });
-        const data = await res.json();
-        if (res.ok) {
-          showToast(`🎉 Jira Ticket Created: ${data.key}!`, 'success');
-          if (data.url) window.open(data.url, '_blank');
-          await fetchMessages();
-        } else {
-          showToast(data.detail || data.error || 'Failed to create Jira ticket', 'error');
-        }
-      } catch (err) {
-        showToast('Jira API error', 'error');
-      } finally {
-        btnCreateJira.disabled = false;
-        btnCreateJira.innerText = '🚀 Create in Jira';
-      }
-    });
-  }
-
-  const btnExtract = card.querySelector('.btn-extract-ai');
-  if (btnExtract) {
-    btnExtract.addEventListener('click', async () => {
-      try {
-        btnExtract.disabled = true;
-        btnExtract.innerText = 'Extracting...';
-        const res = await fetch(`/api/messages/${btnExtract.dataset.mid}/extract-ticket`, { method: 'POST' });
-        const data = await res.json();
-        if (res.ok) {
-          showToast(`Jira ticket extracted: ${data.aiTicket?.summary || 'Success'}`, 'success');
-          await fetchMessages();
-        } else {
-          showToast(data.detail || 'Extraction failed', 'error');
-        }
-      } catch (err) {
-        showToast('Error extracting ticket', 'error');
-      } finally {
-        btnExtract.disabled = false;
-        btnExtract.innerText = '✨ Extract Jira Ticket';
-      }
-    });
-  }
-
-  card.querySelector('.btn-inspect').addEventListener('click', () => {
-    elPayloadCode.innerText = JSON.stringify(msg, null, 2);
-    elPayloadModal.classList.add('active');
-  });
 
   return card;
+}
+
+function openPayloadModal(msg) {
+  elPayloadCode.innerText = JSON.stringify(msg, null, 2);
+
+  const actionsBar = document.getElementById('payloadActionsBar');
+  if (actionsBar) {
+    actionsBar.innerHTML = '';
+
+    if (msg.jira_issue_key) {
+      const linkJira = document.createElement('a');
+      linkJira.className = 'btn btn-primary';
+      linkJira.style.fontSize = '12px';
+      linkJira.style.padding = '5px 12px';
+      linkJira.style.textDecoration = 'none';
+      linkJira.href = msg.jira_issue_url || '#';
+      linkJira.target = '_blank';
+      linkJira.innerHTML = `🎟️ Open ${escapeHtml(msg.jira_issue_key)} in Jira ↗`;
+      actionsBar.appendChild(linkJira);
+    } else {
+      const btnPm = document.createElement('button');
+      btnPm.className = 'btn btn-secondary';
+      btnPm.style.fontSize = '12px';
+      btnPm.style.padding = '5px 12px';
+      btnPm.innerHTML = '👍 Test PM Approval (Simulate)';
+      btnPm.addEventListener('click', async () => {
+        try {
+          btnPm.disabled = true;
+          btnPm.innerText = 'Approving...';
+          const res = await fetch(`/api/test/simulate-pm-approval/${msg.message_id}`, { method: 'POST' });
+          const data = await res.json();
+          if (res.ok) {
+            showToast('✓ PM Santosh Yadav approved with 👍 in Teams!', 'success');
+            if (data.ticket && data.ticket.key) {
+              showToast(`🎉 Auto-created Jira Ticket: ${data.ticket.key}!`, 'success');
+            }
+            elPayloadModal.classList.remove('active');
+            await fetchMessages();
+          } else {
+            showToast(data.detail || 'Approval failed', 'error');
+          }
+        } catch (err) {
+          showToast('Approval network error', 'error');
+        } finally {
+          btnPm.disabled = false;
+          btnPm.innerText = '👍 Test PM Approval (Simulate)';
+        }
+      });
+      actionsBar.appendChild(btnPm);
+
+      const btnCreate = document.createElement('button');
+      btnCreate.className = 'btn btn-secondary';
+      btnCreate.style.fontSize = '12px';
+      btnCreate.style.padding = '5px 12px';
+      btnCreate.innerHTML = '🚀 Force Create in Jira';
+      btnCreate.addEventListener('click', async () => {
+        try {
+          btnCreate.disabled = true;
+          btnCreate.innerText = 'Creating...';
+          const res = await fetch(`/api/jira/create-from-message/${msg.message_id}`, { method: 'POST' });
+          const data = await res.json();
+          if (res.ok) {
+            showToast(`🎉 Jira Ticket Created: ${data.key}!`, 'success');
+            if (data.url) window.open(data.url, '_blank');
+            elPayloadModal.classList.remove('active');
+            await fetchMessages();
+          } else {
+            showToast(data.detail || data.error || 'Failed to create Jira ticket', 'error');
+          }
+        } catch (err) {
+          showToast('Jira API error', 'error');
+        } finally {
+          btnCreate.disabled = false;
+          btnCreate.innerText = '🚀 Force Create in Jira';
+        }
+      });
+      actionsBar.appendChild(btnCreate);
+    }
+  }
+
+  elPayloadModal.classList.add('active');
 }
 
 // WebSocket Connection
@@ -670,14 +642,15 @@ function initWebSocket() {
           const pmId = (systemStatus?.roles?.pm?.id || '').toLowerCase().trim();
           const pmApproved = reactions.some(r => {
             const uId = (r.userId || '').toLowerCase().trim();
-            const type = (r.reactionType || r.displayName || '').toLowerCase();
-            return uId === pmId && (type === 'like' || type.includes('like') || type.includes('👍') || type === 'heart');
+            const dispName = (r.displayName || '').toLowerCase().trim();
+            const type = (r.reactionType || '').toLowerCase();
+            const isPm = (pmId && uId === pmId) || dispName.includes('santosh');
+            const isPos = ['like', '👍', 'heart', 'thumbsup'].some(p => type.includes(p));
+            return isPm && isPos;
           });
 
           if (pmApproved) {
             showToast('✓ PM Santosh Yadav approved ticket with 👍 in Teams!', 'success');
-          } else {
-            showToast('Message updated in Teams (reaction or edit)', 'info');
           }
 
           // Refresh list and metrics

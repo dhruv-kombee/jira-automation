@@ -57,10 +57,10 @@ def is_pm_approval(reactions: Optional[list]) -> bool:
         disp_name = (r.get("displayName") or "").lower().strip()
         r_type = (r.get("reactionType") or "").lower().strip()
 
-        # Is reaction from PM?
-        is_pm = (pm_id and u_id == pm_id) or ("santosh" in disp_name)
-        # Is reaction positive/approval?
-        is_approval = any(pos in r_type for pos in ["like", "👍", "heart"]) or (r.get("displayName") == "Like")
+        # Is reaction from PM? Matches configured PM GUID or name containing "santosh"
+        is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
+        # Is reaction positive/approval? Strictly thumbs-up, like, or heart
+        is_approval = any(pos in r_type for pos in ["like", "👍", "heart", "thumbsup"])
 
         if is_pm and is_approval:
             return True

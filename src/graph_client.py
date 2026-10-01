@@ -66,25 +66,25 @@ def _handle_graph_error(response: httpx.Response, context: Optional[Dict[str, An
 
     try:
         error_json = response.json()
-        message = error_json.get("error", {}).get("message", error_text)
+        error_desc = error_json.get("error", {}).get("message", error_text)
     except Exception:
-        message = error_text
+        error_desc = error_text
 
     context_info = {
         "statusCode": status_code,
-        "message": message,
+        "graphError": error_desc,
         **context,
     }
 
     if status_code in (401, 403):
-        logger.error("Graph authentication/permission failure", extra={"event": "AUTHENTICATION_ERROR", **context_info})
+        logger.error(f"Graph authentication/permission failure: {error_desc}", extra={"event": "AUTHENTICATION_ERROR", **context_info})
     elif status_code == 404:
-        logger.error("Graph resource not found", extra={"event": "GRAPH_API_ERROR", **context_info})
+        logger.error(f"Graph resource not found: {error_desc}", extra={"event": "GRAPH_API_ERROR", **context_info})
     elif status_code == 429:
         retry_after = response.headers.get("retry-after", "unknown")
-        logger.warning("Graph API throttled", extra={"event": "GRAPH_API_ERROR", "retryAfter": retry_after, **context_info})
+        logger.warning(f"Graph API throttled: {error_desc}", extra={"event": "GRAPH_API_ERROR", "retryAfter": retry_after, **context_info})
     else:
-        logger.error("Graph API error", extra={"event": "GRAPH_API_ERROR", **context_info})
+        logger.error(f"Graph API error ({status_code}): {error_desc}", extra={"event": "GRAPH_API_ERROR", **context_info})
 
     response.raise_for_status()
 
@@ -252,9 +252,10 @@ def create_subscription(
     ).isoformat().replace("+00:00", "Z")
 
     if chat_id:
-        resource_path = f"/chats/{chat_id}/messages"
+        clean_chat = chat_id.strip()
+        resource_path = f"chats/{clean_chat}/messages"
     elif team_id and channel_id:
-        resource_path = f"/teams/{team_id}/channels/{channel_id}/messages"
+        resource_path = f"teams/{team_id.strip()}/channels/{channel_id.strip()}/messages"
     else:
         raise ValueError("Either chat_id or both team_id and channel_id must be provided")
 
