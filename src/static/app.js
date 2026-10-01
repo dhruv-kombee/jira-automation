@@ -81,31 +81,6 @@ function setupEventListeners() {
     });
   }
 
-  // Test Jira Ticket button
-  const elBtnTestJira = document.getElementById('btnTestJira');
-  if (elBtnTestJira) {
-    elBtnTestJira.addEventListener('click', async () => {
-      try {
-        elBtnTestJira.disabled = true;
-        elBtnTestJira.innerText = 'Creating Test Ticket...';
-        const res = await fetch('/api/jira/test-ticket', { method: 'POST' });
-        const data = await res.json();
-        if (res.ok) {
-          showToast(`Jira Test Ticket Created: ${data.key}!`, 'success');
-          if (data.url) window.open(data.url, '_blank');
-          await fetchMessages();
-        } else {
-          showToast(data.detail || 'Test ticket creation failed', 'error');
-        }
-      } catch (e) {
-        showToast('Jira network error', 'error');
-      } finally {
-        elBtnTestJira.disabled = false;
-        elBtnTestJira.innerText = '⚡ Test Ticket';
-      }
-    });
-  }
-
   elBtnRefresh.addEventListener('click', () => {
     fetchStatus();
     fetchMessages();
@@ -140,25 +115,27 @@ function setupEventListeners() {
     }
   });
 
-  elBtnRecreateSub.addEventListener('click', async () => {
-    try {
-      elBtnRecreateSub.disabled = true;
-      elBtnRecreateSub.innerText = 'Creating...';
-      const res = await fetch('/api/subscription/create', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok) {
-        showToast('Graph subscription ensured & active!', 'success');
-        fetchStatus();
-      } else {
-        showToast(data.detail || 'Failed to create subscription', 'error');
+  if (elBtnRecreateSub) {
+    elBtnRecreateSub.addEventListener('click', async () => {
+      try {
+        elBtnRecreateSub.disabled = true;
+        elBtnRecreateSub.innerText = 'Creating...';
+        const res = await fetch('/api/subscription/create', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          showToast('Graph subscription ensured & active!', 'success');
+          fetchStatus();
+        } else {
+          showToast(data.detail || 'Failed to create subscription', 'error');
+        }
+      } catch (err) {
+        showToast('Network error', 'error');
+      } finally {
+        elBtnRecreateSub.disabled = false;
+        elBtnRecreateSub.innerText = 'Re-create';
       }
-    } catch (err) {
-      showToast('Network error', 'error');
-    } finally {
-      elBtnRecreateSub.disabled = false;
-      elBtnRecreateSub.innerText = 'Re-create';
-    }
-  });
+    });
+  }
 
   // Filter Pills
   elRoleFilterPills.addEventListener('click', (e) => {
@@ -228,6 +205,53 @@ function setupEventListeners() {
     navigator.clipboard.writeText(elPayloadCode.innerText);
     showToast('JSON payload copied!', 'success');
   });
+
+  // Test Jira Ticket button
+  const elBtnTestJira = document.getElementById('btnTestJira');
+  if (elBtnTestJira) {
+    elBtnTestJira.addEventListener('click', async () => {
+      try {
+        elBtnTestJira.disabled = true;
+        elBtnTestJira.innerText = 'Creating...';
+        const res = await fetch('/api/jira/test-ticket', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          showToast(`✅ Jira ticket created: ${data.key}!`, 'success');
+          fetchStatus();
+        } else {
+          showToast(`Error: ${data.detail || data.error || 'Failed to create ticket'}`, 'error');
+        }
+      } catch (err) {
+        showToast('Network error testing Jira ticket', 'error');
+      } finally {
+        elBtnTestJira.disabled = false;
+        elBtnTestJira.innerText = '⚡ Test Ticket';
+      }
+    });
+  }
+
+  // Test Teams Webhook button
+  const elBtnTestWebhook = document.getElementById('btnTestWebhook');
+  if (elBtnTestWebhook) {
+    elBtnTestWebhook.addEventListener('click', async () => {
+      try {
+        elBtnTestWebhook.disabled = true;
+        elBtnTestWebhook.innerText = 'Sending...';
+        const res = await fetch('/api/teams/test-webhook', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          showToast('✅ Test card posted to Teams group chat!', 'success');
+        } else {
+          showToast(`Error: ${data.detail || data.error || 'Failed to post to Teams'}`, 'error');
+        }
+      } catch (err) {
+        showToast('Network error calling test webhook', 'error');
+      } finally {
+        elBtnTestWebhook.disabled = false;
+        elBtnTestWebhook.innerText = '⚡ Test Card';
+      }
+    });
+  }
 }
 
 // Fetch Status
@@ -310,6 +334,31 @@ function renderStatus(data) {
     }
     if (elJiraDesc) elJiraDesc.innerText = 'Set JIRA credentials in .env to enable';
     if (elBtnTestJiraEl) elBtnTestJiraEl.style.display = 'none';
+  }
+
+  // Phase 5: Teams Webhook Card
+  const p5 = data.pipeline?.phase5;
+  const elPhase5 = document.getElementById('phase5Card');
+  const elWebhookTag = document.getElementById('teamsWebhookTag');
+  const elWebhookDesc = document.getElementById('teamsWebhookDesc');
+  const elBtnTestWebhookEl = document.getElementById('btnTestWebhook');
+
+  if (p5 && p5.webhookConfigured) {
+    if (elPhase5) elPhase5.className = 'pipe-step step-active';
+    if (elWebhookTag) {
+      elWebhookTag.className = 'status-tag status-active';
+      elWebhookTag.innerText = 'CONNECTED';
+    }
+    if (elWebhookDesc) elWebhookDesc.innerText = 'Teams Workflow Webhook Active';
+    if (elBtnTestWebhookEl) elBtnTestWebhookEl.style.display = 'inline-block';
+  } else {
+    if (elPhase5) elPhase5.className = 'pipe-step step-pending';
+    if (elWebhookTag) {
+      elWebhookTag.className = 'status-tag status-pending';
+      elWebhookTag.innerText = 'WEBHOOK READY';
+    }
+    if (elWebhookDesc) elWebhookDesc.innerText = 'Add TEAMS_WEBHOOK_URL to .env';
+    if (elBtnTestWebhookEl) elBtnTestWebhookEl.style.display = 'none';
   }
 
   // Re-render messages with refreshed roles & metrics

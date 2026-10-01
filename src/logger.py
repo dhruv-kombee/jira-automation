@@ -71,3 +71,4 @@ def setup_logger(name: str = 'teams-mvp') -> logging.Logger:
 
 
 logger = setup_logger()
+get_logger = setup_logger

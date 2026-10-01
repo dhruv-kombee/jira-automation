@@ -19,6 +19,7 @@ class TeamsConfig:
         self.chat_id = os.getenv('TEAMS_CHAT_ID')
         self.team_id = os.getenv('TEAMS_TEAM_ID')
         self.channel_id = os.getenv('TEAMS_CHANNEL_ID')
+        self.webhook_url = os.getenv('TEAMS_WEBHOOK_URL')
 
 
 class RolesConfig:

@@ -185,7 +185,7 @@
         <div class="glass-panel side-panel">
           <div class="panel-header">
             <h3>Automation Pipeline</h3>
-            <span class="badge-mini badge-phase">PHASE 1-4</span>
+            <span class="badge-mini badge-phase">PHASE 1-5</span>
           </div>
 
           <div class="pipeline-steps">
@@ -224,6 +224,18 @@
                 <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
                   <span class="status-tag status-pending" id="jiraStatusTag">PENDING JIRA KEYS</span>
                   <button id="btnTestJira" class="btn-text" style="display:none; padding:2px 8px; font-size:11px; border:1px solid #10B981; border-radius:4px; color:#10B981; background:rgba(16,185,129,0.1);">⚡ Test Ticket</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="pipe-step step-pending" id="phase5Card">
+              <div class="step-num">5</div>
+              <div class="step-info">
+                <h4>5. Teams Confirmation Reply</h4>
+                <p id="teamsWebhookDesc">Power Automate / Workflow Webhook</p>
+                <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
+                  <span class="status-tag status-pending" id="teamsWebhookTag">WEBHOOK READY</span>
+                  <button id="btnTestWebhook" class="btn-text" style="display:none; padding:2px 8px; font-size:11px; border:1px solid #06B6D4; border-radius:4px; color:#06B6D4; background:rgba(6,182,212,0.1);">⚡ Test Card</button>
                 </div>
               </div>
             </div>

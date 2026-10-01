@@ -102,6 +102,11 @@ def get_system_status():
                 "projectKey": config.jira.project_key,
                 "baseUrl": config.jira.base_url,
             },
+            "phase5": {
+                "name": "Teams Confirmation Reply",
+                "status": "active" if config.teams.webhook_url else "ready_for_webhook",
+                "webhookConfigured": bool(config.teams.webhook_url),
+            },
         },
         "metrics": {
             "total": total_messages,
@@ -392,6 +397,48 @@ async def create_jira_from_message(message_id: str):
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to create Jira issue"))
 
+    # Post confirmation reply back to Teams
+    try:
+        from src.services.teams_notifier import send_ticket_created_notification
+        await send_ticket_created_notification(
+            ticket_key=res.get("key"),
+            ticket_url=res.get("url"),
+            summary=res.get("summary") or ai_ticket.get("summary", ""),
+            issue_type=ai_ticket.get("issue_type", "Task"),
+            priority=ai_ticket.get("priority", "Medium"),
+            assignee=ai_ticket.get("suggested_assignee") or "Unassigned",
+            reporter=msg.get("sender_display_name") or "Teams User",
+            approval_note="Created via Automation Dashboard",
+            chat_id=msg.get("chat_id"),
+            team_id=msg.get("team_id"),
+            channel_id=msg.get("channel_id"),
+            parent_message_id=message_id,
+        )
+    except Exception as notify_err:
+        logger.warning(f"Could not send Teams confirmation for manual ticket: {notify_err}")
+
+    return res
+
+
+@router.post("/api/teams/test-webhook")
+async def test_teams_webhook():
+    """Send a test card to the configured Microsoft Teams Webhook."""
+    if not config.teams.webhook_url:
+        raise HTTPException(
+            status_code=400,
+            detail="TEAMS_WEBHOOK_URL is not set in .env. Please configure it to test Teams notifications.",
+        )
+    from src.services.teams_notifier import send_ticket_created_notification
+    res = await send_ticket_created_notification(
+        ticket_key="TEST-1",
+        ticket_url=config.jira.base_url or "https://dhruvdkombee.atlassian.net",
+        summary="Test notification from Teams-to-Jira Automation",
+        issue_type="Task",
+        priority="Medium",
+        assignee="Developer (Musaib Khan)",
+        reporter="Client (Dhruv dobariya)",
+        approval_note="Test message sent from Dashboard",
+    )
     return res
 
 

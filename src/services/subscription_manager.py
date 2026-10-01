@@ -119,14 +119,17 @@ def ensure_subscription_online(public_url: Optional[str] = None) -> Dict[str, An
                 logger.warning(f"Could not delete outdated subscription: {del_err}")
             # Will proceed to create fresh below
         else:
-            # If less than 30 minutes left, renew immediately
-            if status.get("remainingSeconds", 0) <= AUTO_RENEW_THRESHOLD_SECONDS:
-                try:
-                    renewed = renew_subscription(status["id"], expiration_minutes=58)
-                    _last_renewed_at = datetime.now(timezone.utc).isoformat()
-                    return {"status": "renewed", "subscription": renewed}
-                except Exception as err:
-                    logger.error(f"Failed to renew active subscription: {err}")
+            # If subscription is active with time remaining (>5 min), report active and let async loop renew
+            if status.get("remainingSeconds", 0) > 300:
+                return {"status": "active", "subscription": status}
+
+            # If critically low (<= 5 min), attempt synchronous refresh
+            try:
+                renewed = renew_subscription(status["id"], expiration_minutes=58)
+                _last_renewed_at = datetime.now(timezone.utc).isoformat()
+                return {"status": "renewed", "subscription": renewed}
+            except Exception as err:
+                logger.error(f"Failed to renew active subscription: {err}")
             return {"status": "active", "subscription": status}
 
     # Create new subscription
@@ -182,7 +185,8 @@ async def auto_renew_loop():
                         extra={"event": "AUTO_RENEW_TRIGGER", "remainingSeconds": remaining},
                     )
                     try:
-                        renewed = renew_subscription(sub_id, expiration_minutes=58)
+                        from src.graph_client import async_renew_subscription
+                        renewed = await async_renew_subscription(sub_id, expiration_minutes=58)
                         _last_renewed_at = datetime.now(timezone.utc).isoformat()
                         logger.info(
                             f"Subscription {sub_id} successfully auto-renewed!",
@@ -205,10 +209,13 @@ async def auto_renew_loop():
 
                     except Exception as renew_err:
                         logger.warning(
-                            f"Auto-renew renewal attempt failed: {renew_err}. Attempting fresh subscription ensure...",
+                            f"Auto-renew attempt failed: {renew_err}.",
                             extra={"event": "AUTO_RENEW_FAIL"},
                         )
-                        ensure_subscription_online()
+                        # Only attempt recreate if remaining time is critically low (< 5 min)
+                        if remaining <= 300:
+                            logger.info("Subscription critically low (<5m), ensuring online fresh...")
+                            ensure_subscription_online()
             else:
                 # If no active subscription or expired, ensure online immediately
                 logger.warning(

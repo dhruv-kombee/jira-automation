@@ -320,6 +320,96 @@ def renew_subscription(subscription_id: str, expiration_minutes: int = 58) -> Di
         return result
 
 
+async def async_renew_subscription(subscription_id: str, expiration_minutes: int = 58) -> Dict[str, Any]:
+    """Asynchronously renew an existing subscription without blocking the FastAPI event loop."""
+    token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    url = f"{GRAPH_BASE_URL}/subscriptions/{subscription_id}"
+
+    effective_minutes = min(expiration_minutes, 58)
+    expiration_date_time = (
+        datetime.now(timezone.utc) + timedelta(minutes=effective_minutes)
+    ).isoformat().replace("+00:00", "Z")
+
+    payload = {"expirationDateTime": expiration_date_time}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.patch(url, headers=headers, json=payload)
+        if response.is_error:
+            _handle_graph_error(response, {"subscriptionId": subscription_id})
+
+        result = response.json()
+        logger.info(
+            "Graph subscription renewed (async)",
+            extra={
+                "event": "SUBSCRIPTION_RENEWED",
+                "subscriptionId": subscription_id,
+                "expirationDateTime": result.get("expirationDateTime"),
+            },
+        )
+        return result
+
+
+async def async_create_subscription(
+    team_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    chat_id: Optional[str] = None,
+    notification_url: str = "",
+    expiration_minutes: int = 58,
+) -> Dict[str, Any]:
+    """Asynchronously create a Microsoft Graph subscription without blocking the FastAPI event loop."""
+    token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    url = f"{GRAPH_BASE_URL}/subscriptions"
+
+    effective_minutes = min(expiration_minutes, 58)
+    expiration_date_time = (
+        datetime.now(timezone.utc) + timedelta(minutes=effective_minutes)
+    ).isoformat().replace("+00:00", "Z")
+
+    if chat_id:
+        clean_chat = chat_id.strip()
+        resource_path = f"chats/{clean_chat}/messages"
+    elif team_id and channel_id:
+        resource_path = f"teams/{team_id.strip()}/channels/{channel_id.strip()}/messages"
+    else:
+        raise ValueError("Either chat_id or both team_id and channel_id must be provided")
+
+    payload = {
+        "changeType": "created,updated",
+        "notificationUrl": notification_url,
+        "resource": resource_path,
+        "expirationDateTime": expiration_date_time,
+        "clientState": generate_client_state(),
+    }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(url, headers=headers, json=payload)
+        if response.is_error:
+            _handle_graph_error(response, {"resource": payload["resource"]})
+
+        result = response.json()
+        logger.info(
+            "Graph subscription created (async)",
+            extra={
+                "event": "SUBSCRIPTION_CREATED",
+                "subscriptionId": result.get("id"),
+                "resource": result.get("resource"),
+                "expirationDateTime": result.get("expirationDateTime"),
+            },
+        )
+        return result
+
+
+
 async def list_chat_messages(chat_id: str, top: int = 15) -> List[Dict[str, Any]]:
     """Retrieve recent messages from a Teams group/1:1 chat."""
     token = get_access_token()

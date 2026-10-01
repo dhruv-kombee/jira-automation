@@ -470,24 +470,26 @@ async def check_and_auto_create_jira_ticket(
             extra={"event": "PM_APPROVAL_JIRA_CREATED", "issueKey": issue_key, "messageId": msg_id},
         )
 
-        # Post confirmation reply back to Teams chat/channel
-        reply_html = (
-            f"🎟️ <b>Jira Ticket Created</b>: <a href='{issue_url}'>{issue_key}</a><br/>"
-            f"<b>Summary</b>: {summary}<br/>"
-            f"<b>Assignee</b>: {assignee}<br/>"
-            f"<i>Approved by PM Santosh Yadav via Teams 👍 reaction</i>"
+        # Post confirmation reply back to Teams chat/channel via Webhook or Graph API
+        from src.services.teams_notifier import send_ticket_created_notification
+        reporter = normalized_message.get("sender", {}).get("displayName") or (row["sender_display_name"] if row else "Client")
+        issue_type = ai_ticket.get("issue_type", config.jira.default_issue_type)
+        priority = ai_ticket.get("priority", "Medium")
+
+        await send_ticket_created_notification(
+            ticket_key=issue_key,
+            ticket_url=issue_url,
+            summary=summary,
+            issue_type=issue_type,
+            priority=priority,
+            assignee=assignee,
+            reporter=reporter,
+            approval_note="Approved by PM Santosh Yadav via Teams 👍 reaction",
+            chat_id=normalized_message.get("chatId"),
+            team_id=normalized_message.get("teamId"),
+            channel_id=normalized_message.get("channelId"),
+            parent_message_id=msg_id,
         )
-
-        chat_id = normalized_message.get("chatId")
-        team_id = normalized_message.get("teamId")
-        channel_id = normalized_message.get("channelId")
-
-        if chat_id:
-            from src.graph_client import send_chat_message
-            await send_chat_message(chat_id, reply_html)
-        elif team_id and channel_id:
-            from src.graph_client import send_channel_reply
-            await send_channel_reply(team_id, channel_id, msg_id, reply_html)
 
         return ticket_res
 
@@ -545,11 +547,12 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
                 pass
 
         # AI Ticket Extraction for issue/bug requests (only if not already cached)
+        # During background backfill sync, use fast rule-based extraction so we never exceed Gemini 15 RPM limits
         msg_text = (normalized.get("message") or {}).get("text", "")
         if not existing_ai and any(tag in msg_text.lower() for tag in ["#issue", "#bug", "#task", "#ticket", "bug", "issue"]):
             try:
-                from src.services.ai_service import extract_jira_ticket
-                ai_ticket = await extract_jira_ticket(
+                from src.services.ai_service import _rule_based_fallback
+                ai_ticket = _rule_based_fallback(
                     msg_text,
                     sender_name=normalized["sender"].get("displayName"),
                     sender_role=sender_role,
