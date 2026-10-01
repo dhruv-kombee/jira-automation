@@ -48,6 +48,8 @@ def init_database(db_path: Optional[str] = None) -> sqlite3.Connection:
             attachments         TEXT,
             reactions           TEXT,
             ai_ticket           TEXT,
+            jira_issue_key      TEXT,
+            jira_issue_url      TEXT,
             created_at          TEXT,
             modified_at         TEXT,
             received_at         TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -57,15 +59,11 @@ def init_database(db_path: Optional[str] = None) -> sqlite3.Connection:
     """)
 
     # Safe migration for existing databases
-    try:
-        _db_conn.execute("ALTER TABLE messages ADD COLUMN reactions TEXT;")
-    except Exception:
-        pass
-
-    try:
-        _db_conn.execute("ALTER TABLE messages ADD COLUMN ai_ticket TEXT;")
-    except Exception:
-        pass
+    for col in ["reactions", "ai_ticket", "jira_issue_key", "jira_issue_url"]:
+        try:
+            _db_conn.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT;")
+        except Exception:
+            pass
 
     logger.info("Database initialized", extra={"event": "DB_INIT", "path": str(target_path)})
     return _db_conn

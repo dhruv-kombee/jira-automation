@@ -219,12 +219,15 @@
               </div>
             </div>
 
-            <div class="pipe-step step-pending">
+            <div class="pipe-step step-pending" id="phase4Card">
               <div class="step-num">4</div>
               <div class="step-info">
                 <h4>4. Jira Ticket Creation</h4>
-                <p>Atlassian Jira Cloud REST API</p>
-                <span class="status-tag status-pending">PENDING JIRA KEYS</span>
+                <p id="jiraStatusDesc">Atlassian Jira Cloud REST API</p>
+                <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
+                  <span class="status-tag status-pending" id="jiraStatusTag">PENDING JIRA KEYS</span>
+                  <button id="btnTestJira" class="btn-text" style="display:none; padding:2px 8px; font-size:11px; border:1px solid #10B981; border-radius:4px; color:#10B981; background:rgba(16,185,129,0.1);">⚡ Test Ticket</button>
+                </div>
               </div>
             </div>
           </div>

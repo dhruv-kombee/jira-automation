@@ -31,7 +31,20 @@ class RolesConfig:
 class GeminiConfig:
     def __init__(self):
         self.api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
-        self.model = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+        self.model = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash-lite')
+
+
+class JiraConfig:
+    def __init__(self):
+        self.base_url = (os.getenv('JIRA_BASE_URL') or '').rstrip('/')
+        self.email = os.getenv('JIRA_EMAIL')
+        self.api_token = os.getenv('JIRA_API_TOKEN')
+        self.project_key = (os.getenv('JIRA_PROJECT_KEY') or '').upper()
+        self.default_issue_type = os.getenv('JIRA_DEFAULT_ISSUE_TYPE', 'Bug')
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.base_url and self.email and self.api_token and self.project_key)
 
 
 class AppConfig:
@@ -40,6 +53,7 @@ class AppConfig:
         self.teams = TeamsConfig()
         self.roles = RolesConfig()
         self.gemini = GeminiConfig()
+        self.jira = JiraConfig()
         self.port = int(os.getenv('PORT', '3000'))
         self.webhook_public_url = os.getenv('WEBHOOK_PUBLIC_URL')
         self.log_level = os.getenv('LOG_LEVEL', 'INFO').upper()

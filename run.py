@@ -66,7 +66,7 @@ def main():
         "src.app:app",
         host="0.0.0.0",
         port=port,
-        reload=False,
+        reload=True,
     )
 
 

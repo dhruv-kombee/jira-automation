@@ -45,3 +45,24 @@ def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[s
     )
 
     return Roles.UNKNOWN
+
+
+def is_pm_approval(reactions: Optional[list]) -> bool:
+    """Check if PM (Santosh Yadav) has reacted with an approval emoji (like, thumbsup, heart)."""
+    if not reactions:
+        return False
+    pm_id = (config.roles.pm or "").lower().strip()
+    for r in reactions:
+        u_id = (r.get("userId") or "").lower().strip()
+        disp_name = (r.get("displayName") or "").lower().strip()
+        r_type = (r.get("reactionType") or "").lower().strip()
+
+        # Is reaction from PM?
+        is_pm = (pm_id and u_id == pm_id) or ("santosh" in disp_name)
+        # Is reaction positive/approval?
+        is_approval = any(pos in r_type for pos in ["like", "👍", "heart"]) or (r.get("displayName") == "Like")
+
+        if is_pm and is_approval:
+            return True
+    return False
+

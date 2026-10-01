@@ -1,4 +1,5 @@
 import html
+import json
 import re
 from typing import Any, Dict, Optional
 from src.config import config
@@ -312,6 +313,12 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     # Persist in SQLite
     result = store_message(normalized)
 
+    # Closed-loop: Automatically create Jira ticket if PM (Santosh Yadav) reacted with approval
+    jira_created = await check_and_auto_create_jira_ticket(normalized, sender_role)
+    if jira_created:
+        normalized["jira_issue_key"] = jira_created.get("key")
+        normalized["jira_issue_url"] = jira_created.get("url")
+
     is_new = bool(result.get("stored")) and not bool(result.get("duplicate"))
     event_type = "NEW_MESSAGE" if is_new else "MESSAGE_UPDATED"
 
@@ -330,6 +337,110 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
         logger.debug(f"Broadcast notice error: {b_err}")
 
     return {"normalized": normalized, "sender_role": sender_role, "result": result}
+
+
+async def check_and_auto_create_jira_ticket(
+    normalized_message: Dict[str, Any], sender_role: str
+) -> Optional[Dict[str, Any]]:
+    """Automatically create Jira ticket when PM Santosh Yadav reacts with approval emoji."""
+    from src.services.sender_service import is_pm_approval
+    from src.database import get_db
+
+    reactions = normalized_message.get("reactions") or []
+    if not is_pm_approval(reactions):
+        return None
+
+    if not config.jira.is_configured:
+        logger.debug("PM approval detected, but Jira is not configured in .env")
+        return None
+
+    msg_id = normalized_message.get("messageId")
+    if not msg_id:
+        return None
+
+    # Check if a Jira ticket is already created for this message
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT jira_issue_key, jira_issue_url, ai_ticket, message_text, sender_display_name FROM messages WHERE message_id = ?",
+            (msg_id,),
+        ).fetchone()
+
+        if row and row["jira_issue_key"]:
+            # Ticket already created, skip duplicate creation
+            return {"key": row["jira_issue_key"], "url": row["jira_issue_url"], "already_existed": True}
+    except Exception as db_err:
+        logger.warning(f"Error checking message for existing Jira ticket: {db_err}")
+        row = None
+
+    # Retrieve or extract AI ticket draft
+    ai_ticket = normalized_message.get("aiTicket")
+    if not ai_ticket and row and row["ai_ticket"]:
+        try:
+            ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
+        except Exception:
+            ai_ticket = None
+
+    if not ai_ticket or not ai_ticket.get("summary"):
+        from src.services.ai_service import extract_jira_ticket
+        raw_text = (normalized_message.get("message") or {}).get("text") or (row["message_text"] if row else "")
+        ai_ticket = await extract_jira_ticket(
+            raw_text,
+            sender_name=normalized_message.get("sender", {}).get("displayName") or (row["sender_display_name"] if row else None),
+            sender_role=sender_role,
+        )
+
+    # Only create ticket if AI identifies an issue/task
+    if not ai_ticket.get("is_ticket_request"):
+        logger.info(
+            "PM approved message, but content is not a ticket request",
+            extra={"event": "PM_APPROVAL_NON_TICKET", "messageId": msg_id},
+        )
+        return None
+
+    from src.services.jira_service import create_jira_issue
+    ticket_res = await create_jira_issue(
+        summary=ai_ticket.get("summary", "Teams Issue Report"),
+        description=ai_ticket.get("description", ""),
+        issue_type=ai_ticket.get("issue_type", config.jira.default_issue_type),
+        priority=ai_ticket.get("priority", "Medium"),
+        labels=ai_ticket.get("labels", ["teams-automation", "pm-approved"]),
+        message_id=msg_id,
+    )
+
+    if ticket_res.get("success"):
+        issue_key = ticket_res.get("key")
+        issue_url = ticket_res.get("url")
+        summary = ticket_res.get("summary")
+        assignee = ai_ticket.get("suggested_assignee") or "Unassigned"
+
+        logger.info(
+            f"🎉 Closed-loop automation: Created Jira ticket {issue_key} upon PM approval",
+            extra={"event": "PM_APPROVAL_JIRA_CREATED", "issueKey": issue_key, "messageId": msg_id},
+        )
+
+        # Post confirmation reply back to Teams chat/channel
+        reply_html = (
+            f"🎟️ <b>Jira Ticket Created</b>: <a href='{issue_url}'>{issue_key}</a><br/>"
+            f"<b>Summary</b>: {summary}<br/>"
+            f"<b>Assignee</b>: {assignee}<br/>"
+            f"<i>Approved by PM Santosh Yadav via Teams 👍 reaction</i>"
+        )
+
+        chat_id = normalized_message.get("chatId")
+        team_id = normalized_message.get("teamId")
+        channel_id = normalized_message.get("channelId")
+
+        if chat_id:
+            from src.graph_client import send_chat_message
+            await send_chat_message(chat_id, reply_html)
+        elif team_id and channel_id:
+            from src.graph_client import send_channel_reply
+            await send_channel_reply(team_id, channel_id, msg_id, reply_html)
+
+        return ticket_res
+
+    return None
 
 
 async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
@@ -370,9 +481,21 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
             normalized["sender"].get("displayName"),
         )
 
-        # AI Ticket Extraction for issue/bug requests
+        # Check if already in DB to avoid re-extracting with Gemini
+        msg_id = normalized.get("messageId")
+        existing_ai = None
+        if msg_id:
+            try:
+                row = get_db().execute("SELECT ai_ticket FROM messages WHERE message_id = ?", (msg_id,)).fetchone()
+                if row and row["ai_ticket"]:
+                    existing_ai = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
+                    normalized["aiTicket"] = existing_ai
+            except Exception:
+                pass
+
+        # AI Ticket Extraction for issue/bug requests (only if not already cached)
         msg_text = (normalized.get("message") or {}).get("text", "")
-        if any(tag in msg_text.lower() for tag in ["#issue", "#bug", "#task", "#ticket", "bug", "issue"]):
+        if not existing_ai and any(tag in msg_text.lower() for tag in ["#issue", "#bug", "#task", "#ticket", "bug", "issue"]):
             try:
                 from src.services.ai_service import extract_jira_ticket
                 ai_ticket = await extract_jira_ticket(
@@ -386,6 +509,13 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
                 pass
 
         result = store_message(normalized)
+
+        # Closed-loop: Automatically create Jira ticket if PM approved via reaction
+        jira_created = await check_and_auto_create_jira_ticket(normalized, sender_role)
+        if jira_created:
+            normalized["jira_issue_key"] = jira_created.get("key")
+            normalized["jira_issue_url"] = jira_created.get("url")
+
         if result.get("stored"):
             new_count += 1
             # Broadcast new message to dashboard

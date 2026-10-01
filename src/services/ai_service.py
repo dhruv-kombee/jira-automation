@@ -170,18 +170,29 @@ Message Content:
 
 Analyze this message and extract the Jira ticket draft in JSON format."""
 
-        response = client.models.generate_content(
-            model=config.gemini.model,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                response_schema=JiraTicketDraft,
-                temperature=0.2,
-            ),
-        )
+        import asyncio
+
+        def _call_gemini():
+            return client.models.generate_content(
+                model=config.gemini.model,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema=JiraTicketDraft,
+                    temperature=0.2,
+                ),
+            )
+
+        response = await asyncio.to_thread(_call_gemini)
 
         parsed = json.loads(response.text)
+        if "labels" in parsed and isinstance(parsed["labels"], list):
+            if "teams-automation" not in parsed["labels"]:
+                parsed["labels"].append("teams-automation")
+        else:
+            parsed["labels"] = ["teams-automation"]
+
         parsed["extractor"] = f"gemini ({config.gemini.model})"
         logger.info(
             f"AI ticket successfully extracted with {config.gemini.model}",

@@ -81,6 +81,31 @@ function setupEventListeners() {
     });
   }
 
+  // Test Jira Ticket button
+  const elBtnTestJira = document.getElementById('btnTestJira');
+  if (elBtnTestJira) {
+    elBtnTestJira.addEventListener('click', async () => {
+      try {
+        elBtnTestJira.disabled = true;
+        elBtnTestJira.innerText = 'Creating Test Ticket...';
+        const res = await fetch('/api/jira/test-ticket', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`Jira Test Ticket Created: ${data.key}!`, 'success');
+          if (data.url) window.open(data.url, '_blank');
+          await fetchMessages();
+        } else {
+          showToast(data.detail || 'Test ticket creation failed', 'error');
+        }
+      } catch (e) {
+        showToast('Jira network error', 'error');
+      } finally {
+        elBtnTestJira.disabled = false;
+        elBtnTestJira.innerText = '⚡ Test Ticket';
+      }
+    });
+  }
+
   elBtnRefresh.addEventListener('click', () => {
     fetchStatus();
     fetchMessages();
@@ -260,6 +285,31 @@ function renderStatus(data) {
   const elSubAutoInfo = document.getElementById('subAutoRenewInfo');
   if (elSubAutoInfo && sub.autoRenewThresholdText) {
     elSubAutoInfo.innerText = `• Auto-renews at <${sub.autoRenewThresholdText} (every 30s)`;
+  }
+
+  // Phase 4: Jira Automation Card
+  const p4 = data.pipeline?.phase4;
+  const elPhase4 = document.getElementById('phase4Card');
+  const elJiraTag = document.getElementById('jiraStatusTag');
+  const elJiraDesc = document.getElementById('jiraStatusDesc');
+  const elBtnTestJiraEl = document.getElementById('btnTestJira');
+
+  if (p4 && p4.configured) {
+    if (elPhase4) elPhase4.className = 'pipe-step step-active';
+    if (elJiraTag) {
+      elJiraTag.className = 'status-tag status-active';
+      elJiraTag.innerText = `READY (${p4.projectKey || 'ACTIVE'})`;
+    }
+    if (elJiraDesc) elJiraDesc.innerText = `Connected: ${p4.baseUrl || 'Jira Cloud'}`;
+    if (elBtnTestJiraEl) elBtnTestJiraEl.style.display = 'inline-block';
+  } else {
+    if (elPhase4) elPhase4.className = 'pipe-step step-pending';
+    if (elJiraTag) {
+      elJiraTag.className = 'status-tag status-pending';
+      elJiraTag.innerText = 'PENDING JIRA KEYS';
+    }
+    if (elJiraDesc) elJiraDesc.innerText = 'Set JIRA credentials in .env to enable';
+    if (elBtnTestJiraEl) elBtnTestJiraEl.style.display = 'none';
   }
 
   // Re-render messages with refreshed roles & metrics
@@ -485,6 +535,11 @@ function createMessageCard(msg, role) {
         ${msg.chat_id ? '<span class="meta-tag">Group Chat</span>' : '<span class="meta-tag">Channel</span>'}
       </div>
       <div class="card-actions">
+        ${msg.jira_issue_key ? `<a href="${escapeHtml(msg.jira_issue_url || '#')}" target="_blank" class="jira-ticket-link-badge">🎟️ Jira: ${escapeHtml(msg.jira_issue_key)} ↗</a>` : ''}
+        ${!msg.jira_issue_key && aiTicket && aiTicket.is_ticket_request ? `
+          <button class="btn-text btn-create-jira" data-mid="${msg.message_id}">🚀 Create in Jira</button>
+          <button class="btn-text btn-sim-pm" data-mid="${msg.message_id}">👍 PM Approve</button>
+        ` : ''}
         ${!aiTicket ? `<button class="btn-text btn-extract-ai" data-mid="${msg.message_id}">✨ Extract Jira Ticket</button>` : ''}
         <button class="btn-text btn-inspect" data-id="${msg.id}">Inspect Payload</button>
       </div>
@@ -492,6 +547,56 @@ function createMessageCard(msg, role) {
   `;
 
   // Attach button listeners
+  const btnSimPm = card.querySelector('.btn-sim-pm');
+  if (btnSimPm) {
+    btnSimPm.addEventListener('click', async () => {
+      try {
+        btnSimPm.disabled = true;
+        btnSimPm.innerText = 'Approving...';
+        const res = await fetch(`/api/test/simulate-pm-approval/${btnSimPm.dataset.mid}`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          showToast('✓ PM Santosh Yadav approved with 👍 in Teams!', 'success');
+          if (data.ticket && data.ticket.key) {
+            showToast(`🎉 Auto-created Jira Ticket: ${data.ticket.key}!`, 'success');
+          }
+          await fetchMessages();
+        } else {
+          showToast(data.detail || 'Approval failed', 'error');
+        }
+      } catch (err) {
+        showToast('Approval network error', 'error');
+      } finally {
+        btnSimPm.disabled = false;
+        btnSimPm.innerText = '👍 PM Approve';
+      }
+    });
+  }
+
+  const btnCreateJira = card.querySelector('.btn-create-jira');
+  if (btnCreateJira) {
+    btnCreateJira.addEventListener('click', async () => {
+      try {
+        btnCreateJira.disabled = true;
+        btnCreateJira.innerText = 'Creating in Jira...';
+        const res = await fetch(`/api/jira/create-from-message/${btnCreateJira.dataset.mid}`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`🎉 Jira Ticket Created: ${data.key}!`, 'success');
+          if (data.url) window.open(data.url, '_blank');
+          await fetchMessages();
+        } else {
+          showToast(data.detail || data.error || 'Failed to create Jira ticket', 'error');
+        }
+      } catch (err) {
+        showToast('Jira API error', 'error');
+      } finally {
+        btnCreateJira.disabled = false;
+        btnCreateJira.innerText = '🚀 Create in Jira';
+      }
+    });
+  }
+
   const btnExtract = card.querySelector('.btn-extract-ai');
   if (btnExtract) {
     btnExtract.addEventListener('click', async () => {
@@ -576,6 +681,13 @@ function initWebSocket() {
           }
 
           // Refresh list and metrics
+          fetchMessages();
+          fetchStatus();
+          return;
+        }
+
+        if (payload.type === 'JIRA_TICKET_CREATED') {
+          showToast(`🎉 Jira Ticket Created: ${payload.issueKey}!`, 'success');
           fetchMessages();
           fetchStatus();
           return;

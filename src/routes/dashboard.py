@@ -95,7 +95,13 @@ def get_system_status():
                 "geminiConfigured": bool(config.gemini.api_key),
             },
             "phase3": {"name": "PM Approval Workflow", "status": "active"},
-            "phase4": {"name": "Jira Ticket Creation", "status": "pending_keys"},
+            "phase4": {
+                "name": "Jira Ticket Creation",
+                "status": "active" if config.jira.is_configured else "pending_keys",
+                "configured": config.jira.is_configured,
+                "projectKey": config.jira.project_key,
+                "baseUrl": config.jira.base_url,
+            },
         },
         "metrics": {
             "total": total_messages,
@@ -235,6 +241,16 @@ async def simulate_message(req: SimulateMessageRequest):
         "attachments": [],
     }
 
+    # Extract AI ticket draft if applicable
+    if role == "CLIENT" or any(kw in req.text.lower() for kw in ["#issue", "#bug", "#task", "bug", "issue"]):
+        try:
+            from src.services.ai_service import extract_jira_ticket
+            ai_ticket = await extract_jira_ticket(req.text, sender_name=display_name, sender_role=role)
+            if ai_ticket.get("is_ticket_request"):
+                sim_msg["aiTicket"] = ai_ticket
+        except Exception:
+            pass
+
     store_res = store_message(sim_msg)
 
     # Broadcast to dashboard
@@ -247,6 +263,136 @@ async def simulate_message(req: SimulateMessageRequest):
     })
 
     return {"success": True, "message": sim_msg, "role": role}
+
+
+@router.post("/api/test/simulate-pm-approval/{message_id}")
+async def simulate_pm_approval(message_id: str):
+    """Simulate PM Santosh Yadav reacting with 👍 in Teams to test closed-loop ticket creation."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    msg = dict(row)
+    pm_id = config.roles.pm or "d7bc3c28-33d9-4973-816e-445d51556b8b"
+    pm_reaction = {
+        "reactionType": "👍",
+        "displayName": "Like",
+        "userId": pm_id,
+        "createdDateTime": datetime.now(timezone.utc).isoformat(),
+    }
+
+    raw_reactions = msg.get("reactions")
+    reactions = []
+    if raw_reactions:
+        try:
+            reactions = json.loads(raw_reactions) if isinstance(raw_reactions, str) else raw_reactions
+        except Exception:
+            reactions = []
+
+    # Add reaction if not already there
+    if not any((r.get("userId") == pm_id and (r.get("reactionType") in ["👍", "like"] or r.get("displayName") == "Like")) for r in reactions):
+        reactions.append(pm_reaction)
+
+    db.execute("UPDATE messages SET reactions = ? WHERE message_id = ?", (json.dumps(reactions), message_id))
+
+    normalized = {
+        "messageId": message_id,
+        "chatId": msg.get("chat_id"),
+        "teamId": msg.get("team_id"),
+        "channelId": msg.get("channel_id"),
+        "sender": {"userId": msg.get("sender_user_id"), "displayName": msg.get("sender_display_name")},
+        "message": {"text": msg.get("message_text")},
+        "reactions": reactions,
+    }
+
+    # Closed-loop auto-creation
+    from src.services.message_service import check_and_auto_create_jira_ticket
+    sender_role = identify_sender_role(msg.get("sender_user_id"), msg.get("sender_display_name"))
+    ticket_res = await check_and_auto_create_jira_ticket(normalized, sender_role)
+
+    # Broadcast updated message
+    await broadcast_message({
+        "type": "MESSAGE_UPDATED",
+        "message": normalized,
+        "senderRole": sender_role,
+        "stored": False,
+        "duplicate": True,
+        "updated": True,
+    })
+
+    return {"success": True, "ticket": ticket_res, "reactions": reactions}
+
+
+@router.get("/api/jira/status")
+async def get_jira_status():
+    """Test and return live Jira Cloud connection status and project details."""
+    from src.services.jira_service import test_jira_connection
+    res = await test_jira_connection()
+    return res
+
+
+@router.post("/api/jira/test-ticket")
+async def create_jira_test_ticket():
+    """Create a quick test ticket in Jira to verify write permissions."""
+    from src.services.jira_service import create_jira_issue
+    res = await create_jira_issue(
+        summary="[Test] Teams Automation Integration Test",
+        description="### Verification Issue\nThis test ticket was created from the Teams-to-Jira automation dashboard to verify API connectivity and write permissions.",
+        issue_type=config.jira.default_issue_type,
+        priority="Medium",
+        labels=["teams-automation", "manual-test"],
+    )
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to create ticket"))
+    return res
+
+
+@router.post("/api/jira/create-from-message/{message_id}")
+async def create_jira_from_message(message_id: str):
+    """Create a Jira ticket from an AI-extracted Teams message."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    msg = dict(row)
+    raw_ai = msg.get("ai_ticket")
+    ai_ticket = None
+    if raw_ai:
+        try:
+            ai_ticket = json.loads(raw_ai) if isinstance(raw_ai, str) else raw_ai
+        except Exception:
+            ai_ticket = None
+
+    # If no AI ticket yet, extract now
+    if not ai_ticket or not ai_ticket.get("summary"):
+        from src.services.ai_service import extract_jira_ticket
+        sender_role = identify_sender_role(msg.get("sender_user_id"), msg.get("sender_display_name"))
+        ai_ticket = await extract_jira_ticket(
+            msg.get("message_text") or "",
+            sender_name=msg.get("sender_display_name"),
+            sender_role=sender_role,
+        )
+
+    from src.services.jira_service import create_jira_issue
+    res = await create_jira_issue(
+        summary=ai_ticket.get("summary", "Teams Issue Report"),
+        description=ai_ticket.get("description", msg.get("message_text") or ""),
+        issue_type=ai_ticket.get("issue_type", "Bug"),
+        priority=ai_ticket.get("priority", "Medium"),
+        labels=ai_ticket.get("labels", ["teams-automation"]),
+        message_id=message_id,
+    )
+
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to create Jira issue"))
+
+    return res
 
 
 @router.websocket("/ws")
@@ -262,3 +408,4 @@ async def websocket_endpoint(websocket: WebSocket):
         ws_disconnect(websocket)
     except Exception:
         ws_disconnect(websocket)
+
