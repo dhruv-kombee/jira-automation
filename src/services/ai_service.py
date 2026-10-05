@@ -103,65 +103,9 @@ class JiraTicketDraft(BaseModel):
     )
     issues: List[JiraTicketItem] = Field(
         default_factory=list,
-        description="List of distinct issues found in the message. If client reports 1 problem, list contains 1 item. If client lists multiple distinct problems (e.g. 1. ... 2. ...), list each distinct problem as a separate item.",
+        description="List of all distinct issues found in the message. If is_ticket_request is true, must contain an item for each distinct problem.",
     )
-    # Primary issue fields for backward compatibility
-    summary: str = Field(
-        default="",
-        description="Primary Jira issue title (max 80 chars)",
-    )
-    issue_type: str = Field(
-        default="Bug",
-        description="Jira issue type: Bug, Task, Story, or Improvement",
-    )
-    priority: str = Field(
-        default="Medium",
-        description="Jira priority level: Highest, High, Medium, Low",
-    )
-    priority_rationale: Optional[str] = Field(
-        default=None,
-        description="Why this priority was chosen",
-    )
-    affected_module: Optional[str] = Field(
-        default="General",
-        description="Frontend/UI, Backend/API, Database, Payment, Authentication, etc.",
-    )
-    observed_behavior: Optional[str] = Field(
-        default=None,
-        description="What failed without asterisks",
-    )
-    expected_behavior: Optional[str] = Field(
-        default=None,
-        description="Expected behavior without asterisks",
-    )
-    steps_to_reproduce: List[str] = Field(
-        default_factory=list,
-        description="Reproduction steps without asterisks",
-    )
-    evidence: List[str] = Field(
-        default_factory=list,
-        description="Extracted error codes or UI glitch details",
-    )
-    acceptance_criteria: List[str] = Field(
-        default_factory=list,
-        description="Verification criteria without asterisks",
-    )
-    description: str = Field(
-        default="",
-        description="Clean description without asterisks",
-    )
-    suggested_assignee: Optional[str] = Field(
-        default=None,
-        description="Suggested developer name or null",
-    )
-    assignee_rationale: Optional[str] = Field(
-        default=None,
-        description="Reason for developer suggestion",
-    )
-    labels: List[str] = Field(
-        default_factory=lambda: ["teams-automation", "client-reported"],
-        description="Relevant Jira labels without spaces or asterisks",
-    )
+
 
 
 SYSTEM_PROMPT = """You are an expert Agile Scrum Master and Senior QA Technical Lead with computer vision expertise.
@@ -450,26 +394,100 @@ Details & Investigation:
 - Evidence: {', '.join(evidence) if evidence else 'None observed in plain text'}
 """
 
-    issues = [
-        {
-            "summary": summary,
-            "issue_type": issue_type,
-            "priority": priority,
-            "priority_rationale": "Evaluated by heuristic keyword rules",
-            "affected_module": affected_module,
-            "observed_behavior": clean_text,
-            "expected_behavior": "System operates normally without error",
-            "steps_to_reproduce": steps_to_reproduce,
-            "evidence": evidence,
-            "acceptance_criteria": acceptance_criteria,
-            "description": description.strip(),
-            "suggested_assignee": assignee,
-            "assignee_rationale": assignee_rationale,
-            "reporter_name": sender_name,
-            "reporter_role": sender_role,
-            "labels": ["teams-automation", "client-reported", issue_type.lower()],
-        }
-    ]
+    # Check if message contains multiple numbered or bulleted sub-issues
+    numbered_items = re.findall(r'(?:^|\n)\s*(?:[0-9]+[.)]|[-*•])\s+([^\n]+(?:\n(?!\s*(?:[0-9]+[.)]|[-*•]|\Z))[^\n]+)*)', clean_text)
+    if is_ticket and len(numbered_items) > 1:
+        issues = []
+        for idx, item_str in enumerate(numbered_items):
+            item_clean = item_str.strip()
+            item_lower = item_clean.lower()
+            sub_type = "Bug" if any(w in item_lower for w in ["bug", "error", "broken", "failed", "crash", "500", "404", "exception", "timeout"]) else "Task"
+            sub_priority = "High" if any(w in item_lower for w in ["whole page", "entire", "urgent", "blocking", "critical", "crash", "down", "500"]) else "Medium"
+            sub_module = "General"
+            sub_assignee = None
+            sub_assignee_rationale = None
+
+            if any(k in item_lower for k in ["ui", "css", "button", "frontend", "screen", "page", "display", "mobile", "navbar", "menu"]):
+                sub_module = "Frontend/UI"
+                sub_assignee = "Musaib Khan"
+                sub_assignee_rationale = "Frontend module specialist"
+            elif any(k in item_lower for k in ["api", "server", "backend", "500", "endpoint", "database", "sql"]):
+                sub_module = "Backend/API"
+                sub_assignee = "Hemil Ghori"
+                sub_assignee_rationale = "Backend module specialist"
+
+            if "musaib" in item_lower or "musain" in item_lower:
+                sub_assignee = "Musaib Khan"
+                sub_assignee_rationale = "Directly mentioned in message"
+            elif "hemil" in item_lower:
+                sub_assignee = "Hemil Ghori"
+                sub_assignee_rationale = "Directly mentioned in message"
+
+            sub_first_line = [l.strip() for l in item_clean.splitlines() if l.strip()][0]
+            if len(sub_first_line) > 65:
+                sub_first_line = sub_first_line[:62] + "..."
+            sub_summary = f"[{sub_type}] {sub_first_line}"
+
+            sub_evidence = []
+            for word in ["500", "404", "timeout", "exception", "error"]:
+                if word in item_lower:
+                    sub_evidence.append(f"Keyword match: '{word}'")
+
+            issues.append({
+                "summary": sub_summary,
+                "issue_type": sub_type,
+                "priority": sub_priority,
+                "priority_rationale": "Evaluated by heuristic keyword rules",
+                "affected_module": sub_module,
+                "observed_behavior": item_clean,
+                "expected_behavior": "System operates normally without error",
+                "steps_to_reproduce": [f"Navigate to {sub_module}", f"Trigger: {sub_first_line}"],
+                "evidence": sub_evidence,
+                "acceptance_criteria": [f"Defect resolved in {sub_module}"],
+                "description": f"Sub-issue #{idx + 1} reported by {sender_name or 'Client'}:\n\n> {item_clean}",
+                "suggested_assignee": sub_assignee,
+                "assignee_rationale": sub_assignee_rationale,
+                "reporter_name": sender_name,
+                "reporter_role": sender_role,
+                "labels": ["teams-automation", "client-reported", sub_type.lower()],
+            })
+
+        # Update primary fields from sub-issues: highest priority and bug type take precedence
+        summary = issues[0]["summary"]
+        issue_type = "Bug" if any(iss.get("issue_type") == "Bug" for iss in issues) else issues[0]["issue_type"]
+        priority = "High" if any(iss.get("priority") == "High" for iss in issues) else issues[0]["priority"]
+        affected_module = issues[0]["affected_module"]
+        assignee = next((iss.get("suggested_assignee") for iss in issues if iss.get("suggested_assignee")), None)
+        assignee_rationale = next((iss.get("assignee_rationale") for iss in issues if iss.get("assignee_rationale")), None)
+
+        all_evidence = []
+        for iss in issues:
+            for ev in iss.get("evidence", []):
+                if ev not in all_evidence:
+                    all_evidence.append(ev)
+        if all_evidence:
+            evidence = all_evidence
+    else:
+        issues = [
+            {
+                "summary": summary,
+                "issue_type": issue_type,
+                "priority": priority,
+                "priority_rationale": "Evaluated by heuristic keyword rules",
+                "affected_module": affected_module,
+                "observed_behavior": clean_text,
+                "expected_behavior": "System operates normally without error",
+                "steps_to_reproduce": steps_to_reproduce,
+                "evidence": evidence,
+                "acceptance_criteria": acceptance_criteria,
+                "description": description.strip(),
+                "suggested_assignee": assignee,
+                "assignee_rationale": assignee_rationale,
+                "reporter_name": sender_name,
+                "reporter_role": sender_role,
+                "labels": ["teams-automation", "client-reported", issue_type.lower()],
+            }
+        ]
 
     return {
         "is_ticket_request": is_ticket,
@@ -636,7 +654,7 @@ Message Content:
                         response_mime_type="application/json",
                         response_schema=JiraTicketDraft,
                         temperature=0.1,
-                        max_output_tokens=1024,
+                        max_output_tokens=8192,
                     ),
                 )
 
@@ -663,7 +681,7 @@ Message Content:
                     "suggested_assignee": parsed.get("suggested_assignee"),
                     "labels": parsed.get("labels", ["teams-automation"]),
                 }]
-            elif raw_issues and not parsed.get("summary"):
+            elif raw_issues:
                 primary = raw_issues[0]
                 parsed["summary"] = primary.get("summary", "Issue Report")
                 parsed["issue_type"] = primary.get("issue_type", "Bug")
@@ -677,6 +695,19 @@ Message Content:
                 parsed["description"] = primary.get("description", "")
                 parsed["suggested_assignee"] = primary.get("suggested_assignee")
                 parsed["assignee_rationale"] = primary.get("assignee_rationale")
+            else:
+                parsed.setdefault("summary", parsed.get("general_summary") or "General message")
+                parsed.setdefault("issue_type", "Task")
+                parsed.setdefault("priority", "Low")
+                parsed.setdefault("affected_module", "General")
+                parsed.setdefault("observed_behavior", None)
+                parsed.setdefault("expected_behavior", None)
+                parsed.setdefault("steps_to_reproduce", [])
+                parsed.setdefault("evidence", [])
+                parsed.setdefault("acceptance_criteria", [])
+                parsed.setdefault("description", "")
+                parsed.setdefault("suggested_assignee", None)
+                parsed.setdefault("assignee_rationale", None)
 
             if raw_issues and not parsed.get("assignee_rationale"):
                 parsed["assignee_rationale"] = raw_issues[0].get("assignee_rationale")
