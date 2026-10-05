@@ -296,15 +296,21 @@ def _rule_based_fallback(
     lower_text = clean_text.lower()
 
     # Detect if ticket request
-    is_ticket = any(kw in lower_text for kw in ["#issue", "#bug", "#task", "bug", "issue", "error", "fix", "fail", "broken", "crash", "not working"]) or has_attachments
+    is_ticket = (
+        any(kw in lower_text for kw in [
+            "#issue", "#bug", "#task", "bug", "issue", "error", "fix", "fail",
+            "broken", "crash", "not working", "404", "500", "exception", "timeout"
+        ])
+        or has_attachments
+    )
 
     classification_state = ClassificationState.CONFIRMED_ISSUE.value if is_ticket else ClassificationState.GENERAL_MESSAGE.value
 
     # Determine type
-    issue_type = "Bug" if any(w in lower_text for w in ["bug", "error", "broken", "failed", "crash", "500", "404"]) else "Task"
+    issue_type = "Bug" if any(w in lower_text for w in ["bug", "error", "broken", "failed", "crash", "500", "404", "exception", "timeout"]) else "Task"
 
     # Determine priority
-    priority = "High" if any(w in lower_text for w in ["whole page", "entire", "urgent", "blocking", "critical", "crash", "down"]) else "Medium"
+    priority = "High" if any(w in lower_text for w in ["whole page", "entire", "urgent", "blocking", "critical", "crash", "down", "500"]) else "Medium"
 
     # Clean title
     title_text = re.sub(r'#\w+', '', clean_text).strip()
@@ -563,6 +569,10 @@ Message Content:
                 parsed["acceptance_criteria"] = primary.get("acceptance_criteria", [])
                 parsed["description"] = primary.get("description", "")
                 parsed["suggested_assignee"] = primary.get("suggested_assignee")
+                parsed["assignee_rationale"] = primary.get("assignee_rationale")
+
+            if raw_issues and not parsed.get("assignee_rationale"):
+                parsed["assignee_rationale"] = raw_issues[0].get("assignee_rationale")
 
             for iss in raw_issues:
                 iss["reporter_name"] = sender_name
