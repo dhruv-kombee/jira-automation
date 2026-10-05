@@ -777,6 +777,76 @@ body {
   color: #94A3B8;
 }
 
+/* Pending Triage Strip */
+.pending-triage-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  padding: 0.45rem 0.75rem;
+  border-radius: var(--radius-sm);
+  margin-top: 0.3rem;
+  width: fit-content;
+}
+
+.pending-triage-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #FBBF24;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.btn-triage-approve {
+  background: #10B981;
+  color: white;
+  border: none;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-triage-approve:hover {
+  background: #059669;
+}
+
+.btn-triage-decline {
+  background: rgba(239, 68, 68, 0.2);
+  color: #F87171;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-triage-decline:hover {
+  background: rgba(239, 68, 68, 0.35);
+}
+
+.declined-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radius-sm);
+  margin-top: 0.2rem;
+  width: fit-content;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #F87171;
+}
+
 /* Empty state */
 .empty-state {
   display: flex;

@@ -444,16 +444,17 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     # Persist in SQLite
     result = store_message(normalized)
 
-    # Closed-loop: Automatically create Jira ticket ONLY when PM (Santosh Yadav) reacted with approval
-    # Strictly do NOT run on brand new "created" messages (must have PM emoji approval first),
-    # and only trigger if reactions actually changed or if this was an update notification with reactions.
+    # Closed-loop: Trigger PM triage & approval check when reactions changed or on update events
     change_type = (notification.get("changeType") or "").lower()
-    jira_created = None
+    triage_res = None
     if change_type != "created" and result.get("reactions_changed", False):
-        jira_created = await check_and_auto_create_jira_ticket(normalized, sender_role)
-        if jira_created:
-            normalized["jira_issue_key"] = jira_created.get("key")
-            normalized["jira_issue_url"] = jira_created.get("url")
+        triage_res = await check_and_auto_create_jira_ticket(normalized, sender_role)
+        if triage_res:
+            if triage_res.get("key"):
+                normalized["jira_issue_key"] = triage_res.get("key")
+                normalized["jira_issue_url"] = triage_res.get("url")
+            if triage_res.get("status"):
+                normalized["confirmation_status"] = triage_res.get("status")
 
     is_new = bool(result.get("stored")) and not bool(result.get("duplicate"))
     event_type = "NEW_MESSAGE" if is_new else "MESSAGE_UPDATED"
@@ -475,43 +476,31 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     return {"normalized": normalized, "sender_role": sender_role, "result": result}
 
 
-async def check_and_auto_create_jira_ticket(
-    normalized_message: Dict[str, Any], sender_role: str
-) -> Optional[Dict[str, Any]]:
-    """Automatically create Jira ticket when PM Santosh Yadav reacts with approval emoji."""
-    from src.services.sender_service import is_pm_approval
+async def execute_jira_ticket_creation(
+    message_id: str,
+    approver_name: str = "PM Santosh Yadav",
+    issue_idx: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Execute Jira issue creation after PM final confirmation.
+
+    Creates Jira ticket(s), uploads attachments, sends created Adaptive Card to Teams,
+    and updates SQLite database.
+    """
     from src.database import get_db
+    from src.services.jira_service import create_jira_issue, upload_jira_attachment
+    from src.services.teams_notifier import send_ticket_created_notification
 
-    reactions = normalized_message.get("reactions") or []
-    if not is_pm_approval(reactions):
-        return None
+    db = get_db()
+    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+    if not row:
+        return {"success": False, "error": f"Message {message_id} not found in database"}
 
-    if not config.jira.is_configured:
-        logger.debug("PM approval detected, but Jira is not configured in .env")
-        return None
+    # If ticket already exists and this is an 'approve all' request, return existing
+    if row["jira_issue_key"] and issue_idx is None:
+        return {"success": True, "key": row["jira_issue_key"], "url": row["jira_issue_url"], "already_existed": True}
 
-    msg_id = normalized_message.get("messageId")
-    if not msg_id:
-        return None
-
-    # Check if a Jira ticket is already created for this message
-    try:
-        db = get_db()
-        row = db.execute(
-            "SELECT jira_issue_key, jira_issue_url, ai_ticket, message_text, sender_display_name FROM messages WHERE message_id = ?",
-            (msg_id,),
-        ).fetchone()
-
-        if row and row["jira_issue_key"]:
-            # Ticket already created, skip duplicate creation
-            return {"key": row["jira_issue_key"], "url": row["jira_issue_url"], "already_existed": True}
-    except Exception as db_err:
-        logger.warning(f"Error checking message for existing Jira ticket: {db_err}")
-        row = None
-
-    # Retrieve or extract AI ticket draft
-    ai_ticket = normalized_message.get("aiTicket")
-    if not ai_ticket and row and row["ai_ticket"]:
+    ai_ticket = None
+    if row["ai_ticket"]:
         try:
             ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
         except Exception:
@@ -519,103 +508,399 @@ async def check_and_auto_create_jira_ticket(
 
     if not ai_ticket or not ai_ticket.get("summary"):
         from src.services.ai_service import extract_jira_ticket
-        raw_text = (normalized_message.get("message") or {}).get("text") or (row["message_text"] if row else "")
+        sender_role = identify_sender_role(row["sender_user_id"], row["sender_display_name"])
+        cached_atts = _message_attachment_cache.get(message_id) or []
         ai_ticket = await extract_jira_ticket(
-            raw_text,
-            sender_name=normalized_message.get("sender", {}).get("displayName") or (row["sender_display_name"] if row else None),
+            row["message_text"] or "",
+            sender_name=row["sender_display_name"],
             sender_role=sender_role,
+            attachments=cached_atts,
         )
 
-    # Only create ticket if AI identifies an issue/task
+    # Determine issues to create
+    issues = ai_ticket.get("issues")
+    if not issues or not isinstance(issues, list):
+        issues = [{
+            "summary": ai_ticket.get("summary", "Teams Issue Report"),
+            "description": ai_ticket.get("description", ""),
+            "issue_type": ai_ticket.get("issue_type", config.jira.default_issue_type),
+            "priority": ai_ticket.get("priority", "Medium"),
+            "affected_module": ai_ticket.get("affected_module", "General"),
+            "suggested_assignee": ai_ticket.get("suggested_assignee") or "Unassigned",
+            "observed_behavior": ai_ticket.get("observed_behavior") or ai_ticket.get("evidence"),
+            "evidence": ai_ticket.get("evidence") or [],
+        }]
+
+    if issue_idx is not None:
+        if 0 <= issue_idx < len(issues):
+            issues_to_process = [(issue_idx, issues[issue_idx])]
+        else:
+            return {"success": False, "error": f"Issue index {issue_idx} out of range"}
+    else:
+        issues_to_process = list(enumerate(issues))
+
+    reporter = row["sender_display_name"] or "Client"
+    created_keys = []
+    created_urls = []
+    created_results = []
+
+    for idx, item in issues_to_process:
+        item_summary = item.get("summary") or ai_ticket.get("summary", "Teams Issue Report")
+        item_desc = item.get("description") or ai_ticket.get("description", "")
+        item_type = item.get("issue_type") or ai_ticket.get("issue_type", config.jira.default_issue_type)
+        item_priority = item.get("priority") or ai_ticket.get("priority", "Medium")
+        item_assignee = item.get("suggested_assignee") or ai_ticket.get("suggested_assignee") or "Unassigned"
+        item_module = item.get("affected_module") or ai_ticket.get("affected_module")
+        item_evidence = item.get("evidence") or ai_ticket.get("evidence")
+
+        ticket_data = dict(item)
+        ticket_data.setdefault("reporter_name", reporter)
+        ticket_data.setdefault("reporter_role", identify_sender_role(row["sender_user_id"], row["sender_display_name"]))
+        ticket_data.setdefault("raw_message", row["message_text"] or "")
+
+        res = await create_jira_issue(
+            summary=item_summary,
+            description=item_desc,
+            issue_type=item_type,
+            priority=item_priority,
+            labels=ticket_data.get("labels", ["teams-automation", "pm-approved"]),
+            message_id=message_id,
+            assignee_name=item_assignee,
+            ticket_data=ticket_data,
+        )
+
+        if res.get("success"):
+            k = res.get("key")
+            u = res.get("url")
+            created_keys.append(k)
+            created_urls.append(u)
+            created_results.append(res)
+
+            logger.info(
+                f"🎉 Created Jira ticket {k} ({item_summary}) upon PM confirmation",
+                extra={"event": "PM_CONFIRMATION_JIRA_CREATED", "issueKey": k, "messageId": message_id},
+            )
+
+            # Upload cached attachments
+            if message_id in _message_attachment_cache:
+                for att in _message_attachment_cache[message_id]:
+                    try:
+                        await upload_jira_attachment(
+                            issue_key=k,
+                            filename=att.get("name", "attachment"),
+                            file_bytes=att.get("bytes", b""),
+                            content_type=att.get("content_type", "application/octet-stream"),
+                        )
+                    except Exception as up_err:
+                        logger.warning(f"Could not upload attachment to Jira {k}: {up_err}")
+
+            # Send Jira ticket created card to Teams
+            await send_ticket_created_notification(
+                ticket_key=k,
+                ticket_url=u,
+                summary=res.get("summary") or item_summary,
+                issue_type=item_type,
+                priority=item_priority,
+                assignee=item_assignee,
+                reporter=reporter,
+                approval_note=f"Approved & confirmed by {approver_name} via Teams",
+                chat_id=row["chat_id"],
+                team_id=row["team_id"],
+                channel_id=row["channel_id"],
+                parent_message_id=message_id,
+                module=item_module,
+                evidence=item_evidence,
+            )
+
+    if created_keys:
+        primary_key = ", ".join(created_keys)
+        primary_url = created_urls[0] if created_urls else ""
+        db.execute(
+            "UPDATE messages SET confirmation_status = 'APPROVED', jira_issue_key = ?, jira_issue_url = ? WHERE message_id = ?",
+            (primary_key, primary_url, message_id),
+        )
+
+        try:
+            from src.services.broadcaster import broadcast_message
+            await broadcast_message({
+                "type": "MESSAGE_UPDATED",
+                "message": {
+                    "messageId": message_id,
+                    "jira_issue_key": primary_key,
+                    "jira_issue_url": primary_url,
+                    "confirmation_status": "APPROVED",
+                },
+                "stored": False,
+                "duplicate": True,
+                "updated": True,
+            })
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "key": primary_key,
+            "url": primary_url,
+            "tickets": created_results,
+        }
+
+    return {"success": False, "error": "Failed to create Jira issues"}
+
+
+async def execute_jira_ticket_decline(
+    message_id: str,
+    approver_name: str = "PM Santosh Yadav",
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute Jira ticket decline after PM disapproval.
+
+    Sends declined Adaptive Card to Teams, marks message as DECLINED in SQLite,
+    and ensures zero Jira tickets are created.
+    """
+    from src.database import get_db
+    from src.services.teams_notifier import send_ticket_declined_notification
+
+    db = get_db()
+    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+    if not row:
+        return {"success": False, "error": f"Message {message_id} not found in database"}
+
+    ai_ticket = None
+    if row["ai_ticket"]:
+        try:
+            ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
+        except Exception:
+            ai_ticket = None
+
+    issues = (ai_ticket.get("issues") if ai_ticket else None) or ([ai_ticket] if ai_ticket else [{"summary": row["message_text"] or "Issue Report"}])
+    reporter = row["sender_display_name"] or "Client"
+
+    db.execute(
+        "UPDATE messages SET confirmation_status = 'DECLINED' WHERE message_id = ?",
+        (message_id,),
+    )
+
+    logger.info(
+        f"❌ Ticket creation declined by {approver_name} for message {message_id}",
+        extra={"event": "PM_DISAPPROVAL_TICKET_DECLINED", "messageId": message_id, "approver": approver_name},
+    )
+
+    # Post decline notification to Teams
+    notify_res = await send_ticket_declined_notification(
+        message_id=message_id,
+        issues=issues,
+        reporter=reporter,
+        approver=approver_name,
+        reason=reason,
+        chat_id=row["chat_id"],
+        team_id=row["team_id"],
+        channel_id=row["channel_id"],
+    )
+
+    try:
+        from src.services.broadcaster import broadcast_message
+        await broadcast_message({
+            "type": "MESSAGE_UPDATED",
+            "message": {
+                "messageId": message_id,
+                "confirmation_status": "DECLINED",
+            },
+            "stored": False,
+            "duplicate": True,
+            "updated": True,
+        })
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "status": "DECLINED",
+        "approver": approver_name,
+        "notification": notify_res,
+    }
+
+
+async def check_and_auto_create_jira_ticket(
+    normalized_message: Dict[str, Any], sender_role: str
+) -> Optional[Dict[str, Any]]:
+    """Two-step PM triage & approval state machine:
+
+    Step 1: When PM reacts with 🎟️ / 🎫 on a client issue message:
+            Extracts issue(s), saves draft, sets confirmation_status='AWAITING_FINAL_CONFIRMATION',
+            and sends the Issue Triage Confirmation Card to Teams (with Approve / Decline options).
+
+    Step 2: When message is AWAITING_FINAL_CONFIRMATION:
+            - If PM reacts with 🎟️ / 🎫: Creates ticket(s) in Jira and posts confirmation card.
+            - If PM reacts with ❌ / 👎: Cancels creation, sets status='DECLINED', and posts declined card.
+    """
+    from src.services.sender_service import (
+        is_pm_approval,
+        is_pm_disapproval,
+        is_pm_confirmation_approval,
+        is_ticket_approval_reaction,
+        is_ticket_disapproval_reaction,
+    )
+    from src.database import get_db
+
+    reactions = normalized_message.get("reactions") or []
+    has_approval = is_pm_approval(reactions)
+    has_conf_approval = is_pm_confirmation_approval(reactions)
+    has_disapproval = is_pm_disapproval(reactions)
+
+    if not has_approval and not has_conf_approval and not has_disapproval:
+        return None
+
+    if not config.jira.is_configured:
+        logger.debug("PM reaction detected, but Jira is not configured in .env")
+        return None
+
+    msg_id = normalized_message.get("messageId")
+    if not msg_id:
+        return None
+
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM messages WHERE message_id = ?",
+        (msg_id,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    if row["jira_issue_key"]:
+        # Already created in Jira
+        return {"key": row["jira_issue_key"], "url": row["jira_issue_url"], "already_existed": True}
+
+    confirmation_status = row["confirmation_status"] or ""
+
+    # Determine approver name from reactions
+    approver_name = "PM Santosh Yadav"
+    for r in reactions:
+        d_name = r.get("displayName") or ""
+        if "santosh" in d_name.lower():
+            approver_name = "PM Santosh Yadav"
+            break
+        elif "dhruv" in d_name.lower() or r.get("userId") == config.roles.client:
+            approver_name = f"{d_name} (PM Approver)"
+            break
+
+    # =========================================================================
+    # STEP 2: Final confirmation resolution (if already awaiting confirmation)
+    # =========================================================================
+    if confirmation_status == "AWAITING_FINAL_CONFIRMATION":
+        if has_disapproval:
+            return await execute_jira_ticket_decline(msg_id, approver_name=approver_name)
+        elif has_conf_approval:
+            return await execute_jira_ticket_creation(msg_id, approver_name=approver_name)
+        return None
+
+    # If already declined, do not process unless re-approved
+    if confirmation_status == "DECLINED" and not has_approval:
+        return None
+
+    # =========================================================================
+    # STEP 1: Issue triage & confirmation request (upon first PM 🎟️/🎫 reaction)
+    # =========================================================================
+    if not has_approval:
+        # Reaction was disapproval on a non-triaged message; ignore
+        return None
+
+    # Retrieve or extract AI ticket draft
+    ai_ticket = normalized_message.get("aiTicket")
+    if not ai_ticket and row["ai_ticket"]:
+        try:
+            ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
+        except Exception:
+            ai_ticket = None
+
+    raw_text = (normalized_message.get("message") or {}).get("text") or row["message_text"] or ""
+    reporter_name = normalized_message.get("sender", {}).get("displayName") or row["sender_display_name"] or "Client"
+
+    if not ai_ticket or not ai_ticket.get("summary"):
+        from src.services.ai_service import extract_jira_ticket
+        cached_atts = _message_attachment_cache.get(msg_id) or []
+        ai_ticket = await extract_jira_ticket(
+            raw_text,
+            sender_name=reporter_name,
+            sender_role=sender_role,
+            attachments=cached_atts,
+        )
+
+    # Only send confirmation card if AI identifies an actual issue/bug
     if not ai_ticket.get("is_ticket_request"):
         logger.info(
-            "PM approved message, but content is not a ticket request",
+            "PM approved message, but content is not an issue/ticket request",
             extra={"event": "PM_APPROVAL_NON_TICKET", "messageId": msg_id},
         )
         return None
 
-    from src.services.jira_service import create_jira_issue
-    # Ensure sender name, role, and raw message are populated in ticket data
+    # Ensure issues list is populated
+    issues = ai_ticket.get("issues")
+    if not issues or not isinstance(issues, list):
+        issues = [{
+            "summary": ai_ticket.get("summary", "Issue Report"),
+            "description": ai_ticket.get("description", ""),
+            "issue_type": ai_ticket.get("issue_type", "Bug"),
+            "priority": ai_ticket.get("priority", "Medium"),
+            "affected_module": ai_ticket.get("affected_module", "General"),
+            "suggested_assignee": ai_ticket.get("suggested_assignee") or "Unassigned",
+            "observed_behavior": ai_ticket.get("observed_behavior") or ai_ticket.get("evidence"),
+            "evidence": ai_ticket.get("evidence") or [],
+        }]
+        ai_ticket["issues"] = issues
+
     if not ai_ticket.get("reporter_name"):
-        ai_ticket["reporter_name"] = normalized_message.get("sender", {}).get("displayName") or (row["sender_display_name"] if row else None)
+        ai_ticket["reporter_name"] = reporter_name
     if not ai_ticket.get("reporter_role"):
         ai_ticket["reporter_role"] = sender_role
     if not ai_ticket.get("raw_message"):
-        ai_ticket["raw_message"] = (normalized_message.get("message") or {}).get("text") or (row["message_text"] if row else "")
+        ai_ticket["raw_message"] = raw_text
 
-    ticket_res = await create_jira_issue(
-        summary=ai_ticket.get("summary", "Teams Issue Report"),
-        description=ai_ticket.get("description", ""),
-        issue_type=ai_ticket.get("issue_type", config.jira.default_issue_type),
-        priority=ai_ticket.get("priority", "Medium"),
-        labels=ai_ticket.get("labels", ["teams-automation", "pm-approved"]),
-        message_id=msg_id,
-        assignee_name=ai_ticket.get("suggested_assignee"),
-        ticket_data=ai_ticket,
+    # Update SQLite: save ai_ticket and mark AWAITING_FINAL_CONFIRMATION
+    db.execute(
+        "UPDATE messages SET confirmation_status = 'AWAITING_FINAL_CONFIRMATION', ai_ticket = ? WHERE message_id = ?",
+        (json.dumps(ai_ticket), msg_id),
     )
 
-    if ticket_res.get("success"):
-        issue_key = ticket_res.get("key")
-        issue_url = ticket_res.get("url")
-        summary = ticket_res.get("summary")
-        assignee = ai_ticket.get("suggested_assignee") or "Unassigned"
+    # Post Pending Approval Card to Teams
+    from src.services.teams_notifier import send_pending_approval_notification
+    notify_res = await send_pending_approval_notification(
+        message_id=msg_id,
+        issues=issues,
+        reporter=reporter_name,
+        raw_message=raw_text,
+        chat_id=normalized_message.get("chatId") or row["chat_id"],
+        team_id=normalized_message.get("teamId") or row["team_id"],
+        channel_id=normalized_message.get("channelId") or row["channel_id"],
+        parent_message_id=msg_id,
+    )
 
-        logger.info(
-            f"🎉 Closed-loop automation: Created Jira ticket {issue_key} upon PM approval",
-            extra={"event": "PM_APPROVAL_JIRA_CREATED", "issueKey": issue_key, "messageId": msg_id},
-        )
+    logger.info(
+        f"📋 Sent issue triage confirmation card to Teams for message {msg_id} ({len(issues)} issue(s))",
+        extra={"event": "PM_PENDING_CONFIRMATION_SENT", "messageId": msg_id, "issuesCount": len(issues)},
+    )
 
-        # Upload original screenshots/attachments to the created Jira issue
-        if msg_id and msg_id in _message_attachment_cache:
-            from src.services.jira_service import upload_jira_attachment
-            for att in _message_attachment_cache[msg_id]:
-                try:
-                    await upload_jira_attachment(
-                        issue_key=issue_key,
-                        filename=att.get("name", "attachment"),
-                        file_bytes=att.get("bytes", b""),
-                        content_type=att.get("content_type", "application/octet-stream"),
-                    )
-                except Exception as up_err:
-                    logger.warning(f"Could not upload attachment to Jira {issue_key}: {up_err}")
+    # Broadcast updated message state to dashboard
+    try:
+        from src.services.broadcaster import broadcast_message
+        normalized_message["confirmation_status"] = "AWAITING_FINAL_CONFIRMATION"
+        normalized_message["aiTicket"] = ai_ticket
+        await broadcast_message({
+            "type": "MESSAGE_UPDATED",
+            "message": normalized_message,
+            "senderRole": sender_role,
+            "stored": False,
+            "duplicate": True,
+            "updated": True,
+        })
+    except Exception:
+        pass
 
-        # Post confirmation reply back to Teams chat/channel via Webhook or Graph API
-        from src.services.teams_notifier import send_ticket_created_notification
-        reporter = normalized_message.get("sender", {}).get("displayName") or (row["sender_display_name"] if row else "Client")
-        issue_type = ai_ticket.get("issue_type", config.jira.default_issue_type)
-        priority = ai_ticket.get("priority", "Medium")
-
-        # Determine approver name from reactions
-        approver_name = "PM Santosh Yadav"
-        for r in reactions:
-            d_name = r.get("displayName") or ""
-            if "santosh" in d_name.lower():
-                approver_name = "PM Santosh Yadav"
-                break
-            elif "dhruv" in d_name.lower() or r.get("userId") == config.roles.client:
-                approver_name = f"{d_name} (PM Approver)"
-                break
-
-        await send_ticket_created_notification(
-            ticket_key=issue_key,
-            ticket_url=issue_url,
-            summary=summary,
-            issue_type=issue_type,
-            priority=priority,
-            assignee=assignee,
-            reporter=reporter,
-            approval_note=f"Approved by {approver_name} via Teams 🎟️/🎫 reaction",
-            chat_id=normalized_message.get("chatId"),
-            team_id=normalized_message.get("teamId"),
-            channel_id=normalized_message.get("channelId"),
-            parent_message_id=msg_id,
-            module=ai_ticket.get("affected_module"),
-            evidence=ai_ticket.get("evidence"),
-        )
-
-        return ticket_res
-
-    return None
+    return {
+        "status": "AWAITING_FINAL_CONFIRMATION",
+        "issues_count": len(issues),
+        "notification": notify_res,
+    }
 
 
 async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:

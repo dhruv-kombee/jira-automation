@@ -541,16 +541,30 @@ function createMessageCard(msg, role) {
     `;
   }
 
-  // Jira Ticket Status - ONLY show if a Jira ticket was actually created
-  let jiraTicketHtml = '';
+  // Jira Ticket Status / Triage Status
+  let statusHtml = '';
   if (msg.jira_issue_key) {
-    jiraTicketHtml = `
+    statusHtml = `
       <div class="jira-created-strip">
         <span class="jira-created-icon">🎟️</span>
         <span class="jira-created-label">Jira Issue:</span>
         <a href="${escapeHtml(msg.jira_issue_url || '#')}" target="_blank" class="jira-ticket-link-badge">
           ${escapeHtml(msg.jira_issue_key)} ↗
         </a>
+      </div>
+    `;
+  } else if (msg.confirmation_status === 'AWAITING_FINAL_CONFIRMATION') {
+    statusHtml = `
+      <div class="pending-triage-strip">
+        <span class="pending-triage-label">📋 Awaiting PM Confirmation</span>
+        <button class="btn-triage-approve btn-approve-card" data-id="${escapeHtml(msg.message_id)}">⚡ Approve in Jira</button>
+        <button class="btn-triage-decline btn-decline-card" data-id="${escapeHtml(msg.message_id)}">❌ Decline</button>
+      </div>
+    `;
+  } else if (msg.confirmation_status === 'DECLINED') {
+    statusHtml = `
+      <div class="declined-strip">
+        <span>❌ Ticket Creation Declined by PM</span>
       </div>
     `;
   }
@@ -574,8 +588,57 @@ function createMessageCard(msg, role) {
 
     <div class="card-body">${escapeHtml(msg.message_text || '')}</div>
     ${reactionsHtml}
-    ${jiraTicketHtml}
+    ${statusHtml}
   `;
+
+  // Attach card triage button listeners
+  const btnApprove = card.querySelector('.btn-approve-card');
+  if (btnApprove) {
+    btnApprove.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        btnApprove.disabled = true;
+        btnApprove.innerText = 'Creating...';
+        const res = await fetch(`/api/jira/confirm-approval/${msg.message_id}`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`🎉 Jira Ticket Created: ${data.key}!`, 'success');
+          await fetchMessages();
+        } else {
+          showToast(data.detail || 'Approval failed', 'error');
+        }
+      } catch (err) {
+        showToast('Approval network error', 'error');
+      } finally {
+        btnApprove.disabled = false;
+        btnApprove.innerText = '⚡ Approve in Jira';
+      }
+    });
+  }
+
+  const btnDecline = card.querySelector('.btn-decline-card');
+  if (btnDecline) {
+    btnDecline.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        btnDecline.disabled = true;
+        btnDecline.innerText = 'Declining...';
+        const res = await fetch(`/api/jira/decline-approval/${msg.message_id}`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          showToast('❌ Ticket creation declined', 'info');
+          await fetchMessages();
+        } else {
+          showToast(data.detail || 'Decline failed', 'error');
+        }
+      } catch (err) {
+        showToast('Decline network error', 'error');
+      } finally {
+        btnDecline.disabled = false;
+        btnDecline.innerText = '❌ Decline';
+      }
+    });
+  }
 
   // Attach inspect button listener
   const btnInspect = card.querySelector('.btn-inspect');
@@ -606,35 +669,121 @@ function openPayloadModal(msg) {
       linkJira.innerHTML = `🎟️ Open ${escapeHtml(msg.jira_issue_key)} in Jira ↗`;
       actionsBar.appendChild(linkJira);
     } else {
+      if (msg.confirmation_status === 'AWAITING_FINAL_CONFIRMATION') {
+        const btnConfirm = document.createElement('button');
+        btnConfirm.className = 'btn btn-primary';
+        btnConfirm.style.fontSize = '12px';
+        btnConfirm.style.padding = '5px 12px';
+        btnConfirm.innerHTML = '⚡ Approve & Create in Jira';
+        btnConfirm.addEventListener('click', async () => {
+          try {
+            btnConfirm.disabled = true;
+            btnConfirm.innerText = 'Creating in Jira...';
+            const res = await fetch(`/api/jira/confirm-approval/${msg.message_id}`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+              showToast(`🎉 Jira Ticket Created: ${data.key}!`, 'success');
+              elPayloadModal.classList.remove('active');
+              await fetchMessages();
+            } else {
+              showToast(data.detail || 'Creation failed', 'error');
+            }
+          } catch (err) {
+            showToast('Creation network error', 'error');
+          } finally {
+            btnConfirm.disabled = false;
+            btnConfirm.innerText = '⚡ Approve & Create in Jira';
+          }
+        });
+        actionsBar.appendChild(btnConfirm);
+
+        const btnDecl = document.createElement('button');
+        btnDecl.className = 'btn btn-secondary';
+        btnDecl.style.fontSize = '12px';
+        btnDecl.style.padding = '5px 12px';
+        btnDecl.style.color = '#F87171';
+        btnDecl.innerHTML = '❌ Decline Ticket Creation';
+        btnDecl.addEventListener('click', async () => {
+          try {
+            btnDecl.disabled = true;
+            btnDecl.innerText = 'Declining...';
+            const res = await fetch(`/api/jira/decline-approval/${msg.message_id}`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+              showToast('❌ Ticket creation declined', 'info');
+              elPayloadModal.classList.remove('active');
+              await fetchMessages();
+            } else {
+              showToast(data.detail || 'Decline failed', 'error');
+            }
+          } catch (err) {
+            showToast('Decline network error', 'error');
+          } finally {
+            btnDecl.disabled = false;
+            btnDecl.innerText = '❌ Decline Ticket Creation';
+          }
+        });
+        actionsBar.appendChild(btnDecl);
+      }
+
       const btnPm = document.createElement('button');
       btnPm.className = 'btn btn-secondary';
       btnPm.style.fontSize = '12px';
       btnPm.style.padding = '5px 12px';
-      btnPm.innerHTML = '🎟️ Test PM Approval (Simulate)';
+      btnPm.innerHTML = '🎟️ Simulate PM 🎟️ Reaction';
       btnPm.addEventListener('click', async () => {
         try {
           btnPm.disabled = true;
-          btnPm.innerText = 'Approving...';
+          btnPm.innerText = 'Reacting...';
           const res = await fetch(`/api/test/simulate-pm-approval/${msg.message_id}`, { method: 'POST' });
           const data = await res.json();
           if (res.ok) {
-            showToast('✓ PM Santosh Yadav approved with 🎟️ in Teams!', 'success');
+            showToast('✓ PM reacted with 🎟️ in Teams!', 'success');
             if (data.ticket && data.ticket.key) {
-              showToast(`🎉 Auto-created Jira Ticket: ${data.ticket.key}!`, 'success');
+              showToast(`🎉 Jira Ticket: ${data.ticket.key}!`, 'success');
+            } else if (data.ticket && data.ticket.status === 'AWAITING_FINAL_CONFIRMATION') {
+              showToast(`📋 Issue triage card sent to Teams (${data.ticket.issues_count} issue(s))!`, 'info');
             }
             elPayloadModal.classList.remove('active');
             await fetchMessages();
           } else {
-            showToast(data.detail || 'Approval failed', 'error');
+            showToast(data.detail || 'Reaction failed', 'error');
           }
         } catch (err) {
-          showToast('Approval network error', 'error');
+          showToast('Network error', 'error');
         } finally {
           btnPm.disabled = false;
-          btnPm.innerText = '🎟️ Test PM Approval (Simulate)';
+          btnPm.innerText = '🎟️ Simulate PM 🎟️ Reaction';
         }
       });
       actionsBar.appendChild(btnPm);
+
+      const btnDis = document.createElement('button');
+      btnDis.className = 'btn btn-secondary';
+      btnDis.style.fontSize = '12px';
+      btnDis.style.padding = '5px 12px';
+      btnDis.innerHTML = '❌ Simulate PM ❌ Reaction';
+      btnDis.addEventListener('click', async () => {
+        try {
+          btnDis.disabled = true;
+          btnDis.innerText = 'Reacting...';
+          const res = await fetch(`/api/test/simulate-pm-disapproval/${msg.message_id}`, { method: 'POST' });
+          const data = await res.json();
+          if (res.ok) {
+            showToast('✓ PM reacted with ❌ in Teams!', 'info');
+            elPayloadModal.classList.remove('active');
+            await fetchMessages();
+          } else {
+            showToast(data.detail || 'Reaction failed', 'error');
+          }
+        } catch (err) {
+          showToast('Network error', 'error');
+        } finally {
+          btnDis.disabled = false;
+          btnDis.innerText = '❌ Simulate PM ❌ Reaction';
+        }
+      });
+      actionsBar.appendChild(btnDis);
 
       const btnCreate = document.createElement('button');
       btnCreate.className = 'btn btn-secondary';

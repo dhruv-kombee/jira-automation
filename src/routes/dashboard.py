@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
 from src.config import config
 from src.database import get_db
@@ -380,6 +380,285 @@ async def simulate_pm_approval(message_id: str):
     })
 
     return {"success": True, "ticket": ticket_res, "reactions": reactions}
+
+
+@router.post("/api/test/simulate-pm-disapproval/{message_id}")
+async def simulate_pm_disapproval(message_id: str):
+    """Simulate PM Santosh Yadav reacting with ❌ in Teams to test disapproval."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    msg = dict(row)
+    pm_id = config.roles.pm or "d7bc3c28-33d9-4973-816e-445d51556b8b"
+    pm_reaction = {
+        "reactionType": "❌",
+        "displayName": "Santosh Yadav",
+        "userId": pm_id,
+        "createdDateTime": datetime.now(timezone.utc).isoformat(),
+    }
+
+    raw_reactions = msg.get("reactions")
+    reactions = []
+    if raw_reactions:
+        try:
+            reactions = json.loads(raw_reactions) if isinstance(raw_reactions, str) else raw_reactions
+        except Exception:
+            reactions = []
+
+    from src.services.sender_service import is_ticket_disapproval_reaction
+    if not any((r.get("userId") == pm_id and is_ticket_disapproval_reaction(r.get("reactionType"))) for r in reactions):
+        reactions.append(pm_reaction)
+
+    db.execute("UPDATE messages SET reactions = ? WHERE message_id = ?", (json.dumps(reactions), message_id))
+
+    normalized = {
+        "messageId": message_id,
+        "chatId": msg.get("chat_id"),
+        "teamId": msg.get("team_id"),
+        "channelId": msg.get("channel_id"),
+        "sender": {"userId": msg.get("sender_user_id"), "displayName": msg.get("sender_display_name")},
+        "message": {"text": msg.get("message_text")},
+        "reactions": reactions,
+    }
+
+    from src.services.message_service import check_and_auto_create_jira_ticket
+    sender_role = identify_sender_role(msg.get("sender_user_id"), msg.get("sender_display_name"))
+    decline_res = await check_and_auto_create_jira_ticket(normalized, sender_role)
+
+    await broadcast_message({
+        "type": "MESSAGE_UPDATED",
+        "message": normalized,
+        "senderRole": sender_role,
+        "stored": False,
+        "duplicate": True,
+        "updated": True,
+    })
+
+    return {"success": True, "result": decline_res, "reactions": reactions}
+
+
+def render_confirmation_html(
+    title: str,
+    status_type: str,  # "success", "declined", "error"
+    heading: str,
+    message: str,
+    details: Optional[dict] = None,
+    actions: Optional[list] = None,
+) -> HTMLResponse:
+    details = details or {}
+    actions = actions or []
+
+    badge_color = "#10b981" if status_type == "success" else ("#ef4444" if status_type == "declined" else "#f59e0b")
+    badge_icon = "🎟️" if status_type == "success" else ("❌" if status_type == "declined" else "⚠️")
+
+    facts_html = "".join(
+        f'<div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #334155;">'
+        f'<span style="color:#94a3b8; font-weight:500;">{k}</span>'
+        f'<span style="color:#f8fafc; font-weight:600; text-align:right;">{v}</span>'
+        f'</div>'
+        for k, v in details.items()
+    )
+
+    actions_html = "".join(
+        f'<a href="{act.get("url")}" target="_blank" style="display:inline-block; margin:6px; padding:10px 20px; background:#3b82f6; color:#ffffff; font-weight:600; border-radius:8px; text-decoration:none;">{act.get("label")}</a>'
+        for act in actions
+    )
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+      box-sizing: border-box;
+    }}
+    .card {{
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 14px;
+      max-width: 520px;
+      width: 100%;
+      padding: 32px;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+      text-align: center;
+    }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 700;
+      background: {badge_color}22;
+      color: {badge_color};
+      border: 1px solid {badge_color}44;
+      margin-bottom: 16px;
+    }}
+    h1 {{
+      font-size: 20px;
+      margin: 0 0 10px 0;
+      color: #ffffff;
+    }}
+    p {{
+      color: #94a3b8;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0 0 24px 0;
+    }}
+    .facts-box {{
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 24px;
+      text-align: left;
+      font-size: 13px;
+    }}
+    .footer-note {{
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 24px;
+    }}
+  </style>
+  <script>
+    // Automatically close tab after 1.5 seconds
+    window.onload = function() {{
+      setTimeout(function() {{
+        try {{ window.close(); }} catch(e) {{}}
+      }}, 1500);
+    }};
+  </script>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">{badge_icon} {heading}</div>
+    <h1>{title}</h1>
+    <p>{message}</p>
+    {f'<div class="facts-box">{facts_html}</div>' if details else ''}
+    <div>{actions_html}</div>
+    <div style="margin-top:16px;">
+      <button onclick="window.close()" style="background:#334155; color:#f8fafc; border:1px solid #475569; padding:8px 20px; border-radius:8px; cursor:pointer; font-weight:600; font-size:13px;">✕ Close Window</button>
+    </div>
+    <div class="footer-note">Microsoft Teams &bull; Jira Cloud Automation &bull; Closed-Loop Sync</div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html_content, status_code=200)
+
+
+@router.get("/api/jira/confirm-approval/{message_id}", response_class=HTMLResponse)
+async def confirm_approval_get(message_id: str):
+    """1-Click PM Approval endpoint for Teams card action links (GET)."""
+    from src.services.message_service import execute_jira_ticket_creation
+    res = await execute_jira_ticket_creation(message_id, approver_name="PM Santosh Yadav")
+    if not res.get("success"):
+        return render_confirmation_html(
+            title="Action Failed",
+            status_type="error",
+            heading="Error",
+            message=res.get("error", "Failed to create Jira ticket"),
+        )
+    key = res.get("key", "Created")
+    url = res.get("url", "#")
+    already = res.get("already_existed", False)
+    return render_confirmation_html(
+        title=f"Jira Ticket {'Already Active' if already else 'Created Successfully'}",
+        status_type="success",
+        heading="Approved by PM",
+        message=f"Ticket {key} has been created and confirmation posted to Microsoft Teams. You can close this window now.",
+        details={"Jira Ticket": key, "Status": "Created & Active", "Approved By": "PM Santosh Yadav"},
+    )
+
+
+@router.post("/api/jira/confirm-approval/{message_id}")
+async def confirm_approval_post(message_id: str):
+    """Programmatic / Dashboard PM Approval endpoint (POST)."""
+    from src.services.message_service import execute_jira_ticket_creation
+    res = await execute_jira_ticket_creation(message_id, approver_name="PM Santosh Yadav")
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to create ticket"))
+    return res
+
+
+@router.get("/api/jira/decline-approval/{message_id}", response_class=HTMLResponse)
+async def decline_approval_get(message_id: str):
+    """1-Click PM Decline/Reject endpoint for Teams card action links (GET)."""
+    from src.services.message_service import execute_jira_ticket_decline
+    res = await execute_jira_ticket_decline(message_id, approver_name="PM Santosh Yadav")
+    if not res.get("success"):
+        return render_confirmation_html(
+            title="Reject Failed",
+            status_type="error",
+            heading="Error",
+            message=res.get("error", "Failed to reject ticket"),
+        )
+    return render_confirmation_html(
+        title="Ticket Creation Rejected",
+        status_type="declined",
+        heading="Rejected by PM",
+        message="Ticket creation was rejected. No tickets were created in Jira, and notification has been posted to Teams. You can close this window now.",
+        details={"Status": "Rejected", "Rejected By": "PM Santosh Yadav"},
+    )
+
+
+@router.post("/api/jira/decline-approval/{message_id}")
+async def decline_approval_post(message_id: str):
+    """Programmatic / Dashboard PM Decline endpoint (POST)."""
+    from src.services.message_service import execute_jira_ticket_decline
+    res = await execute_jira_ticket_decline(message_id, approver_name="PM Santosh Yadav")
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to decline ticket"))
+    return res
+
+
+@router.get("/api/jira/confirm-issue/{message_id}/{issue_idx}", response_class=HTMLResponse)
+async def confirm_issue_get(message_id: str, issue_idx: int):
+    """1-Click PM Approval for a specific single issue in a multi-issue triage card (GET)."""
+    from src.services.message_service import execute_jira_ticket_creation
+    res = await execute_jira_ticket_creation(message_id, approver_name="PM Santosh Yadav", issue_idx=issue_idx)
+    if not res.get("success"):
+        return render_confirmation_html(
+            title="Issue Creation Failed",
+            status_type="error",
+            heading="Action Required",
+            message=res.get("error", "Failed to create Jira issue"),
+        )
+    key = res.get("key", "Created")
+    url = res.get("url", "#")
+    return render_confirmation_html(
+        title=f"Issue #{issue_idx + 1} Created in Jira",
+        status_type="success",
+        heading="Issue Approved & Created",
+        message=f"Issue #{issue_idx + 1} was successfully created in Jira.",
+        details={"Jira Ticket": key, "Status": "Active in Jira", "Approved By": "PM Santosh Yadav"},
+        actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
+    )
+
+
+@router.post("/api/jira/confirm-issue/{message_id}/{issue_idx}")
+async def confirm_issue_post(message_id: str, issue_idx: int):
+    """Programmatic / Dashboard PM Approval for a specific single issue (POST)."""
+    from src.services.message_service import execute_jira_ticket_creation
+    res = await execute_jira_ticket_creation(message_id, approver_name="PM Santosh Yadav", issue_idx=issue_idx)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to create Jira issue"))
+    return res
 
 
 @router.get("/api/jira/status")

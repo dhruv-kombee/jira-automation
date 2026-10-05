@@ -112,3 +112,91 @@ def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = Non
             return True
     return False
 
+
+def is_pm_confirmation_approval(reactions: Optional[list], allow_client: Optional[bool] = None) -> bool:
+    """Check if PM reacted to approve in Step 2 (supports 🎟️, 🎫, and instant quick-reaction 👍)."""
+    if not reactions:
+        return False
+    pm_id = (config.roles.pm or "").lower().strip()
+    client_id = (config.roles.client or "").lower().strip()
+    allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
+
+    for r in reactions:
+        u_id = (r.get("userId") or "").lower().strip()
+        disp_name = (r.get("displayName") or "").lower().strip()
+        r_type = (r.get("reactionType") or "").strip().lower()
+
+        is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
+        is_client = (bool(client_id) and u_id == client_id) or ("dhruv" in disp_name)
+        is_authorized = is_pm or (allow_self and is_client)
+
+        # In Step 2, accept 🎟️, 🎫, as well as instant quick reaction 👍 (like)
+        is_approval = is_ticket_approval_reaction(r_type) or r_type in {"like", "👍"}
+
+        if is_authorized and is_approval:
+            return True
+    return False
+
+
+
+TICKET_DISAPPROVAL_NAMES = {
+    "cross",
+    "red x",
+    "cross mark",
+    "x",
+    ":x:",
+    ":cross_mark:",
+    "cancel",
+    "decline",
+    "disapprove",
+    "thumbsdown",
+    "thumbs down",
+    ":thumbsdown:",
+    "-1",
+    ":-1:",
+}
+
+
+def is_ticket_disapproval_reaction(reaction_type: Optional[str]) -> bool:
+    """Check if reaction is specifically a decline/disapproval emoji (❌, ✖️, 🚫, 👎)."""
+    if not reaction_type:
+        return False
+    raw = str(reaction_type).strip()
+    lower = raw.lower()
+
+    if any(e in raw for e in ["❌", "✖️", "✖", "🚫", "👎"]):
+        return True
+
+    cleaned = lower.replace("-", " ").replace("_", " ").strip(": ")
+    if cleaned in {"x", "cross", "cross mark", "cancel", "decline", "disapprove", "thumbsdown", "thumbs down", "no"}:
+        return True
+
+    for name in TICKET_DISAPPROVAL_NAMES:
+        if lower == name or f":{name}:" == lower:
+            return True
+
+    return False
+
+
+def is_pm_disapproval(reactions: Optional[list], allow_client: Optional[bool] = None) -> bool:
+    """Check if PM or authorized user reacted with a disapproval emoji (❌, 👎)."""
+    if not reactions:
+        return False
+    pm_id = (config.roles.pm or "").lower().strip()
+    client_id = (config.roles.client or "").lower().strip()
+    allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
+
+    for r in reactions:
+        u_id = (r.get("userId") or "").lower().strip()
+        disp_name = (r.get("displayName") or "").lower().strip()
+        r_type = (r.get("reactionType") or "").strip()
+
+        is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
+        is_client = (bool(client_id) and u_id == client_id) or ("dhruv" in disp_name)
+        is_authorized = is_pm or (allow_self and is_client)
+
+        if is_authorized and is_ticket_disapproval_reaction(r_type):
+            return True
+    return False
+
+

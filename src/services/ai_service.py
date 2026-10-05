@@ -26,21 +26,9 @@ class ClassificationState(str, Enum):
     GENERAL_MESSAGE = "GENERAL_MESSAGE"  # General conversation/greeting; no action needed
 
 
-class JiraTicketDraft(BaseModel):
-    is_ticket_request: bool = Field(
-        default=True,
-        description="Whether this message or attachment represents an issue, bug, task, or request that should become a Jira ticket",
-    )
-    classification_state: str = Field(
-        default=ClassificationState.CONFIRMED_ISSUE.value,
-        description="CONFIRMED_ISSUE, POSSIBLE_ISSUE, or GENERAL_MESSAGE",
-    )
-    confidence: float = Field(
-        default=0.95,
-        description="Confidence score between 0.0 and 1.0",
-    )
+class JiraTicketItem(BaseModel):
     summary: str = Field(
-        description="Concise, actionable, professional Jira issue title (max 80 chars, e.g. '[Checkout] 504 Gateway Timeout')",
+        description="Concise, actionable, professional Jira issue title (max 80 chars, e.g. '[Dashboard] Refresh button unresponsive')",
     )
     issue_type: str = Field(
         default="Bug",
@@ -52,7 +40,7 @@ class JiraTicketDraft(BaseModel):
     )
     priority_rationale: Optional[str] = Field(
         default=None,
-        description="Why this priority was chosen based on user impact or screenshot/log evidence",
+        description="Why this priority was chosen",
     )
     affected_module: Optional[str] = Field(
         default="General",
@@ -60,7 +48,7 @@ class JiraTicketDraft(BaseModel):
     )
     observed_behavior: Optional[str] = Field(
         default=None,
-        description="What failed or broken behavior occurred, referencing visual/log evidence without asterisks",
+        description="What failed or broken behavior occurred without asterisks",
     )
     expected_behavior: Optional[str] = Field(
         default=None,
@@ -79,6 +67,7 @@ class JiraTicketDraft(BaseModel):
         description="Clear conditions required to verify resolution without markdown asterisks",
     )
     description: str = Field(
+        default="",
         description="Clean, well-structured description without markdown asterisks",
     )
     suggested_assignee: Optional[str] = Field(
@@ -87,7 +76,87 @@ class JiraTicketDraft(BaseModel):
     )
     assignee_rationale: Optional[str] = Field(
         default=None,
-        description="Reason for developer suggestion (e.g. Direct @mention or Frontend module specialist)",
+        description="Reason for developer suggestion",
+    )
+    labels: List[str] = Field(
+        default_factory=lambda: ["teams-automation"],
+        description="Relevant Jira labels without spaces or asterisks",
+    )
+
+
+class JiraTicketDraft(BaseModel):
+    is_ticket_request: bool = Field(
+        default=True,
+        description="Whether this message or attachment represents an issue, bug, task, or request that should become a Jira ticket",
+    )
+    classification_state: str = Field(
+        default=ClassificationState.CONFIRMED_ISSUE.value,
+        description="CONFIRMED_ISSUE, POSSIBLE_ISSUE, or GENERAL_MESSAGE",
+    )
+    confidence: float = Field(
+        default=0.95,
+        description="Confidence score between 0.0 and 1.0",
+    )
+    general_summary: str = Field(
+        default="",
+        description="Brief summary of all issues reported in the client message",
+    )
+    issues: List[JiraTicketItem] = Field(
+        default_factory=list,
+        description="List of distinct issues found in the message. If client reports 1 problem, list contains 1 item. If client lists multiple distinct problems (e.g. 1. ... 2. ...), list each distinct problem as a separate item.",
+    )
+    # Primary issue fields for backward compatibility
+    summary: str = Field(
+        default="",
+        description="Primary Jira issue title (max 80 chars)",
+    )
+    issue_type: str = Field(
+        default="Bug",
+        description="Jira issue type: Bug, Task, Story, or Improvement",
+    )
+    priority: str = Field(
+        default="Medium",
+        description="Jira priority level: Highest, High, Medium, Low",
+    )
+    priority_rationale: Optional[str] = Field(
+        default=None,
+        description="Why this priority was chosen",
+    )
+    affected_module: Optional[str] = Field(
+        default="General",
+        description="Frontend/UI, Backend/API, Database, Payment, Authentication, etc.",
+    )
+    observed_behavior: Optional[str] = Field(
+        default=None,
+        description="What failed without asterisks",
+    )
+    expected_behavior: Optional[str] = Field(
+        default=None,
+        description="Expected behavior without asterisks",
+    )
+    steps_to_reproduce: List[str] = Field(
+        default_factory=list,
+        description="Reproduction steps without asterisks",
+    )
+    evidence: List[str] = Field(
+        default_factory=list,
+        description="Extracted error codes or UI glitch details",
+    )
+    acceptance_criteria: List[str] = Field(
+        default_factory=list,
+        description="Verification criteria without asterisks",
+    )
+    description: str = Field(
+        default="",
+        description="Clean description without asterisks",
+    )
+    suggested_assignee: Optional[str] = Field(
+        default=None,
+        description="Suggested developer name or null",
+    )
+    assignee_rationale: Optional[str] = Field(
+        default=None,
+        description="Reason for developer suggestion",
     )
     labels: List[str] = Field(
         default_factory=lambda: ["teams-automation", "client-reported"],
@@ -123,13 +192,19 @@ Rules:
    - evidence: Specific error codes, log snippets, or visual UI details observed.
    - acceptance_criteria: Definite conditions to verify resolution.
 
-4. Issue Type & Priority:
+4. Multi-Issue Extraction (Single or Multiple Issues):
+   - If the client's message reports multiple distinct bugs, errors, or requests (e.g. numbered items '1. ... 2. ...' or multiple bullet points), extract EACH distinct problem into the `issues` array as a separate issue object!
+   - If only a single issue is reported, `issues` must contain exactly 1 issue object.
+   - Populate `general_summary` with an overall summary of the message.
+   - Set top-level `summary` to the first/primary issue.
+
+5. Issue Type & Priority:
    - "Bug" for defects, broken features, errors, visual glitches.
    - "Task" for general work, configuration, credentials, access.
    - "Story" for new feature requests.
    - Priority: "Highest" or "High" if affecting the entire application, blocking checkouts/auth, or causing downtime. "Medium" for standard bugs. "Low" for minor cosmetic issues.
 
-5. Developer Assignment Routing:
+6. Developer Assignment Routing:
    - Direct Mentions: If message @mentions or specifies a developer name:
      - Musaib / Musain -> "Musaib Khan" (Frontend Lead)
      - Hemil -> "Hemil Ghori" (Backend Lead)
@@ -294,9 +369,32 @@ Details & Investigation:
 - Evidence: {', '.join(evidence) if evidence else 'None observed in plain text'}
 """
 
+    issues = [
+        {
+            "summary": summary,
+            "issue_type": issue_type,
+            "priority": priority,
+            "priority_rationale": "Evaluated by heuristic keyword rules",
+            "affected_module": affected_module,
+            "observed_behavior": clean_text,
+            "expected_behavior": "System operates normally without error",
+            "steps_to_reproduce": steps_to_reproduce,
+            "evidence": evidence,
+            "acceptance_criteria": acceptance_criteria,
+            "description": description.strip(),
+            "suggested_assignee": assignee,
+            "assignee_rationale": assignee_rationale,
+            "reporter_name": sender_name,
+            "reporter_role": sender_role,
+            "labels": ["teams-automation", "client-reported", issue_type.lower()],
+        }
+    ]
+
     return {
         "is_ticket_request": is_ticket,
         "classification_state": classification_state,
+        "general_summary": summary,
+        "issues": issues,
         "summary": summary,
         "issue_type": issue_type,
         "priority": priority,
@@ -436,6 +534,46 @@ Message Content:
             parsed["reporter_role"] = sender_role
             parsed["raw_message"] = clean_text
 
+            raw_issues = parsed.get("issues") or []
+            if not raw_issues and parsed.get("summary"):
+                raw_issues = [{
+                    "summary": parsed.get("summary"),
+                    "issue_type": parsed.get("issue_type", "Bug"),
+                    "priority": parsed.get("priority", "Medium"),
+                    "affected_module": parsed.get("affected_module", "General"),
+                    "observed_behavior": parsed.get("observed_behavior"),
+                    "expected_behavior": parsed.get("expected_behavior"),
+                    "steps_to_reproduce": parsed.get("steps_to_reproduce", []),
+                    "evidence": parsed.get("evidence", []),
+                    "acceptance_criteria": parsed.get("acceptance_criteria", []),
+                    "description": parsed.get("description", ""),
+                    "suggested_assignee": parsed.get("suggested_assignee"),
+                    "labels": parsed.get("labels", ["teams-automation"]),
+                }]
+            elif raw_issues and not parsed.get("summary"):
+                primary = raw_issues[0]
+                parsed["summary"] = primary.get("summary", "Issue Report")
+                parsed["issue_type"] = primary.get("issue_type", "Bug")
+                parsed["priority"] = primary.get("priority", "Medium")
+                parsed["affected_module"] = primary.get("affected_module", "General")
+                parsed["observed_behavior"] = primary.get("observed_behavior")
+                parsed["expected_behavior"] = primary.get("expected_behavior")
+                parsed["steps_to_reproduce"] = primary.get("steps_to_reproduce", [])
+                parsed["evidence"] = primary.get("evidence", [])
+                parsed["acceptance_criteria"] = primary.get("acceptance_criteria", [])
+                parsed["description"] = primary.get("description", "")
+                parsed["suggested_assignee"] = primary.get("suggested_assignee")
+
+            for iss in raw_issues:
+                iss["reporter_name"] = sender_name
+                iss["reporter_role"] = sender_role
+                if "labels" not in iss or not isinstance(iss["labels"], list):
+                    iss["labels"] = ["teams-automation"]
+                elif "teams-automation" not in iss["labels"]:
+                    iss["labels"].append("teams-automation")
+
+            parsed["issues"] = raw_issues
+
             if "labels" in parsed and isinstance(parsed["labels"], list):
                 if "teams-automation" not in parsed["labels"]:
                     parsed["labels"].append("teams-automation")
@@ -444,8 +582,8 @@ Message Content:
 
             parsed["extractor"] = f"gemini ({config.gemini.model})"
             logger.info(
-                f"AI ticket successfully extracted with {config.gemini.model}",
-                extra={"event": "AI_TICKET_EXTRACTED", "summary": parsed.get("summary")},
+                f"AI ticket successfully extracted with {config.gemini.model} ({len(raw_issues)} issue(s) identified)",
+                extra={"event": "AI_TICKET_EXTRACTED", "summary": parsed.get("summary"), "issuesCount": len(raw_issues)},
             )
             return parsed
 
