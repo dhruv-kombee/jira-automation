@@ -15,6 +15,10 @@ FALLBACK_NGROK_PATHS = [
     Path(os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe\ngrok.exe")),
     Path(os.path.expandvars(r"%PROGRAMFILES%\ngrok\ngrok.exe")),
     Path(os.path.expandvars(r"%USERPROFILE%\ngrok.exe")),
+    Path(os.path.expandvars(r"%USERPROFILE%\Downloads\ngrok.exe")),
+    Path(os.path.expandvars(r"%USERPROFILE%\Desktop\ngrok.exe")),
+    Path(os.path.expandvars(r"%LOCALAPPDATA%\ngrok\ngrok.exe")),
+    Path("ngrok.exe"),
 ]
 
 

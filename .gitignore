@@ -53,3 +53,8 @@ Thumbs.db
 *.cert
 *.pfx
 *.p12
+
+# Binaries
+*.exe
+ngrok.exe
+

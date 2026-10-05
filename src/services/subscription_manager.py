@@ -8,8 +8,36 @@ from src.graph_client import (
     list_subscriptions,
     delete_subscription,
 )
+import httpx
 from src.logger import logger
 from src.tunnel import get_active_tunnel_url
+
+
+def check_tunnel_reachable(url: Optional[str]) -> bool:
+    """Verify that the webhook tunnel URL is alive and accessible."""
+    if not url:
+        return False
+    clean_url = url.rstrip('/')
+    headers = {
+        "ngrok-skip-browser-warning": "true",
+        "User-Agent": "teams-automation-probe",
+    }
+    try:
+        # Check /health endpoint with short timeout
+        health_url = f"{clean_url}/health"
+        res = httpx.get(health_url, headers=headers, timeout=3.5)
+        if res.status_code == 200:
+            return True
+    except Exception:
+        pass
+
+    try:
+        # Fallback check on root URL
+        res = httpx.get(clean_url, headers=headers, timeout=3.5)
+        return res.status_code < 500 and res.status_code != 404
+    except Exception:
+        return False
+
 
 _auto_renew_task: Optional[asyncio.Task] = None
 _latest_subscription: Optional[Dict[str, Any]] = None
@@ -98,9 +126,21 @@ def get_active_subscription_info() -> Dict[str, Any]:
 def ensure_subscription_online(public_url: Optional[str] = None) -> Dict[str, Any]:
     """Check if an active subscription exists. If not, or if expiring within 30 min, renew or create."""
     global _last_renewed_at
-    tunnel_url = public_url or config.webhook_public_url or get_active_tunnel_url()
+    tunnel_url = public_url or get_active_tunnel_url() or config.webhook_public_url
     if not tunnel_url:
         return {"status": "error", "message": "No public tunnel URL available"}
+
+    # Verify tunnel is reachable before contacting Microsoft Graph
+    if not check_tunnel_reachable(tunnel_url):
+        logger.warning(
+            f"Public webhook tunnel ({tunnel_url}) is offline or unreachable. "
+            f"Cannot register Microsoft Graph subscription until tunnel is active.",
+            extra={"event": "TUNNEL_UNREACHABLE", "url": tunnel_url},
+        )
+        return {
+            "status": "error",
+            "message": f"Webhook tunnel is offline: {tunnel_url}. Please ensure ngrok is running on port {config.port} or update WEBHOOK_PUBLIC_URL in .env.",
+        }
 
     notification_url = f"{tunnel_url.rstrip('/')}/webhooks/teams"
     status = get_active_subscription_info()
@@ -217,12 +257,16 @@ async def auto_renew_loop():
                             logger.info("Subscription critically low (<5m), ensuring online fresh...")
                             ensure_subscription_online()
             else:
-                # If no active subscription or expired, ensure online immediately
-                logger.warning(
-                    "No active subscription detected by auto-renewer loop. Ensuring online...",
-                    extra={"event": "AUTO_RECREATE_TRIGGER"},
-                )
-                ensure_subscription_online()
+                # If no active subscription or expired, verify tunnel is live before attempting create
+                tunnel_url = get_active_tunnel_url() or config.webhook_public_url
+                if tunnel_url and check_tunnel_reachable(tunnel_url):
+                    logger.warning(
+                        "No active subscription detected by auto-renewer loop. Ensuring online...",
+                        extra={"event": "AUTO_RECREATE_TRIGGER"},
+                    )
+                    ensure_subscription_online(public_url=tunnel_url)
+                else:
+                    logger.debug("Auto-renewer loop waiting: public webhook tunnel is offline.")
 
 
         except asyncio.CancelledError:

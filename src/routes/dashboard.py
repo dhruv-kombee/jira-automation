@@ -15,6 +15,7 @@ from src.repositories.message_repository import store_message, get_all_messages
 from src.services.subscription_manager import (
     get_active_subscription_info,
     ensure_subscription_online,
+    check_tunnel_reachable,
 )
 from src.graph_client import renew_subscription, delete_subscription
 from src.tunnel import get_active_tunnel_url
@@ -66,14 +67,17 @@ def get_system_status():
 
     other_msgs = max(0, total_messages - (client_msgs + pm_msgs + dev_msgs))
 
+    tunnel_reachable = check_tunnel_reachable(tunnel_url) if tunnel_url else False
+
     return {
         "status": "online",
         "service": "Teams -> Jira Automation Engine",
         "uptime": round(time.time() - start_timestamp, 1),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tunnel": {
-            "active": bool(tunnel_url),
+            "active": tunnel_reachable,
             "url": tunnel_url,
+            "reachable": tunnel_reachable,
         },
         "subscription": sub_info,
         "target": {
@@ -173,17 +177,25 @@ async def extract_ticket_for_message(message_id: str):
 
 @router.post("/api/subscription/renew")
 def renew_active_sub():
-    """Manual trigger to renew subscription from dashboard."""
+    """Manual trigger to renew or activate subscription from dashboard."""
     sub_info = get_active_subscription_info()
     if not sub_info.get("active"):
-        raise HTTPException(status_code=400, detail="No active subscription found to renew")
+        # If no active subscription exists, attempt to create/activate it
+        res = ensure_subscription_online()
+        if res.get("status") == "error":
+            raise HTTPException(status_code=400, detail=res.get("message", "Cannot activate subscription: Tunnel is offline"))
+        return {"success": True, "subscription": res.get("subscription"), "action": "created"}
 
     sub_id = sub_info["id"]
     try:
         result = renew_subscription(sub_id, expiration_minutes=60)
-        return {"success": True, "subscription": result}
+        return {"success": True, "subscription": result, "action": "renewed"}
     except Exception as err:
         logger.error(f"Failed manual renewal: {err}")
+        # If renewal fails (e.g. expired on remote), attempt fresh creation
+        recreated = ensure_subscription_online()
+        if recreated.get("status") != "error":
+            return {"success": True, "subscription": recreated.get("subscription"), "action": "recreated"}
         raise HTTPException(status_code=500, detail=str(err))
 
 
@@ -192,7 +204,11 @@ def create_sub():
     """Manual trigger to create or recreate subscription from dashboard."""
     try:
         result = ensure_subscription_online()
+        if result.get("status") == "error":
+            raise HTTPException(status_code=400, detail=result.get("message", "Failed to create subscription"))
         return {"success": True, "result": result}
+    except HTTPException:
+        raise
     except Exception as err:
         logger.error(f"Failed manual creation: {err}")
         raise HTTPException(status_code=500, detail=str(err))

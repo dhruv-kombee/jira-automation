@@ -27,6 +27,8 @@ class RolesConfig:
         self.client = os.getenv('TEST_CLIENT_USER_ID')
         self.pm = os.getenv('TEST_PM_USER_ID')
         self.developer = os.getenv('TEST_DEVELOPER_USER_ID')
+        self.allow_self_approval = os.getenv('ALLOW_SELF_APPROVAL', 'true').lower() in ('true', '1', 'yes')
+
 
 
 class GeminiConfig:

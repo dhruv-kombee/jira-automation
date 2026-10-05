@@ -280,8 +280,8 @@ function renderStatus(data) {
     elTunnelSubtext.innerText = 'Connected via ngrok forwarding to :3000';
   } else {
     elTunnelLink.href = '#';
-    elTunnelLink.innerText = 'No active tunnel detected';
-    elTunnelSubtext.innerText = 'Start ngrok or check configuration';
+    elTunnelLink.innerText = (data.tunnel && data.tunnel.url) ? `Tunnel Offline: ${data.tunnel.url}` : 'No active tunnel detected';
+    elTunnelSubtext.innerText = 'Start ngrok on port 3000 to enable Microsoft Graph webhooks';
   }
 
   // Subscription
@@ -494,15 +494,17 @@ function createMessageCard(msg, role) {
     reactions = [];
   }
 
-  // Check if PM (Santosh) approved
+  // Check if PM approved (Santosh or authorized Client in self-approval mode)
   const pmId = (systemStatus?.roles?.pm?.id || '').toLowerCase().trim();
+  const clientId = (systemStatus?.roles?.client?.id || '').toLowerCase().trim();
   const pmApproved = reactions.some(r => {
     const uId = (r.userId || '').toLowerCase().trim();
     const dispName = (r.displayName || '').toLowerCase().trim();
     const type = (r.reactionType || '').toLowerCase();
     const isPm = (pmId && uId === pmId) || dispName.includes('santosh');
-    const isPos = ['like', '👍', 'heart', 'thumbsup'].some(p => type.includes(p));
-    return isPm && isPos;
+    const isClient = (clientId && uId === clientId) || dispName.includes('dhruv');
+    const isPos = ['like', '👍', 'heart', 'thumbsup', '❤️'].some(p => type.includes(p));
+    return (isPm || isClient) && isPos;
   });
 
   // Build reaction badges HTML - ONLY if reactions exist
@@ -511,12 +513,14 @@ function createMessageCard(msg, role) {
     reactionsHtml = `
       <div class="reactions-strip">
         ${reactions.map(r => {
-          const isPm = ((r.userId || '').toLowerCase().trim() === pmId) || (r.displayName || '').toLowerCase().includes('santosh');
+          const uId = (r.userId || '').toLowerCase().trim();
+          const dispName = (r.displayName || '').toLowerCase().trim();
+          const isPm = (pmId && uId === pmId) || dispName.includes('santosh') || (clientId && uId === clientId) || dispName.includes('dhruv');
           const emoji = (r.reactionType === 'like' || r.reactionType === '👍') ? '👍' : (r.reactionType === 'heart' ? '❤️' : (r.reactionType || '👍'));
           const userName = r.displayName ? ` <span class="reaction-user">(${escapeHtml(r.displayName)})</span>` : '';
-          return `<span class="reaction-badge ${isPm ? 'reaction-pm' : ''}" title="${isPm ? 'PM Approved (Santosh)' : 'Reaction'}">${emoji}${userName}</span>`;
+          return `<span class="reaction-badge ${isPm ? 'reaction-pm' : ''}" title="${isPm ? 'Approved Reaction' : 'Reaction'}">${emoji}${userName}</span>`;
         }).join('')}
-        ${pmApproved ? '<span class="badge-approved">✓ APPROVED BY PM</span>' : ''}
+        ${pmApproved ? '<span class="badge-approved">✓ APPROVED (PM)</span>' : ''}
       </div>
     `;
   }
@@ -689,17 +693,24 @@ function initWebSocket() {
         if (payload.type === 'MESSAGE_UPDATED') {
           const reactions = payload.message?.reactions || [];
           const pmId = (systemStatus?.roles?.pm?.id || '').toLowerCase().trim();
+          const clientId = (systemStatus?.roles?.client?.id || '').toLowerCase().trim();
+          let approverTitle = 'PM';
           const pmApproved = reactions.some(r => {
             const uId = (r.userId || '').toLowerCase().trim();
             const dispName = (r.displayName || '').toLowerCase().trim();
             const type = (r.reactionType || '').toLowerCase();
             const isPm = (pmId && uId === pmId) || dispName.includes('santosh');
-            const isPos = ['like', '👍', 'heart', 'thumbsup'].some(p => type.includes(p));
-            return isPm && isPos;
+            const isClient = (clientId && uId === clientId) || dispName.includes('dhruv');
+            const isPos = ['like', '👍', 'heart', 'thumbsup', '❤️'].some(p => type.includes(p));
+            if ((isPm || isClient) && isPos) {
+              approverTitle = isPm ? 'PM Santosh Yadav' : `${r.displayName || 'Client'} (Acting PM)`;
+              return true;
+            }
+            return false;
           });
 
           if (pmApproved) {
-            showToast('✓ PM Santosh Yadav approved ticket with 👍 in Teams!', 'success');
+            showToast(`✓ ${approverTitle} approved ticket with 👍 in Teams!`, 'success');
           }
 
           // Refresh list and metrics

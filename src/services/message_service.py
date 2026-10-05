@@ -476,6 +476,17 @@ async def check_and_auto_create_jira_ticket(
         issue_type = ai_ticket.get("issue_type", config.jira.default_issue_type)
         priority = ai_ticket.get("priority", "Medium")
 
+        # Determine approver name from reactions
+        approver_name = "PM Santosh Yadav"
+        for r in reactions:
+            d_name = r.get("displayName") or ""
+            if "santosh" in d_name.lower():
+                approver_name = "PM Santosh Yadav"
+                break
+            elif "dhruv" in d_name.lower() or r.get("userId") == config.roles.client:
+                approver_name = f"{d_name} (PM Approver)"
+                break
+
         await send_ticket_created_notification(
             ticket_key=issue_key,
             ticket_url=issue_url,
@@ -484,7 +495,7 @@ async def check_and_auto_create_jira_ticket(
             priority=priority,
             assignee=assignee,
             reporter=reporter,
-            approval_note="Approved by PM Santosh Yadav via Teams 👍 reaction",
+            approval_note=f"Approved by {approver_name} via Teams 👍 reaction",
             chat_id=normalized_message.get("chatId"),
             team_id=normalized_message.get("teamId"),
             channel_id=normalized_message.get("channelId"),

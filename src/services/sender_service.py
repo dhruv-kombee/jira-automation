@@ -47,11 +47,14 @@ def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[s
     return Roles.UNKNOWN
 
 
-def is_pm_approval(reactions: Optional[list]) -> bool:
-    """Check if PM (Santosh Yadav) has reacted with an approval emoji (like, thumbsup, heart)."""
+def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = None) -> bool:
+    """Check if PM (Santosh Yadav) or authorized approver reacted with an approval emoji (like, thumbsup, heart)."""
     if not reactions:
         return False
     pm_id = (config.roles.pm or "").lower().strip()
+    client_id = (config.roles.client or "").lower().strip()
+    allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
+
     for r in reactions:
         u_id = (r.get("userId") or "").lower().strip()
         disp_name = (r.get("displayName") or "").lower().strip()
@@ -59,10 +62,14 @@ def is_pm_approval(reactions: Optional[list]) -> bool:
 
         # Is reaction from PM? Matches configured PM GUID or name containing "santosh"
         is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
-        # Is reaction positive/approval? Strictly thumbs-up, like, or heart
-        is_approval = any(pos in r_type for pos in ["like", "👍", "heart", "thumbsup"])
+        # If self-approval / single-user mode is enabled, client (Dhruv) emoji acts as PM approval
+        is_client = (bool(client_id) and u_id == client_id) or ("dhruv" in disp_name)
+        is_authorized = is_pm or (allow_self and is_client)
 
-        if is_pm and is_approval:
+        # Is reaction positive/approval? Strictly thumbs-up, like, or heart
+        is_approval = any(pos in r_type for pos in ["like", "👍", "heart", "thumbsup", "❤️"])
+
+        if is_authorized and is_approval:
             return True
     return False
 

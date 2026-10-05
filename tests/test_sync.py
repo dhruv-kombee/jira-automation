@@ -1,4 +1,7 @@
-import pytest
+try:
+    import pytest
+except ImportError:
+    pytest = None
 from src.services.sender_service import identify_sender_role, Roles
 from src.services.subscription_manager import get_active_subscription_info, AUTO_RENEW_THRESHOLD_SECONDS
 
@@ -30,9 +33,12 @@ def test_is_pm_approval():
     pm_reactions = [{"userId": "d7bc3c28-33d9-4973-816e-445d51556b8b", "displayName": "Santosh Yadav", "reactionType": "👍"}]
     assert is_pm_approval(pm_reactions) is True
 
-    # Like by client (Dhruv) should not trigger PM approval
+    # When self-approval mode is disabled, client reaction is not PM approval
     client_reactions = [{"userId": "35e03956-1723-469c-b561-90f03fc566ed", "displayName": "Dhruv dobariya", "reactionType": "👍"}]
-    assert is_pm_approval(client_reactions) is False
+    assert is_pm_approval(client_reactions, allow_client=False) is False
+
+    # When self-approval mode is enabled, client reaction acts as PM approval
+    assert is_pm_approval(client_reactions, allow_client=True) is True
 
     # Empty / None
     assert is_pm_approval([]) is False
