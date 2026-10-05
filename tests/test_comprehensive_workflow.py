@@ -1045,3 +1045,156 @@ class TestMultiIssueWorkflow:
 
             mock_create.assert_not_called()
             assert result["status"] == "DECLINED"
+
+
+# ===========================================================================
+# 13. Granular Multi-Issue Actions (Confirm/Decline specific sub-issues)
+# ===========================================================================
+class TestGranularIssueActions:
+    @pytest.mark.asyncio
+    async def test_confirm_issue_specific_index(self, tmp_path):
+        _init_test_db(tmp_path, "granular_confirm.db")
+        msg = _store_msg("msg-gran-1", "Multiple issues", reactions=[PM_REACTION("🎟️")])
+        with patch("src.config.JiraConfig.is_configured", new_callable=PropertyMock, return_value=True), \
+             patch("src.services.ai_service.extract_jira_ticket", AsyncMock(return_value=MOCK_MULTI_ISSUE)), \
+             patch("src.services.teams_notifier.send_pending_approval_notification", AsyncMock(return_value={"success": True})):
+            await check_and_auto_create_jira_ticket(msg, "CLIENT")
+
+        # Approve only issue index 1
+        with patch("src.config.JiraConfig.is_configured", new_callable=PropertyMock, return_value=True), \
+             patch("src.services.jira_service.create_jira_issue", AsyncMock(return_value={"success": True, "key": "SCRUM-55", "url": "https://test.atlassian.net/browse/SCRUM-55"})), \
+             patch("src.services.teams_notifier.send_ticket_created_notification", AsyncMock(return_value={"success": True})):
+            res = await execute_jira_ticket_creation("msg-gran-1", approver_name="PM Santosh Yadav", issue_idx=1)
+            assert res["success"] is True
+            assert res["key"] == "SCRUM-55"
+
+    @pytest.mark.asyncio
+    async def test_confirm_issue_preserves_multiple_keys(self, tmp_path):
+        _init_test_db(tmp_path, "granular_multikey.db")
+        msg = _store_msg("msg-gran-multi", "Multiple issues", reactions=[PM_REACTION("🎟️")])
+        with patch("src.config.JiraConfig.is_configured", new_callable=PropertyMock, return_value=True), \
+             patch("src.services.ai_service.extract_jira_ticket", AsyncMock(return_value=MOCK_MULTI_ISSUE)), \
+             patch("src.services.teams_notifier.send_pending_approval_notification", AsyncMock(return_value={"success": True})):
+            await check_and_auto_create_jira_ticket(msg, "CLIENT")
+
+        # First approve issue index 0
+        with patch("src.config.JiraConfig.is_configured", new_callable=PropertyMock, return_value=True), \
+             patch("src.services.jira_service.create_jira_issue", AsyncMock(return_value={"success": True, "key": "SCRUM-101", "url": "url1"})), \
+             patch("src.services.teams_notifier.send_ticket_created_notification", AsyncMock(return_value={"success": True})):
+            res1 = await execute_jira_ticket_creation("msg-gran-multi", issue_idx=0)
+            assert res1["key"] == "SCRUM-101"
+
+        # Next approve issue index 1
+        with patch("src.config.JiraConfig.is_configured", new_callable=PropertyMock, return_value=True), \
+             patch("src.services.jira_service.create_jira_issue", AsyncMock(return_value={"success": True, "key": "SCRUM-102", "url": "url2"})), \
+             patch("src.services.teams_notifier.send_ticket_created_notification", AsyncMock(return_value={"success": True})):
+            res2 = await execute_jira_ticket_creation("msg-gran-multi", issue_idx=1)
+            assert "SCRUM-101" in res2["key"]
+            assert "SCRUM-102" in res2["key"]
+
+    @pytest.mark.asyncio
+    async def test_decline_issue_specific_index(self, tmp_path):
+        _init_test_db(tmp_path, "granular_decline.db")
+        msg = _store_msg("msg-gran-dec", "Multiple issues", reactions=[PM_REACTION("🎟️")])
+        with patch("src.config.JiraConfig.is_configured", new_callable=PropertyMock, return_value=True), \
+             patch("src.services.ai_service.extract_jira_ticket", AsyncMock(return_value=MOCK_MULTI_ISSUE)), \
+             patch("src.services.teams_notifier.send_pending_approval_notification", AsyncMock(return_value={"success": True})):
+            await check_and_auto_create_jira_ticket(msg, "CLIENT")
+
+        with patch("src.services.teams_notifier.send_ticket_declined_notification", AsyncMock(return_value={"success": True})):
+            res = await execute_jira_ticket_decline("msg-gran-dec", issue_idx=0)
+            assert res["success"] is True
+            assert "Issue #1" in res["declined_label"]
+
+    def test_dashboard_granular_endpoints(self, tmp_path):
+        _init_test_db(tmp_path, "dash_granular.db")
+        _store_msg("msg-dash-gran", "Multi issue text")
+        client = TestClient(app)
+        with patch("src.services.message_service.execute_jira_ticket_creation", AsyncMock(return_value={"success": True, "key": "KEY-1", "url": "http://x"})):
+            r1 = client.get("/api/jira/confirm-issue/msg-dash-gran/0")
+            assert r1.status_code == 200
+            assert "KEY-1" in r1.text or "Approved" in r1.text
+
+        with patch("src.services.message_service.execute_jira_ticket_decline", AsyncMock(return_value={"success": True, "status": "DECLINED"})):
+            r2 = client.get("/api/jira/decline-issue/msg-dash-gran/0")
+            assert r2.status_code == 200
+            assert "Rejected" in r2.text
+
+
+# ===========================================================================
+# 14. Document & Attachment Text Extraction
+# ===========================================================================
+class TestDocumentAndAttachmentParsing:
+    def test_extract_text_from_log_with_octet_stream(self):
+        from src.services.ai_service import extract_text_from_attachment
+        log_bytes = b"2026-10-05 ERROR [server] NullPointerException in payment_gateway.py:42"
+        text = extract_text_from_attachment(log_bytes, "crash.log", "application/octet-stream")
+        assert text is not None
+        assert "NullPointerException" in text
+
+    def test_extract_text_from_json_and_csv(self):
+        from src.services.ai_service import extract_text_from_attachment
+        json_bytes = b'{"status": "failure", "code": 500, "message": "database timed out"}'
+        text = extract_text_from_attachment(json_bytes, "error.json", "application/json")
+        assert text is not None
+        assert "database timed out" in text
+
+    def test_fallback_with_extracted_attachment_text(self):
+        from src.services.ai_service import _rule_based_fallback
+        res = _rule_based_fallback(
+            "",
+            sender_name="Dhruv",
+            sender_role="CLIENT",
+            has_attachments=True,
+            attachment_texts=["NullPointerException in auth.py"],
+            attachment_names=["server_crash.log"],
+        )
+        assert res["is_ticket_request"] is True
+        assert res["issue_type"] == "Bug"
+        assert "server_crash.log" in res["summary"] or "server_crash.log" in str(res["evidence"])
+
+
+# ===========================================================================
+# 15. Thread Grouping & Duplicate Ticket Detection
+# ===========================================================================
+class TestThreadGroupingAndDuplicateDetection:
+    def test_get_parent_message(self, tmp_path):
+        from src.repositories.message_repository import get_parent_message
+        _init_test_db(tmp_path, "thread.db")
+        _store_msg("msg-parent-1", "Original bug report on checkout page")
+        _store_msg("msg-child-1", "Here is screenshot", reactions=[], sender_name="Dhruv")
+        db = get_db()
+        db.execute("UPDATE messages SET reply_to_id = 'msg-parent-1' WHERE message_id = 'msg-child-1'")
+
+        found_parent = get_parent_message("msg-parent-1")
+        assert found_parent is not None
+        assert "Original bug report" in found_parent["message_text"]
+
+    def test_find_recent_similar_tickets(self, tmp_path):
+        from src.repositories.message_repository import find_recent_similar_tickets
+        _init_test_db(tmp_path, "duplicates.db")
+        _store_msg("msg-dup-1", "Payment gateway checkout failing with 500 error", chat_id="chat-123")
+        db = get_db()
+        db.execute("UPDATE messages SET jira_issue_key = 'PAY-99', jira_issue_url = 'https://jira/PAY-99' WHERE message_id = 'msg-dup-1'")
+
+        # New message with similar summary
+        dups = find_recent_similar_tickets("Payment gateway checkout failing with 500 error", chat_id="chat-123")
+        assert len(dups) >= 1
+        assert dups[0]["key"] == "PAY-99"
+
+    def test_pending_approval_card_renders_duplicate_warning(self):
+        from src.services.teams_notifier import build_pending_approval_card
+        card = build_pending_approval_card(
+            message_id="msg-card-dup",
+            issues=[{"summary": "Checkout button broken"}],
+            reporter="Dhruv",
+            raw_message="Checkout broken",
+            created_at="2026-10-05",
+            duplicate_warning={"key": "JIRA-77", "url": "https://jira/JIRA-77", "confidence": 0.85},
+            extractor_mode="Gemini 3.5 Flash-Lite",
+        )
+        card_json = json.dumps(card)
+        assert "Potential Duplicate" in card_json
+        assert "JIRA-77" in card_json
+        assert "Gemini 3.5 Flash-Lite" in card_json
+        assert "Approve" in card_json

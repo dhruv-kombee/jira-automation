@@ -476,6 +476,7 @@ def delete_subscription(subscription_id: str) -> None:
 async def download_hosted_content(content_url: str) -> Optional[tuple[bytes, str]]:
     """Download binary content (such as inline pasted screenshots) from Microsoft Graph.
 
+    Handles Graph authenticated endpoints and pre-signed CDN/blob redirect fallbacks.
     Returns (bytes, content_type) tuple or None if failed.
     """
     token = get_access_token()
@@ -483,8 +484,12 @@ async def download_hosted_content(content_url: str) -> Optional[tuple[bytes, str
         "Authorization": f"Bearer {token}",
     }
     try:
-        async with httpx.AsyncClient(timeout=25.0) as client:
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
             res = await client.get(content_url, headers=headers)
+            if res.status_code in (400, 401, 403):
+                # If pre-signed Azure blob or SharePoint CDN, retry without Graph Bearer auth
+                res = await client.get(content_url)
+
             if res.status_code == 200:
                 content_type = res.headers.get("content-type", "image/png").split(";")[0].strip()
                 logger.info(f"Downloaded inline hosted content ({len(res.content)} bytes, {content_type})")
@@ -500,8 +505,10 @@ async def download_hosted_content(content_url: str) -> Optional[tuple[bytes, str
 async def download_attachment_bytes(content_url: str) -> Optional[tuple[bytes, str]]:
     """Download attachment file bytes (logs, images, PDFs) from Graph or content URL.
 
+    Handles SharePoint, OneDrive, and Teams CDN redirect fallbacks.
     Returns (bytes, content_type) tuple or None if failed.
     """
+    import mimetypes
     token = get_access_token()
     headers = {
         "Authorization": f"Bearer {token}",
@@ -510,12 +517,17 @@ async def download_attachment_bytes(content_url: str) -> Optional[tuple[bytes, s
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             # First try with auth header (Graph endpoint)
             res = await client.get(content_url, headers=headers)
-            if res.status_code in (401, 403):
-                # If SharePoint/OneDrive public link, retry without Graph Bearer auth
+            if res.status_code in (400, 401, 403):
+                # If SharePoint/OneDrive public link or SAS blob URL, retry without Graph Bearer auth
                 res = await client.get(content_url)
 
             if res.status_code == 200:
                 content_type = res.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+                # If content-type is generic, infer from URL path if possible
+                if content_type in ("application/octet-stream", "text/plain") and "." in content_url:
+                    guessed_mime, _ = mimetypes.guess_type(content_url.split("?")[0])
+                    if guessed_mime:
+                        content_type = guessed_mime
                 logger.info(f"Downloaded attachment file ({len(res.content)} bytes, {content_type})")
                 return (res.content, content_type)
             else:

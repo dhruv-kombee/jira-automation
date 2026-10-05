@@ -241,6 +241,8 @@ def build_pending_approval_card(
     raw_message: str,
     created_at: str,
     base_url: Optional[str] = None,
+    duplicate_warning: Optional[Dict[str, Any]] = None,
+    extractor_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build Adaptive Card prompting PM for final confirmation (Approve / Decline) of identified issue(s)."""
     app_base = base_url or get_app_base_url()
@@ -250,14 +252,24 @@ def build_pending_approval_card(
         clean_raw = clean_raw[:117] + "..."
 
     issue_summaries = "\n".join(f"• Issue #{i+1}: {iss.get('summary', 'Issue')}" for i, iss in enumerate(issues))
+    dup_text = f"\n⚠️ Potential duplicate of {duplicate_warning.get('key')} created recently\n" if duplicate_warning else ""
     plain_text = (
         f"📋 PM Triage: {issue_count} Issue(s) Identified\n"
         f"Reporter: {reporter}\n"
+        f"{dup_text}"
         f"Message: {clean_raw}\n\n"
         f"Issues:\n{issue_summaries}\n\n"
         f"👉 To Approve: React with 🎟️ or 🎫\n"
         f"👉 To Reject: React with ❌"
     )
+
+    facts = [
+        {"title": "Reporter:", "value": reporter},
+        {"title": "Identified Issues:", "value": f"{issue_count} issue{'s' if issue_count > 1 else ''}"},
+    ]
+    if extractor_mode:
+        facts.append({"title": "Engine:", "value": extractor_mode})
+    facts.append({"title": "Original Text:", "value": clean_raw or "[No text, see attachments]"})
 
     body_elements = [
         {
@@ -280,15 +292,30 @@ def build_pending_approval_card(
                 },
             ],
         },
-        {
-            "type": "FactSet",
-            "facts": [
-                {"title": "Reporter:", "value": reporter},
-                {"title": "Identified Issues:", "value": f"{issue_count} issue{'s' if issue_count > 1 else ''}"},
-                {"title": "Original Text:", "value": clean_raw or "[No text, see attachments]"},
-            ],
-        },
     ]
+
+    if duplicate_warning:
+        dup_key = duplicate_warning.get("key", "Recent Ticket")
+        dup_url = duplicate_warning.get("url", "#")
+        dup_conf = int(duplicate_warning.get("confidence", 0.5) * 100)
+        body_elements.append({
+            "type": "Container",
+            "style": "attention",
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": f"⚠️ **Potential Duplicate**: Similar ticket [{dup_key}]({dup_url}) was created recently ({dup_conf}% keyword match).",
+                    "weight": "Bolder",
+                    "color": "Attention",
+                    "wrap": True,
+                }
+            ],
+        })
+
+    body_elements.append({
+        "type": "FactSet",
+        "facts": facts,
+    })
 
     for i, iss in enumerate(issues):
         iss_summary = iss.get("summary", "Issue Report")
@@ -353,6 +380,11 @@ def build_pending_approval_card(
         if issue_count > 1
         else "✅ Approve"
     )
+    reject_label = (
+        f"❌ Reject All ({issue_count})"
+        if issue_count > 1
+        else "❌ Reject"
+    )
     actions = [
         {
             "type": "Action.OpenUrl",
@@ -361,7 +393,7 @@ def build_pending_approval_card(
         },
         {
             "type": "Action.OpenUrl",
-            "title": "❌ Reject",
+            "title": reject_label,
             "url": f"{app_base}/api/jira/decline-approval/{message_id}",
         },
     ]
@@ -370,8 +402,13 @@ def build_pending_approval_card(
         for i, iss in enumerate(issues[:3]):
             actions.append({
                 "type": "Action.OpenUrl",
-                "title": f"Approve #{i+1} Only",
+                "title": f"Approve #{i+1}",
                 "url": f"{app_base}/api/jira/confirm-issue/{message_id}/{i}",
+            })
+            actions.append({
+                "type": "Action.OpenUrl",
+                "title": f"Reject #{i+1}",
+                "url": f"{app_base}/api/jira/decline-issue/{message_id}/{i}",
             })
 
     return {
@@ -403,6 +440,8 @@ async def send_pending_approval_notification(
     team_id: Optional[str] = None,
     channel_id: Optional[str] = None,
     parent_message_id: Optional[str] = None,
+    duplicate_warning: Optional[Dict[str, Any]] = None,
+    extractor_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send confirmation request card to Teams asking PM to confirm or decline ticket creation."""
     timestamp = created_at or get_current_timestamp_str()
@@ -414,6 +453,8 @@ async def send_pending_approval_notification(
         reporter=reporter,
         raw_message=raw_message,
         created_at=timestamp,
+        duplicate_warning=duplicate_warning,
+        extractor_mode=extractor_mode,
     )
 
     if webhook_url:

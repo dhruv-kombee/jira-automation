@@ -285,15 +285,72 @@ def optimize_log_content_for_lite(decoded_text: str, max_chars: int = 5000) -> s
     return f"{head}\n\n[... Snipped {len(decoded_text) - 4800} chars of intermediate log output ...]\n\n{tail}"
 
 
+def extract_text_from_attachment(raw_bytes: bytes, name: str, content_type: str) -> Optional[str]:
+    """Extract plain text from attachments including logs, json, csv, code, and PDFs."""
+    if not raw_bytes:
+        return None
+
+    lower_name = (name or "").lower()
+    lower_type = (content_type or "").lower()
+
+    # Plain text / code / log / json / csv / etc.
+    if (
+        any(t in lower_type for t in ["text/", "json", "csv", "log", "xml", "yaml", "javascript", "sql"])
+        or lower_name.endswith((".log", ".txt", ".json", ".csv", ".xml", ".sql", ".md", ".yml", ".yaml", ".py", ".js", ".html", ".css"))
+    ):
+        try:
+            raw_text = raw_bytes.decode("utf-8", errors="replace")
+            return optimize_log_content_for_lite(raw_text)
+        except Exception:
+            try:
+                raw_text = raw_bytes.decode("latin-1", errors="replace")
+                return optimize_log_content_for_lite(raw_text)
+            except Exception:
+                return None
+
+    # PDF text stream extraction
+    if "pdf" in lower_type or lower_name.endswith(".pdf"):
+        import zlib
+        try:
+            text_chunks = []
+            for s in re.finditer(rb'stream[\r\n]+([\s\S]*?)[\r\n]+endstream', raw_bytes):
+                raw_stream = s.group(1)
+                try:
+                    decomp = zlib.decompress(raw_stream)
+                    for m in re.finditer(rb'\((.*?)\)\s*Tj', decomp):
+                        chunk = m.group(1).decode("latin-1", errors="replace").strip()
+                        if chunk:
+                            text_chunks.append(chunk)
+                except Exception:
+                    continue
+            if text_chunks:
+                extracted = " ".join(text_chunks)
+                return optimize_log_content_for_lite(extracted)
+        except Exception as pdf_err:
+            logger.debug(f"Could not extract text from PDF {name}: {pdf_err}")
+
+    return None
+
+
 def _rule_based_fallback(
     text: str,
     sender_name: Optional[str] = None,
     sender_role: Optional[str] = None,
     has_attachments: bool = False,
+    attachment_texts: Optional[List[str]] = None,
+    attachment_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Smart offline rule-based parser when Gemini API keys are not configured or exhausted."""
     clean_text = text.strip()
-    lower_text = clean_text.lower()
+
+    # Combine message text with any extracted attachment content and file names
+    combined_body = clean_text
+    if attachment_texts:
+        combined_body += "\n" + "\n".join(attachment_texts)
+    if attachment_names:
+        combined_body += " " + " ".join(attachment_names)
+
+    lower_text = combined_body.lower()
 
     # Detect if ticket request
     is_ticket = (
@@ -315,7 +372,15 @@ def _rule_based_fallback(
     # Clean title
     title_text = re.sub(r'#\w+', '', clean_text).strip()
     lines = [line.strip() for line in title_text.splitlines() if line.strip()]
-    raw_title = lines[0] if lines else ("Issue with attached screenshot/file" if has_attachments else "Teams Issue Report")
+    if lines:
+        raw_title = lines[0]
+    elif attachment_names:
+        raw_title = f"Issue reported with {attachment_names[0]}"
+    elif has_attachments:
+        raw_title = "Issue with attached screenshot/file"
+    else:
+        raw_title = "Teams Issue Report"
+
     raw_title = raw_title.replace('"', '').replace("'", "")
     if len(raw_title) > 65:
         raw_title = raw_title[:62] + "..."
@@ -344,11 +409,21 @@ def _rule_based_fallback(
         assignee_rationale = "Directly mentioned in message"
 
     evidence = []
-    if has_attachments:
+    if attachment_names:
+        evidence.append(f"Attached file(s): {', '.join(attachment_names)}")
+    elif has_attachments:
         evidence.append("Attached file / screenshot provided by reporter")
+
     for word in ["500", "404", "timeout", "exception", "error"]:
         if word in lower_text:
-            evidence.append(f"Keyword match in message: '{word}'")
+            evidence.append(f"Keyword match in message/attachment: '{word}'")
+
+    if attachment_texts:
+        for atxt in attachment_texts[:2]:
+            snippet = atxt.replace("\n", " ").strip()
+            if len(snippet) > 100:
+                snippet = snippet[:97] + "..."
+            evidence.append(f"Attachment excerpt: {snippet}")
 
     steps_to_reproduce = [
         f"Navigate to the {affected_module} section",
@@ -455,13 +530,35 @@ async def extract_jira_ticket(
             "extractor": "none",
         }
 
+    # Pre-extract text from attachments if available
+    attachment_texts: List[str] = []
+    attachment_names: List[str] = []
+    for att in att_list:
+        raw_b = att.get("bytes")
+        a_name = att.get("name", "attachment")
+        attachment_names.append(a_name)
+        c_type = att.get("content_type", "")
+        if raw_b:
+            txt = extract_text_from_attachment(raw_b, a_name, c_type)
+            if txt:
+                attachment_texts.append(f"[{a_name}]:\n{txt}")
+
     keys = key_pool.get_keys()
     if not keys:
         logger.info(
             "No GEMINI_API_KEYS configured in .env, using smart heuristic ticket extractor",
             extra={"event": "AI_EXTRACT_HEURISTIC"},
         )
-        return _rule_based_fallback(clean_text, sender_name=sender_name, sender_role=sender_role, has_attachments=has_attachments)
+        fallback = _rule_based_fallback(
+            clean_text,
+            sender_name=sender_name,
+            sender_role=sender_role,
+            has_attachments=has_attachments,
+            attachment_texts=attachment_texts,
+            attachment_names=attachment_names,
+        )
+        fallback["extractor"] = "heuristic_fallback (no API keys configured)"
+        return fallback
 
     # Prepare multimodal contents
     prompt_text = f"""Sender: {sender_name or 'Client'} (Role: {sender_role or 'CLIENT'})
@@ -471,11 +568,12 @@ Message Content:
 \"\"\"
 """
     if has_attachments:
-        prompt_text += f"\nNote: The user attached {len(att_list)} file(s)/screenshot(s). Analyze both the text and visual/file attachments carefully."
+        prompt_text += f"\nNote: The user attached {len(att_list)} file(s)/screenshot(s): {', '.join(attachment_names)}. Analyze both the text and visual/file attachments carefully."
 
     # Try each key in the pool with automatic failover
     from google import genai
     from google.genai import types
+    import mimetypes
 
     last_error = None
     for attempt in range(len(keys)):
@@ -497,28 +595,37 @@ Message Content:
                 if not raw_bytes:
                     continue
 
-                if content_type.startswith("image/"):
+                eff_type = (content_type or "").lower().split(";")[0].strip()
+                if not eff_type or eff_type == "application/octet-stream":
+                    guessed, _ = mimetypes.guess_type(name)
+                    if guessed:
+                        eff_type = guessed.lower()
+                    elif name.lower().endswith((".log", ".txt", ".json", ".csv", ".xml", ".sql", ".md", ".yml", ".yaml")):
+                        eff_type = "text/plain"
+                    elif name.lower().endswith(".pdf"):
+                        eff_type = "application/pdf"
+                    elif name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                        eff_type = "image/png"
+
+                if eff_type.startswith("image/"):
                     try:
-                        opt_bytes, opt_mime = optimize_image_for_lite_model(raw_bytes, content_type)
+                        opt_bytes, opt_mime = optimize_image_for_lite_model(raw_bytes, eff_type)
                         content_parts.append(
                             types.Part.from_bytes(data=opt_bytes, mime_type=opt_mime)
                         )
                     except Exception as img_err:
                         logger.warning(f"Could not convert attachment '{name}' to image part: {img_err}")
-                elif any(txt_type in content_type for txt_type in ["text/", "json", "csv", "log"]):
-                    try:
-                        raw_text = raw_bytes.decode("utf-8", errors="replace")
-                        decoded_text = optimize_log_content_for_lite(raw_text)
-                        content_parts.append(f"\n--- Attached File Content: {name} ---\n{decoded_text}\n--- End of File ---\n")
-                    except Exception as txt_err:
-                        logger.warning(f"Could not decode text attachment '{name}': {txt_err}")
-                elif content_type == "application/pdf":
+                elif eff_type == "application/pdf":
                     try:
                         content_parts.append(
                             types.Part.from_bytes(data=raw_bytes, mime_type="application/pdf")
                         )
                     except Exception as pdf_err:
                         logger.warning(f"Could not convert PDF attachment '{name}': {pdf_err}")
+                else:
+                    txt = extract_text_from_attachment(raw_bytes, name, eff_type)
+                    if txt:
+                        content_parts.append(f"\n--- Attached File: {name} ({eff_type}) ---\n{txt}\n--- End of File ---\n")
 
             def _call_gemini():
                 return client.models.generate_content(
@@ -618,6 +725,13 @@ Message Content:
         f"All Gemini API keys exhausted or failed ({last_error}), falling back to heuristic extractor",
         extra={"event": "AI_ALL_KEYS_EXHAUSTED", "error": str(last_error)},
     )
-    fallback = _rule_based_fallback(clean_text, sender_name=sender_name, sender_role=sender_role, has_attachments=has_attachments)
-    fallback["extractor"] = "heuristic_fallback (api_error)"
+    fallback = _rule_based_fallback(
+        clean_text,
+        sender_name=sender_name,
+        sender_role=sender_role,
+        has_attachments=has_attachments,
+        attachment_texts=attachment_texts,
+        attachment_names=attachment_names,
+    )
+    fallback["extractor"] = "heuristic_fallback (API quota exhausted / failover)"
     return fallback

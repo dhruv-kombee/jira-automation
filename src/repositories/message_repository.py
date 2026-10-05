@@ -202,3 +202,67 @@ def update_message_ai_ticket(message_id: str, ai_ticket_dict: Dict[str, Any]) ->
         (ticket_json, message_id),
     )
     return cursor.rowcount > 0
+
+
+def get_parent_message(reply_to_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch parent message if this message is a reply to an earlier thread message."""
+    if not reply_to_id:
+        return None
+    db = get_db()
+    cursor = db.cursor()
+    row = cursor.execute("SELECT * FROM messages WHERE message_id = ?", (reply_to_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def find_recent_similar_tickets(
+    summary: str,
+    chat_id: Optional[str] = None,
+    hours_window: int = 24,
+) -> List[Dict[str, Any]]:
+    """Find active Jira tickets created in the last N hours that might be duplicates."""
+    import re
+    if not summary:
+        return []
+    db = get_db()
+    cursor = db.cursor()
+    query = """
+        SELECT message_id, jira_issue_key, jira_issue_url, ai_ticket, message_text, created_at
+        FROM messages
+        WHERE jira_issue_key IS NOT NULL
+          AND datetime(received_at) >= datetime('now', ?)
+    """
+    params = [f"-{hours_window} hours"]
+    if chat_id:
+        query += " AND chat_id = ?"
+        params.append(chat_id)
+
+    rows = cursor.execute(query, params).fetchall()
+    candidates = []
+    tokens = set(re.findall(r'\b[a-zA-Z]{4,}\b', summary.lower()))
+    if not tokens:
+        return []
+
+    for r in rows:
+        existing_key = r["jira_issue_key"]
+        existing_text = (r["message_text"] or "").lower()
+        existing_ai = r["ai_ticket"]
+        existing_sum = ""
+        if existing_ai:
+            try:
+                data = json.loads(existing_ai) if isinstance(existing_ai, str) else existing_ai
+                existing_sum = (data.get("summary") or "").lower()
+            except Exception:
+                pass
+
+        combined_existing = f"{existing_text} {existing_sum}"
+        matches = sum(1 for t in tokens if t in combined_existing)
+        match_ratio = matches / len(tokens)
+        if match_ratio >= 0.5:
+            candidates.append({
+                "key": existing_key,
+                "url": r["jira_issue_url"],
+                "summary": existing_sum or (r["message_text"] or "")[:50],
+                "message_id": r["message_id"],
+                "confidence": round(match_ratio, 2),
+            })
+    return candidates

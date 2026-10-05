@@ -613,8 +613,13 @@ async def execute_jira_ticket_creation(
             )
 
     if created_keys:
-        primary_key = ", ".join(created_keys)
-        primary_url = created_urls[0] if created_urls else ""
+        # Preserve any previously created keys from granular per-issue approvals
+        prev_keys = [k.strip() for k in (row["jira_issue_key"] or "").split(",") if k.strip()]
+        for k in created_keys:
+            if k not in prev_keys:
+                prev_keys.append(k)
+        primary_key = ", ".join(prev_keys)
+        primary_url = created_urls[0] if created_urls else (row["jira_issue_url"] or "")
         db.execute(
             "UPDATE messages SET confirmation_status = 'APPROVED', jira_issue_key = ?, jira_issue_url = ? WHERE message_id = ?",
             (primary_key, primary_url, message_id),
@@ -651,6 +656,7 @@ async def execute_jira_ticket_decline(
     message_id: str,
     approver_name: str = "PM Santosh Yadav",
     reason: Optional[str] = None,
+    issue_idx: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute Jira ticket decline after PM disapproval.
 
@@ -672,26 +678,38 @@ async def execute_jira_ticket_decline(
         except Exception:
             ai_ticket = None
 
-    issues = (ai_ticket.get("issues") if ai_ticket else None) or ([ai_ticket] if ai_ticket else [{"summary": row["message_text"] or "Issue Report"}])
+    raw_issues = (ai_ticket.get("issues") if ai_ticket else None) or ([ai_ticket] if ai_ticket else [{"summary": row["message_text"] or "Issue Report"}])
     reporter = row["sender_display_name"] or "Client"
 
+    if issue_idx is not None:
+        if 0 <= issue_idx < len(raw_issues):
+            issues_to_decline = [raw_issues[issue_idx]]
+            declined_label = f"Issue #{issue_idx + 1} ({raw_issues[issue_idx].get('summary', 'Issue')})"
+        else:
+            return {"success": False, "error": f"Issue index {issue_idx} out of range"}
+    else:
+        issues_to_decline = raw_issues
+        declined_label = f"All {len(raw_issues)} issue(s)"
+
+    # Only mark confirmation_status as 'DECLINED' if not already partially approved
+    new_status = "DECLINED" if not row["jira_issue_key"] else row["confirmation_status"]
     db.execute(
-        "UPDATE messages SET confirmation_status = 'DECLINED' WHERE message_id = ?",
-        (message_id,),
+        "UPDATE messages SET confirmation_status = ? WHERE message_id = ?",
+        (new_status, message_id),
     )
 
     logger.info(
-        f"❌ Ticket creation declined by {approver_name} for message {message_id}",
-        extra={"event": "PM_DISAPPROVAL_TICKET_DECLINED", "messageId": message_id, "approver": approver_name},
+        f"❌ Ticket creation declined for {declined_label} by {approver_name} for message {message_id}",
+        extra={"event": "PM_DISAPPROVAL_TICKET_DECLINED", "messageId": message_id, "approver": approver_name, "issueIdx": issue_idx},
     )
 
     # Post decline notification to Teams
     notify_res = await send_ticket_declined_notification(
         message_id=message_id,
-        issues=issues,
+        issues=issues_to_decline,
         reporter=reporter,
         approver=approver_name,
-        reason=reason,
+        reason=reason or (f"Rejected by PM: {declined_label}" if issue_idx is not None else None),
         chat_id=row["chat_id"],
         team_id=row["team_id"],
         channel_id=row["channel_id"],
@@ -703,7 +721,7 @@ async def execute_jira_ticket_decline(
             "type": "MESSAGE_UPDATED",
             "message": {
                 "messageId": message_id,
-                "confirmation_status": "DECLINED",
+                "confirmation_status": new_status,
             },
             "stored": False,
             "duplicate": True,
@@ -714,8 +732,9 @@ async def execute_jira_ticket_decline(
 
     return {
         "success": True,
-        "status": "DECLINED",
+        "status": new_status,
         "approver": approver_name,
+        "declined_label": declined_label,
         "notification": notify_res,
     }
 
@@ -816,6 +835,16 @@ async def check_and_auto_create_jira_ticket(
     raw_text = (normalized_message.get("message") or {}).get("text") or row["message_text"] or ""
     reporter_name = normalized_message.get("sender", {}).get("displayName") or row["sender_display_name"] or "Client"
 
+    # Context enrichment: If message is a reply in a thread, pull parent message context
+    reply_to_id = normalized_message.get("replyToId") or row["reply_to_id"]
+    if reply_to_id:
+        from src.repositories.message_repository import get_parent_message
+        parent_msg = get_parent_message(reply_to_id)
+        if parent_msg and parent_msg.get("message_text"):
+            raw_text = f"[In reply to thread: \"{parent_msg.get('message_text')}\"]\n\n{raw_text}"
+            if msg_id not in _message_attachment_cache and reply_to_id in _message_attachment_cache:
+                _message_attachment_cache[msg_id] = _message_attachment_cache[reply_to_id]
+
     if not ai_ticket or not ai_ticket.get("summary"):
         from src.services.ai_service import extract_jira_ticket
         cached_atts = _message_attachment_cache.get(msg_id) or []
@@ -862,6 +891,20 @@ async def check_and_auto_create_jira_ticket(
         (json.dumps(ai_ticket), msg_id),
     )
 
+    # Check for potential recent duplicates
+    from src.repositories.message_repository import find_recent_similar_tickets
+    dup_candidates = find_recent_similar_tickets(
+        summary=ai_ticket.get("summary", ""),
+        chat_id=normalized_message.get("chatId") or row["chat_id"],
+    )
+    duplicate_warning = None
+    if dup_candidates:
+        other_candidates = [d for d in dup_candidates if d.get("message_id") != msg_id]
+        if other_candidates:
+            duplicate_warning = other_candidates[0]
+
+    extractor_mode = ai_ticket.get("extractor")
+
     # Post Pending Approval Card to Teams
     from src.services.teams_notifier import send_pending_approval_notification
     notify_res = await send_pending_approval_notification(
@@ -873,6 +916,8 @@ async def check_and_auto_create_jira_ticket(
         team_id=normalized_message.get("teamId") or row["team_id"],
         channel_id=normalized_message.get("channelId") or row["channel_id"],
         parent_message_id=msg_id,
+        duplicate_warning=duplicate_warning,
+        extractor_mode=extractor_mode,
     )
 
     logger.info(

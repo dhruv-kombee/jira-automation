@@ -661,6 +661,37 @@ async def confirm_issue_post(message_id: str, issue_idx: int):
     return res
 
 
+@router.get("/api/jira/decline-issue/{message_id}/{issue_idx}", response_class=HTMLResponse)
+async def decline_issue_get(message_id: str, issue_idx: int):
+    """1-Click PM Decline for a specific single issue in a multi-issue triage card (GET)."""
+    from src.services.message_service import execute_jira_ticket_decline
+    res = await execute_jira_ticket_decline(message_id, approver_name="PM Santosh Yadav", issue_idx=issue_idx)
+    if not res.get("success"):
+        return render_confirmation_html(
+            title="Action Failed",
+            status_type="error",
+            heading="Error",
+            message=res.get("error", "Failed to reject issue"),
+        )
+    return render_confirmation_html(
+        title=f"Issue #{issue_idx + 1} Rejected",
+        status_type="declined",
+        heading="Issue Rejected by PM",
+        message=f"Issue #{issue_idx + 1} was rejected. No Jira ticket was created for this issue. You can close this window now.",
+        details={"Status": f"Issue #{issue_idx + 1} Rejected", "Rejected By": "PM Santosh Yadav"},
+    )
+
+
+@router.post("/api/jira/decline-issue/{message_id}/{issue_idx}")
+async def decline_issue_post(message_id: str, issue_idx: int):
+    """Programmatic / Dashboard PM Decline for a specific single issue (POST)."""
+    from src.services.message_service import execute_jira_ticket_decline
+    res = await execute_jira_ticket_decline(message_id, approver_name="PM Santosh Yadav", issue_idx=issue_idx)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to decline Jira issue"))
+    return res
+
+
 @router.get("/api/jira/status")
 async def get_jira_status():
     """Test and return live Jira Cloud connection status and project details."""
