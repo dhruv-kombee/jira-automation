@@ -471,3 +471,56 @@ def delete_subscription(subscription_id: str) -> None:
                 "subscriptionId": subscription_id,
             },
         )
+
+
+async def download_hosted_content(content_url: str) -> Optional[tuple[bytes, str]]:
+    """Download binary content (such as inline pasted screenshots) from Microsoft Graph.
+
+    Returns (bytes, content_type) tuple or None if failed.
+    """
+    token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            res = await client.get(content_url, headers=headers)
+            if res.status_code == 200:
+                content_type = res.headers.get("content-type", "image/png").split(";")[0].strip()
+                logger.info(f"Downloaded inline hosted content ({len(res.content)} bytes, {content_type})")
+                return (res.content, content_type)
+            else:
+                logger.warning(f"Failed to download hosted content from {content_url}: HTTP {res.status_code}")
+                return None
+    except Exception as err:
+        logger.warning(f"Error downloading hosted content: {err}")
+        return None
+
+
+async def download_attachment_bytes(content_url: str) -> Optional[tuple[bytes, str]]:
+    """Download attachment file bytes (logs, images, PDFs) from Graph or content URL.
+
+    Returns (bytes, content_type) tuple or None if failed.
+    """
+    token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            # First try with auth header (Graph endpoint)
+            res = await client.get(content_url, headers=headers)
+            if res.status_code in (401, 403):
+                # If SharePoint/OneDrive public link, retry without Graph Bearer auth
+                res = await client.get(content_url)
+
+            if res.status_code == 200:
+                content_type = res.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+                logger.info(f"Downloaded attachment file ({len(res.content)} bytes, {content_type})")
+                return (res.content, content_type)
+            else:
+                logger.warning(f"Failed to download attachment from {content_url}: HTTP {res.status_code}")
+                return None
+    except Exception as err:
+        logger.warning(f"Error downloading attachment bytes: {err}")
+        return None

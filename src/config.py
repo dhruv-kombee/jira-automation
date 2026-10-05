@@ -33,8 +33,41 @@ class RolesConfig:
 
 class GeminiConfig:
     def __init__(self):
-        self.api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
-        self.model = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash-lite')
+        # 1. Gather numbered keys: GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3...
+        numbered_keys = []
+        for i in range(1, 10):
+            val = os.getenv(f'GEMINI_API_KEY_{i}')
+            if val and val.strip():
+                numbered_keys.append(val.strip())
+
+        # 2. Gather comma-separated GEMINI_API_KEYS
+        raw_keys = os.getenv('GEMINI_API_KEYS') or ''
+        csv_keys = [k.strip() for k in raw_keys.split(',') if k.strip()]
+
+        # 3. Fallback to single GEMINI_API_KEY or GOOGLE_API_KEY
+        single_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY') or ''
+        single_keys = [single_key.strip()] if single_key and single_key.strip() else []
+
+        # Combine in priority order without duplicates
+        all_keys = []
+        for k in numbered_keys + csv_keys + single_keys:
+            if k and k not in all_keys:
+                all_keys.append(k)
+
+        self.api_keys = all_keys
+        self.api_key = self.api_keys[0] if self.api_keys else None
+
+        # Default to gemini-3.5-flash-lite, normalizing user string variations
+        raw_model = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash-lite').strip()
+        cleaned_model = raw_model.lower().replace(" ", "-").replace("_", "-")
+        if "3.5" in cleaned_model and "lite" in cleaned_model:
+            self.model = "gemini-3.5-flash-lite"
+        elif "2.5" in cleaned_model and "lite" in cleaned_model:
+            self.model = "gemini-2.5-flash-lite"
+        elif cleaned_model in ("3.5-flash-lite", "flash-lite", "gemini-flash-lite"):
+            self.model = "gemini-3.5-flash-lite"
+        else:
+            self.model = raw_model
 
 
 class JiraConfig:

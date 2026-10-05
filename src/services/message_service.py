@@ -1,7 +1,7 @@
 import html
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from src.config import config
 from src.graph_client import (
     get_channel_message,
@@ -9,20 +9,55 @@ from src.graph_client import (
     get_chat_message,
     list_chat_messages,
     list_channel_messages,
+    download_hosted_content,
+    download_attachment_bytes,
 )
 from src.logger import logger
 from src.repositories.message_repository import store_message
 from src.services.sender_service import identify_sender_role
 
+# In-memory cache for downloaded attachments per message_id (for Jira upload upon PM approval)
+_message_attachment_cache: Dict[str, List[Dict[str, Any]]] = {}
+
 
 def strip_html(html_str: str) -> str:
-    """Strip HTML tags and unescape entities from message body."""
+    """Strip HTML tags while preserving code blocks, blockquotes, and unescaping entities."""
     if not html_str:
         return ""
 
-    # Replace <br> and </p> tags with newlines
-    text = re.sub(r'<br\s*/?>', '\n', html_str, flags=re.IGNORECASE)
+    text = html_str
+    # Convert code blocks: <pre><code>...</code></pre> or <pre>...</pre>
+    text = re.sub(
+        r'<pre[^>]*><code[^>]*>(.*?)</code></pre>',
+        lambda m: f"\n```\n{html.unescape(m.group(1))}\n```\n",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    text = re.sub(
+        r'<pre[^>]*>(.*?)</pre>',
+        lambda m: f"\n```\n{html.unescape(m.group(1))}\n```\n",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    text = re.sub(
+        r'<code[^>]*>(.*?)</code>',
+        lambda m: f"`{html.unescape(m.group(1))}`",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    text = re.sub(
+        r'<blockquote[^>]*>(.*?)</blockquote>',
+        lambda m: f"\n> {html.unescape(m.group(1))}\n",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    # Convert breaks, lists, and paragraph endings
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'</p>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</li>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<li[^>]*>', '• ', text, flags=re.IGNORECASE)
+
     # Remove all remaining HTML tags
     text = re.sub(r'<[^>]+>', '', text)
     # Unescape HTML entities (&nbsp;, &amp;, etc.)
@@ -30,6 +65,13 @@ def strip_html(html_str: str) -> str:
     # Normalize excessive newlines and whitespace
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+
+def extract_inline_images(html_str: str) -> list[str]:
+    """Extract hosted image content URLs from HTML message body."""
+    if not html_str:
+        return []
+    return re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_str, flags=re.IGNORECASE)
 
 
 def parse_resource_path(resource: str, resource_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Optional[str]]]:
@@ -178,6 +220,8 @@ def normalize_message(
             "createdDateTime": r.get("createdDateTime"),
         })
 
+    inline_images = extract_inline_images(raw_body)
+
     return {
         "messageId": graph_msg.get("id"),
         "chatId": chat_id,
@@ -195,6 +239,7 @@ def normalize_message(
         },
         "replyToId": graph_msg.get("replyToId"),
         "attachments": attachments,
+        "inlineImages": inline_images,
         "reactions": reactions,
     }
 
@@ -338,15 +383,55 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
         normalized["sender"].get("displayName"),
     )
 
-    # AI Ticket Extraction (Phase 2: Gemini / Heuristic)
+    # Multimodal attachment downloading & caching
+    downloaded_attachments: List[Dict[str, Any]] = []
+    # 1. Inline hosted images (screenshots pasted directly in Teams)
+    for idx, img_url in enumerate(normalized.get("inlineImages", [])):
+        try:
+            dl_res = await download_hosted_content(img_url)
+            if dl_res:
+                b_data, c_type = dl_res
+                downloaded_attachments.append({
+                    "name": f"screenshot_{idx+1}.png",
+                    "content_type": c_type,
+                    "bytes": b_data,
+                })
+        except Exception as dl_err:
+            logger.debug(f"Could not download inline image {img_url}: {dl_err}")
+
+    # 2. File attachments (logs, text files, images, PDFs)
+    for att in normalized.get("attachments", []):
+        c_url = att.get("contentUrl")
+        att_name = att.get("name") or "attachment"
+        c_type = att.get("contentType") or "application/octet-stream"
+        if c_url:
+            try:
+                dl_res = await download_attachment_bytes(c_url)
+                if dl_res:
+                    b_data, resolved_ctype = dl_res
+                    downloaded_attachments.append({
+                        "name": att_name,
+                        "content_type": resolved_ctype or c_type,
+                        "bytes": b_data,
+                    })
+            except Exception as dl_err:
+                logger.debug(f"Could not download attachment {att_name}: {dl_err}")
+
+    msg_id = normalized.get("messageId")
+    if msg_id and downloaded_attachments:
+        _message_attachment_cache[msg_id] = downloaded_attachments
+
+    # AI Ticket Extraction (Phase 2: Gemini Multimodal / Heuristic)
     message_text = (normalized.get("message") or {}).get("text", "")
-    if any(tag in message_text.lower() for tag in ["#issue", "#bug", "#task", "#ticket", "bug", "issue"]) or sender_role == "CLIENT":
+    has_att = len(downloaded_attachments) > 0
+    if any(tag in message_text.lower() for tag in ["#issue", "#bug", "#task", "#ticket", "bug", "issue"]) or has_att or sender_role == "CLIENT":
         try:
             from src.services.ai_service import extract_jira_ticket
             ai_ticket = await extract_jira_ticket(
                 message_text,
                 sender_name=normalized["sender"].get("displayName"),
                 sender_role=sender_role,
+                attachments=downloaded_attachments,
             )
             if ai_ticket.get("is_ticket_request"):
                 normalized["aiTicket"] = ai_ticket
@@ -450,6 +535,14 @@ async def check_and_auto_create_jira_ticket(
         return None
 
     from src.services.jira_service import create_jira_issue
+    # Ensure sender name, role, and raw message are populated in ticket data
+    if not ai_ticket.get("reporter_name"):
+        ai_ticket["reporter_name"] = normalized_message.get("sender", {}).get("displayName") or (row["sender_display_name"] if row else None)
+    if not ai_ticket.get("reporter_role"):
+        ai_ticket["reporter_role"] = sender_role
+    if not ai_ticket.get("raw_message"):
+        ai_ticket["raw_message"] = (normalized_message.get("message") or {}).get("text") or (row["message_text"] if row else "")
+
     ticket_res = await create_jira_issue(
         summary=ai_ticket.get("summary", "Teams Issue Report"),
         description=ai_ticket.get("description", ""),
@@ -457,6 +550,8 @@ async def check_and_auto_create_jira_ticket(
         priority=ai_ticket.get("priority", "Medium"),
         labels=ai_ticket.get("labels", ["teams-automation", "pm-approved"]),
         message_id=msg_id,
+        assignee_name=ai_ticket.get("suggested_assignee"),
+        ticket_data=ai_ticket,
     )
 
     if ticket_res.get("success"):
@@ -469,6 +564,20 @@ async def check_and_auto_create_jira_ticket(
             f"🎉 Closed-loop automation: Created Jira ticket {issue_key} upon PM approval",
             extra={"event": "PM_APPROVAL_JIRA_CREATED", "issueKey": issue_key, "messageId": msg_id},
         )
+
+        # Upload original screenshots/attachments to the created Jira issue
+        if msg_id and msg_id in _message_attachment_cache:
+            from src.services.jira_service import upload_jira_attachment
+            for att in _message_attachment_cache[msg_id]:
+                try:
+                    await upload_jira_attachment(
+                        issue_key=issue_key,
+                        filename=att.get("name", "attachment"),
+                        file_bytes=att.get("bytes", b""),
+                        content_type=att.get("content_type", "application/octet-stream"),
+                    )
+                except Exception as up_err:
+                    logger.warning(f"Could not upload attachment to Jira {issue_key}: {up_err}")
 
         # Post confirmation reply back to Teams chat/channel via Webhook or Graph API
         from src.services.teams_notifier import send_ticket_created_notification
@@ -500,6 +609,8 @@ async def check_and_auto_create_jira_ticket(
             team_id=normalized_message.get("teamId"),
             channel_id=normalized_message.get("channelId"),
             parent_message_id=msg_id,
+            module=ai_ticket.get("affected_module"),
+            evidence=ai_ticket.get("evidence"),
         )
 
         return ticket_res

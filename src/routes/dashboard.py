@@ -28,6 +28,9 @@ class SimulateMessageRequest(BaseModel):
     role: str = "CLIENT"  # CLIENT, PM, DEVELOPER
     text: str
     sender_name: Optional[str] = None
+    attachment_base64: Optional[str] = None  # Base64 encoded screenshot or log file
+    attachment_name: Optional[str] = None    # e.g. 'error_screenshot.png'
+    attachment_type: Optional[str] = None    # e.g. 'image/png'
 
 
 @router.get("/api/status")
@@ -233,6 +236,9 @@ def delete_sub():
 @router.post("/api/test/simulate")
 async def simulate_message(req: SimulateMessageRequest):
     """Simulate an incoming message for testing dashboard and detection pipeline."""
+    import base64
+    from src.services.message_service import _message_attachment_cache
+
     role = req.role.upper()
     role_map = {
         "CLIENT": (config.roles.client, req.sender_name or "Dhruv dobariya"),
@@ -242,6 +248,28 @@ async def simulate_message(req: SimulateMessageRequest):
 
     user_id, display_name = role_map.get(role, ("sim-user-" + str(uuid.uuid4())[:6], req.sender_name or "Test User"))
     sim_id = "sim-" + str(int(time.time() * 1000))
+
+    sim_attachments = []
+    sim_attachments_meta = []
+    if req.attachment_base64:
+        try:
+            b_data = base64.b64decode(req.attachment_base64)
+            att_name = req.attachment_name or "simulated_screenshot.png"
+            att_type = req.attachment_type or "image/png"
+            sim_attachments.append({
+                "name": att_name,
+                "content_type": att_type,
+                "bytes": b_data,
+            })
+            sim_attachments_meta.append({
+                "id": "att-" + sim_id,
+                "contentType": att_type,
+                "name": att_name,
+                "contentUrl": None,
+            })
+            _message_attachment_cache[sim_id] = sim_attachments
+        except Exception as b64_err:
+            logger.warning(f"Could not decode simulated attachment base64: {b64_err}")
 
     sim_msg = {
         "messageId": sim_id,
@@ -259,14 +287,20 @@ async def simulate_message(req: SimulateMessageRequest):
             "webUrl": None,
         },
         "replyToId": None,
-        "attachments": [],
+        "attachments": sim_attachments_meta,
     }
 
     # Extract AI ticket draft if applicable
-    if role == "CLIENT" or any(kw in req.text.lower() for kw in ["#issue", "#bug", "#task", "bug", "issue"]):
+    has_att = len(sim_attachments) > 0
+    if role == "CLIENT" or has_att or any(kw in req.text.lower() for kw in ["#issue", "#bug", "#task", "bug", "issue"]):
         try:
             from src.services.ai_service import extract_jira_ticket
-            ai_ticket = await extract_jira_ticket(req.text, sender_name=display_name, sender_role=role)
+            ai_ticket = await extract_jira_ticket(
+                req.text,
+                sender_name=display_name,
+                sender_role=role,
+                attachments=sim_attachments,
+            )
             if ai_ticket.get("is_ticket_request"):
                 sim_msg["aiTicket"] = ai_ticket
         except Exception:
@@ -401,6 +435,12 @@ async def create_jira_from_message(message_id: str):
         )
 
     from src.services.jira_service import create_jira_issue
+    # Ensure reporter and message fields are populated in ticket data
+    if not ai_ticket.get("reporter_name"):
+        ai_ticket["reporter_name"] = msg.get("sender_display_name")
+    if not ai_ticket.get("raw_message"):
+        ai_ticket["raw_message"] = msg.get("message_text") or ""
+
     res = await create_jira_issue(
         summary=ai_ticket.get("summary", "Teams Issue Report"),
         description=ai_ticket.get("description", msg.get("message_text") or ""),
@@ -408,6 +448,8 @@ async def create_jira_from_message(message_id: str):
         priority=ai_ticket.get("priority", "Medium"),
         labels=ai_ticket.get("labels", ["teams-automation"]),
         message_id=message_id,
+        assignee_name=ai_ticket.get("suggested_assignee"),
+        ticket_data=ai_ticket,
     )
 
     if not res.get("success"):

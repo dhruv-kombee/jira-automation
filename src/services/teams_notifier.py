@@ -24,6 +24,8 @@ def build_adaptive_card_payload(
     assignee: str,
     reporter: str,
     approval_note: str,
+    module: Optional[str] = None,
+    evidence: Optional[list] = None,
 ) -> Dict[str, Any]:
     """Build a Teams-compatible Adaptive Card payload."""
     clean_summary = summary.replace("\n", " ").strip()
@@ -34,6 +36,26 @@ def build_adaptive_card_payload(
         f"Assignee: {assignee}\n"
         f"Approval: {approval_note}"
     )
+
+    facts = [
+        {"title": "Ticket:", "value": f"[{ticket_key}]({ticket_url})"},
+        {"title": "Summary:", "value": clean_summary},
+        {"title": "Type & Priority:", "value": f"{issue_type} | {priority}"},
+    ]
+    if module and module != "General":
+        facts.append({"title": "Module:", "value": module})
+    if evidence and len(evidence) > 0:
+        ev_text = "; ".join(str(e) for e in evidence[:2])
+        if len(ev_text) > 80:
+            ev_text = ev_text[:77] + "..."
+        facts.append({"title": "Evidence:", "value": ev_text})
+
+    facts.extend([
+        {"title": "Date & Time:", "value": created_at},
+        {"title": "Assignee:", "value": assignee},
+        {"title": "Reporter:", "value": reporter},
+        {"title": "Approval:", "value": approval_note},
+    ])
 
     return {
         "type": "message",
@@ -62,15 +84,7 @@ def build_adaptive_card_payload(
                         },
                         {
                             "type": "FactSet",
-                            "facts": [
-                                {"title": "Ticket:", "value": f"[{ticket_key}]({ticket_url})"},
-                                {"title": "Summary:", "value": clean_summary},
-                                {"title": "Type & Priority:", "value": f"{issue_type} | {priority}"},
-                                {"title": "Date & Time:", "value": created_at},
-                                {"title": "Assignee:", "value": assignee},
-                                {"title": "Reporter:", "value": reporter},
-                                {"title": "Approval:", "value": approval_note},
-                            ],
+                            "facts": facts,
                         },
                     ],
                     "actions": [
@@ -96,14 +110,22 @@ def build_html_message(
     assignee: str,
     reporter: str,
     approval_note: str,
+    module: Optional[str] = None,
+    evidence: Optional[list] = None,
 ) -> str:
     """Build formatted HTML confirmation message."""
     clean_summary = summary.replace("\n", " ").strip()
+    extra_info = ""
+    if module and module != "General":
+        extra_info += f"<br/>📦 <b>Module</b>: {module}"
+    if evidence:
+        extra_info += f"<br/>🔍 <b>Evidence</b>: {'; '.join(str(e) for e in evidence[:2])}"
+
     return (
         f"🎟️ <b>Jira Ticket Created</b>: <a href='{ticket_url}'><b>{ticket_key}</b></a><br/>"
         f"📅 <b>Date & Time</b>: {created_at}<br/>"
         f"📝 <b>Summary</b>: {clean_summary}<br/>"
-        f"⚡ <b>Type & Priority</b>: {issue_type} | {priority}<br/>"
+        f"⚡ <b>Type & Priority</b>: {issue_type} | {priority}{extra_info}<br/>"
         f"👤 <b>Assignee</b>: {assignee}<br/>"
         f"🗣️ <b>Reporter</b>: {reporter}<br/>"
         f"✅ <i>{approval_note}</i>"
@@ -124,6 +146,8 @@ async def send_ticket_created_notification(
     team_id: Optional[str] = None,
     channel_id: Optional[str] = None,
     parent_message_id: Optional[str] = None,
+    module: Optional[str] = None,
+    evidence: Optional[list] = None,
 ) -> Dict[str, Any]:
     """Send Jira ticket confirmation to Teams via Workflow Webhook (Option A) or Graph API."""
     timestamp = created_at or get_current_timestamp_str()
@@ -145,6 +169,8 @@ async def send_ticket_created_notification(
             assignee=assignee,
             reporter=reporter,
             approval_note=approval_note,
+            module=module,
+            evidence=evidence,
         )
 
         try:
@@ -178,6 +204,8 @@ async def send_ticket_created_notification(
         assignee=assignee,
         reporter=reporter,
         approval_note=approval_note,
+        module=module,
+        evidence=evidence,
     )
 
     effective_chat_id = chat_id or config.teams.chat_id

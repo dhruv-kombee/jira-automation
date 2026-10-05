@@ -79,3 +79,58 @@ async def test_create_jira_issue_mocked():
             assert res["success"] is True
             assert res["key"] == "TEST-42"
             assert "https://test-company.atlassian.net/browse/TEST-42" in res["url"]
+
+
+def test_strip_markdown_asterisks():
+    from src.services.jira_service import strip_markdown_asterisks
+    assert strip_markdown_asterisks("**Reported By**: Dhruv") == "Reported By: Dhruv"
+    assert strip_markdown_asterisks("*Observed Behavior*: Button fails") == "Observed Behavior: Button fails"
+    assert strip_markdown_asterisks("* List item") == "List item"
+    assert strip_markdown_asterisks("__bold text__") == "bold text"
+
+
+def test_build_jira_adf_zero_asterisks():
+    import json
+    from src.services.jira_service import build_jira_adf
+    adf = build_jira_adf(
+        summary="[Dashboard] Refresh button not working",
+        priority="Medium",
+        reporter_name="Dhruv dobariya",
+        reporter_role="CLIENT",
+        module="Dashboard / Navigation",
+        observed_behavior="User clicks refresh but nothing happens",
+        expected_behavior="Data reloads and view refreshes",
+        steps_to_reproduce=["Go to dashboard", "Click refresh in top right", "Notice lack of response"],
+        evidence=["User reported button unresponsive", "Screenshot of refresh icon"],
+        acceptance_criteria=["Clicking refresh updates stats", "Spinner confirms operation"],
+        suggested_assignee="Musaib Khan",
+    )
+
+    raw_json = json.dumps(adf)
+    assert "**" not in raw_json
+    assert "*" not in raw_json
+    assert adf["version"] == 1
+    assert adf["type"] == "doc"
+    # Check that panel, headings, and bullet lists exist
+    types = [node["type"] for node in adf["content"]]
+    assert "panel" in types
+    assert "heading" in types
+    assert "bulletList" in types
+
+
+def test_text_to_adf_strips_asterisks():
+    import json
+    from src.services.jira_service import text_to_adf
+    sample = """*Reported By*: Dhruv dobariya (CLIENT)
+*Observed Behavior*: The button is unresponsive.
+*Evidence*:
+• User feedback stating the button is unresponsive
+• Screenshot showing the icon"""
+    adf = text_to_adf(sample)
+    raw_json = json.dumps(adf)
+    assert "**" not in raw_json
+    assert "*" not in raw_json
+    types = [node["type"] for node in adf["content"]]
+    assert "heading" in types
+    assert "bulletList" in types
+
