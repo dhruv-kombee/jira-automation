@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Management Hub & System Settings — Jira Automation</title>
+  <meta name="description" content="Manage team members, roles, Microsoft Teams channels, Jira credentials, and AI settings for Jira-Automation.">
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/settings.css">
+</head>
+<body>
+  <!-- Background Glow Accents -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo-container">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="logo-title">JiraAutomation <span>Hub</span></h1>
+          <p class="logo-subtitle">Management & Settings Console</p>
+        </div>
+      </div>
+
+      <!-- Quick Navigation Switcher -->
+      <nav class="header-nav">
+        <a href="/" class="nav-link">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span>Live Operations</span>
+        </a>
+        <a href="/settings" class="nav-link active">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings & Roles</span>
+        </a>
+      </nav>
+    </div>
+
+    <div class="header-right">
+      <div class="status-pill status-pill-online" id="connectionStatus">
+        <span class="status-dot"></span>
+        <span>SYSTEM ONLINE</span>
+      </div>
+
+      <button id="btnTopSave" class="btn btn-primary" style="display:inline-flex; align-items:center; gap:0.5rem;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+        <span>Save Changes</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="settings-container">
+    
+    <!-- Top Metrics Overview -->
+    <section class="metrics-row">
+      <div class="metric-card">
+        <div class="metric-icon-box icon-box-purple">👥</div>
+        <div class="metric-info">
+          <h3 id="statTotalMembers">4</h3>
+          <p>Team Members & Clients</p>
+        </div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-icon-box icon-box-cyan">💬</div>
+        <div class="metric-info">
+          <h3 id="statTotalChannels">1</h3>
+          <p>Monitored Channels</p>
+        </div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-icon-box icon-box-blue">🎟️</div>
+        <div class="metric-info">
+          <h3 id="statJiraProject">SCRUM</h3>
+          <p>Jira Target Project</p>
+        </div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-icon-box icon-box-amber">🤖</div>
+        <div class="metric-info">
+          <h3 id="statAiEngine">Gemini Flash-Lite</h3>
+          <p>AI Triage Model</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Secondary Tabs Navigation -->
+    <nav class="tabs-nav">
+      <button class="tab-btn active" data-tab="tab-members">
+        <span>👥</span> Team & Roles <span class="tab-badge" id="badgeMemberCount">4</span>
+      </button>
+      <button class="tab-btn" data-tab="tab-channels">
+        <span>💬</span> Teams Channels & Chats <span class="tab-badge" id="badgeChannelCount">1</span>
+      </button>
+      <button class="tab-btn" data-tab="tab-jira">
+        <span>🎟️</span> Atlassian Jira Cloud
+      </button>
+      <button class="tab-btn" data-tab="tab-gemini">
+        <span>🤖</span> Gemini AI Engine
+      </button>
+      <button class="tab-btn" data-tab="tab-network">
+        <span>🌐</span> Webhooks & Server
+      </button>
+      <button class="tab-btn" data-tab="tab-audit">
+        <span>📜</span> Activity Audit Log
+      </button>
+    </nav>
+
+    <!-- ================================================================= -->
+    <!-- TAB 1: Team & Roles Management -->
+    <!-- ================================================================= -->
+    <section id="tab-members" class="tab-content active">
+      <div class="friendly-tip-box">
+        <div class="friendly-tip-icon">💡</div>
+        <div class="friendly-tip-body">
+          <h4>How User Roles Work</h4>
+          <p>
+            When someone posts a message in Microsoft Teams, the automation checks their role. 
+            <strong>Clients</strong> have their bug reports automatically drafted as Jira issues. 
+            <strong>Project Managers (PMs)</strong> receive triage cards to approve or reject issues. 
+            <strong>Developers</strong> are automatically routed and suggested based on their designated specialty.
+          </p>
+        </div>
+      </div>
+
+      <div class="section-header-bar">
+        <h2>
+          <span>👥</span> Team Directory & Permissions
+        </h2>
+        <button id="btnOpenAddMemberModal" class="btn btn-primary" style="display:inline-flex; align-items:center; gap:0.4rem;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Team Member
+        </button>
+      </div>
+
+      <div class="custom-table-container">
+        <table class="custom-table" id="membersTable">
+          <thead>
+            <tr>
+              <th>Member Name</th>
+              <th>Assigned Role</th>
+              <th>Specialty / Focus Area</th>
+              <th>Teams Graph ID</th>
+              <th>Can Approve via Reactions</th>
+              <th>Status</th>
+              <th style="text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="membersTableBody">
+            <!-- Populated via settings.js -->
+            <tr>
+              <td colspan="7" style="text-align:center; padding:2rem; color:var(--text-muted);">Loading members...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 2: Monitored Channels & Chats -->
+    <!-- ================================================================= -->
+    <section id="tab-channels" class="tab-content">
+      <div class="friendly-tip-box">
+        <div class="friendly-tip-icon">💬</div>
+        <div class="friendly-tip-body">
+          <h4>Managing Channels & Group Chats</h4>
+          <p>
+            You can connect multiple Microsoft Teams chats and channels. Set their <strong>Usage Purpose</strong> to specify whether the channel is used for receiving client bug reports, internal PM approvals, or developer escalation alerts.
+          </p>
+        </div>
+      </div>
+
+      <div class="section-header-bar">
+        <h2>
+          <span>💬</span> Monitored Channels & Chats
+        </h2>
+        <button id="btnOpenAddChannelModal" class="btn btn-primary" style="display:inline-flex; align-items:center; gap:0.4rem;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Channel or Chat
+        </button>
+      </div>
+
+      <div class="custom-table-container">
+        <table class="custom-table" id="channelsTable">
+          <thead>
+            <tr>
+              <th>Channel / Chat Name</th>
+              <th>Type</th>
+              <th>Usage Purpose</th>
+              <th>Channel / Chat ID</th>
+              <th>Incoming Webhook URL</th>
+              <th>Status</th>
+              <th style="text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="channelsTableBody">
+            <!-- Populated via settings.js -->
+            <tr>
+              <td colspan="7" style="text-align:center; padding:2rem; color:var(--text-muted);">Loading channels...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 3: Atlassian Jira Cloud Integration -->
+    <!-- ================================================================= -->
+    <section id="tab-jira" class="tab-content">
+      <div class="friendly-tip-box">
+        <div class="friendly-tip-icon">🎟️</div>
+        <div class="friendly-tip-body">
+          <h4>Jira Cloud Connection</h4>
+          <p>
+            Approved bug tickets are automatically created inside your Jira Cloud workspace. Use your Atlassian service account email and an API token generated from your Atlassian Security profile.
+          </p>
+        </div>
+      </div>
+
+      <div class="form-card">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">
+              <span>Jira Base URL</span>
+              <span class="form-helper">Your Atlassian domain</span>
+            </label>
+            <input type="url" id="jiraBaseUrl" class="form-input" placeholder="https://yourcompany.atlassian.net">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">
+              <span>Target Project Key</span>
+              <span class="form-helper">e.g. SCRUM, PROJ, HELP</span>
+            </label>
+            <input type="text" id="jiraProjectKey" class="form-input" placeholder="SCRUM" style="text-transform:uppercase;">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">
+              <span>Atlassian Account Email</span>
+              <span class="form-helper">Email associated with Jira API token</span>
+            </label>
+            <input type="email" id="jiraEmail" class="form-input" placeholder="service-account@yourcompany.com">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">
+              <span>Jira API Token</span>
+              <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" class="form-helper" style="color:var(--accent-cyan); text-decoration:underline;">Create token ↗</a>
+            </label>
+            <div class="secret-input-wrapper">
+              <input type="password" id="jiraApiToken" class="form-input" placeholder="••••••••••••••••••••••••">
+              <button type="button" class="btn-toggle-secret" data-target="jiraApiToken" title="Show / Hide Token">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">
+              <span>Default Issue Type</span>
+              <span class="form-helper">Standard created ticket type</span>
+            </label>
+            <select id="jiraDefaultIssueType" class="form-select">
+              <option value="Bug">Bug (Recommended for defects)</option>
+              <option value="Task">Task</option>
+              <option value="Story">Story</option>
+              <option value="Improvement">Improvement</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="test-action-bar">
+          <button id="btnTestJira" class="btn btn-outline-cyan" style="display:inline-flex; align-items:center; gap:0.5rem;">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            <span>Test Jira Connection</span>
+          </button>
+          <div id="jiraTestResult" class="test-result-badge"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 4: Google Gemini AI Engine -->
+    <!-- ================================================================= -->
+    <section id="tab-gemini" class="tab-content">
+      <div class="friendly-tip-box">
+        <div class="friendly-tip-icon">🤖</div>
+        <div class="friendly-tip-body">
+          <h4>Multi-Key Failover Pool & Model Selection</h4>
+          <p>
+            To prevent rate limits during heavy client bug reporting, the system supports a pool of Gemini API keys. 
+            If Key 1 is throttled (HTTP 429), Key 2 automatically takes over without failing user requests.
+          </p>
+        </div>
+      </div>
+
+      <div class="form-card">
+        <div class="form-grid">
+          <div class="form-group full-width">
+            <label class="form-label">
+              <span>Active AI Model</span>
+              <span class="form-helper">Multimodal engine used for ticket extraction & screenshot analysis</span>
+            </label>
+            <select id="geminiModel" class="form-select">
+              <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Recommended — Ultra-fast, low latency, multimodal)</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash (Balanced speed and deep reasoning)</option>
+              <option value="gemini-1.5-pro">gemini-1.5-pro (High reasoning for very complex logs)</option>
+            </select>
+          </div>
+
+          <div class="form-group full-width">
+            <label class="form-label">
+              <span>Primary API Key (Key 1)</span>
+              <span class="form-helper">Main active key from Google AI Studio</span>
+            </label>
+            <div class="secret-input-wrapper">
+              <input type="password" id="geminiApiKey1" class="form-input" placeholder="••••••••••••••••••••••••">
+              <button type="button" class="btn-toggle-secret" data-target="geminiApiKey1" title="Show / Hide Key">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group full-width">
+            <label class="form-label">
+              <span>Secondary Failover Key (Key 2)</span>
+              <span class="form-helper">Auto-fails over if Key 1 hits quota</span>
+            </label>
+            <div class="secret-input-wrapper">
+              <input type="password" id="geminiApiKey2" class="form-input" placeholder="Optional backup key">
+              <button type="button" class="btn-toggle-secret" data-target="geminiApiKey2" title="Show / Hide Key">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group full-width">
+            <label class="form-label">
+              <span>Tertiary Emergency Key (Key 3)</span>
+              <span class="form-helper">Emergency failover key</span>
+            </label>
+            <div class="secret-input-wrapper">
+              <input type="password" id="geminiApiKey3" class="form-input" placeholder="Optional emergency key">
+              <button type="button" class="btn-toggle-secret" data-target="geminiApiKey3" title="Show / Hide Key">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="test-action-bar">
+          <button id="btnTestGemini" class="btn btn-outline-cyan" style="display:inline-flex; align-items:center; gap:0.5rem;">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            <span>Test Gemini AI</span>
+          </button>
+          <div id="geminiTestResult" class="test-result-badge"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 5: Webhooks & Network Settings -->
+    <!-- ================================================================= -->
+    <section id="tab-network" class="tab-content">
+      <div class="friendly-tip-box">
+        <div class="friendly-tip-icon">🌐</div>
+        <div class="friendly-tip-body">
+          <h4>Network & Approval Preferences</h4>
+          <p>
+            Configure how Microsoft Teams sends events to this server and customize triage rules like single-user testing approval.
+          </p>
+        </div>
+      </div>
+
+      <div class="form-card">
+        <div class="form-grid">
+          <div class="form-group full-width">
+            <label class="form-label">
+              <span>Public Webhook Tunnel URL</span>
+              <span class="form-helper">Public HTTPS URL (e.g. ngrok) where Microsoft Graph delivers notifications</span>
+            </label>
+            <input type="url" id="webhookPublicUrl" class="form-input" placeholder="https://your-tunnel.ngrok-free.dev">
+          </div>
+
+          <div class="form-group full-width">
+            <label class="form-label">
+              <span>Teams Incoming Webhook URL</span>
+              <span class="form-helper">Power Automate / Workflow URL for posting confirmation cards</span>
+            </label>
+            <input type="url" id="teamsWebhookUrl" class="form-input" placeholder="https://default...powerautomate.com/...">
+          </div>
+
+          <div class="form-group full-width" style="padding-top:0.75rem;">
+            <label class="switch-container">
+              <input type="checkbox" id="allowSelfApproval" class="switch-input">
+              <span class="switch-slider"></span>
+              <div>
+                <strong style="color:var(--text-main); font-size:0.95rem;">Enable Self-Approval Mode</strong>
+                <p style="color:var(--text-muted); font-size:0.8rem; margin-top:0.15rem;">
+                  Allows your emoji reactions (tickets 🎟️ or thumbs up 👍) to act as PM approvals during single-user testing.
+                </p>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <div class="test-action-bar">
+          <button id="btnTestTeamsWebhook" class="btn btn-outline-cyan" style="display:inline-flex; align-items:center; gap:0.5rem;">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+            <span>Send Test Card to Teams</span>
+          </button>
+          <div id="teamsTestResult" class="test-result-badge"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================= -->
+    <!-- TAB 6: Activity Audit Log -->
+    <!-- ================================================================= -->
+    <section id="tab-audit" class="tab-content">
+      <div class="section-header-bar">
+        <h2>
+          <span>📜</span> System Audit Trail
+        </h2>
+        <button id="btnRefreshAudit" class="btn btn-secondary" style="display:inline-flex; align-items:center; gap:0.4rem;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Refresh Logs
+        </button>
+      </div>
+
+      <div class="custom-table-container">
+        <table class="custom-table" id="auditTable">
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Category</th>
+              <th>Action</th>
+              <th>Details</th>
+              <th>Performed By</th>
+            </tr>
+          </thead>
+          <tbody id="auditTableBody">
+            <tr>
+              <td colspan="5" style="text-align:center; padding:2rem; color:var(--text-muted);">Loading audit history...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ================================================================= -->
+  <!-- MODAL: Add / Edit Team Member -->
+  <!-- ================================================================= -->
+  <div id="modalMember" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modalMemberTitle">Add Team Member</h3>
+        <button class="btn btn-icon btn-close-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editMemberId">
+
+        <div class="form-group">
+          <label class="form-label">Full Name *</label>
+          <input type="text" id="memberDisplayName" class="form-input" placeholder="e.g. John Doe">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Assigned Role *</label>
+          <select id="memberRole" class="form-select">
+            <option value="CLIENT">Client (Bug Reporter)</option>
+            <option value="PM">Project Manager (Approver / Scrum Master)</option>
+            <option value="DEVELOPER">Developer (Issue Specialist)</option>
+            <option value="ADMIN">System Administrator</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Specialty / Technical Focus</label>
+          <input type="text" id="memberSpecialty" class="form-input" placeholder="e.g. Frontend & UI, Backend API, Mobile, Payment">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Email Address</label>
+          <input type="email" id="memberEmail" class="form-input" placeholder="john.doe@company.com">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Microsoft Graph User ID (Optional)</label>
+          <input type="text" id="memberUserId" class="form-input" placeholder="e.g. 35e03956-1723-469c-b561-90f03fc566ed">
+          <span class="form-helper">If omitted, the system matches their display name from Teams.</span>
+        </div>
+
+        <div class="form-group">
+          <label class="switch-container">
+            <input type="checkbox" id="memberCanApprove" class="switch-input">
+            <span class="switch-slider"></span>
+            <span style="font-size:0.9rem; color:var(--text-main);">Grant PM Ticket Approval Rights (via reactions 🎟️)</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-close-modal">Cancel</button>
+        <button id="btnSaveMember" class="btn btn-primary">Save Member</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================= -->
+  <!-- MODAL: Add / Edit Monitored Channel -->
+  <!-- ================================================================= -->
+  <div id="modalChannel" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modalChannelTitle">Add Monitored Channel or Chat</h3>
+        <button class="btn btn-icon btn-close-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editChannelId">
+
+        <div class="form-group">
+          <label class="form-label">Friendly Channel / Chat Name *</label>
+          <input type="text" id="channelName" class="form-input" placeholder="e.g. Client Support Group">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Destination Type *</label>
+          <select id="channelType" class="form-select">
+            <option value="chat">Group Chat (19:...@thread.v2)</option>
+            <option value="channel">Teams Team Channel</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Usage Purpose *</label>
+          <select id="channelUsage" class="form-select">
+            <option value="CLIENT_SUPPORT">Client Support (Bug Reporting)</option>
+            <option value="PM_APPROVALS">PM Approvals & Triage Hub</option>
+            <option value="DEV_ALERTS">Developer Ticket Escalations</option>
+            <option value="GENERAL">General All-in-One</option>
+          </select>
+        </div>
+
+        <div class="form-group" id="groupChatIdField">
+          <label class="form-label">Teams Chat ID</label>
+          <input type="text" id="channelChatId" class="form-input" placeholder="19:...@thread.v2">
+          <span class="form-helper">Copy from Teams link or leave blank if using Channel ID below.</span>
+        </div>
+
+        <div class="form-group" id="groupTeamIdField" style="display:none;">
+          <label class="form-label">Team ID & Channel ID</label>
+          <div style="display:flex; gap:0.5rem;">
+            <input type="text" id="channelTeamId" class="form-input" placeholder="Team ID">
+            <input type="text" id="channelChannelId" class="form-input" placeholder="Channel ID">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Incoming Webhook URL (Optional)</label>
+          <input type="url" id="channelWebhookUrl" class="form-input" placeholder="https://default...powerautomate.com/...">
+          <span class="form-helper">Enables posting rich adaptive cards into this chat.</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-close-modal">Cancel</button>
+        <button id="btnSaveChannel" class="btn btn-primary">Save Channel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating Save Bar -->
+  <div id="floatingSaveBar" class="floating-save-bar">
+    <span style="font-size:0.9rem; color:var(--text-main); font-weight:500;">You have unsaved changes</span>
+    <button id="btnFloatingSave" class="btn btn-primary" style="padding:0.4rem 1rem;">Apply Changes</button>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastNotification" class="toast-box"></div>
+
+  <!-- JavaScript Logic -->
+  <script src="/static/settings.js"></script>
+</body>
+</html>

@@ -13,8 +13,38 @@ class Roles:
 def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[str] = None) -> str:
     """Identify the role of a user by Microsoft Graph user ID, falling back to display name.
 
-    Matches against configured environment variables or known team member names.
+    Matches against database team_members first, then configured environment variables or known names.
     """
+    # 0. Check dynamic database team_members first
+    try:
+        from src.database import get_db
+        db = get_db()
+        if user_id and user_id.strip():
+            row = db.execute(
+                "SELECT role FROM team_members WHERE is_active = 1 AND LOWER(user_id) = LOWER(?)",
+                (user_id.strip(),),
+            ).fetchone()
+            if row and row["role"]:
+                return row["role"].upper()
+
+        if display_name and display_name.strip():
+            disp_clean = display_name.strip().lower()
+            row = db.execute(
+                "SELECT role FROM team_members WHERE is_active = 1 AND LOWER(display_name) = LOWER(?)",
+                (disp_clean,),
+            ).fetchone()
+            if row and row["role"]:
+                return row["role"].upper()
+
+            # Substring match if full name wasn't exact
+            for r in db.execute("SELECT display_name, role FROM team_members WHERE is_active = 1").fetchall():
+                m_name = (r["display_name"] or "").strip().lower()
+                first_name = m_name.split()[0] if m_name else ""
+                if first_name and (first_name in disp_clean or disp_clean in m_name):
+                    return r["role"].upper()
+    except Exception as db_err:
+        logger.debug(f"Could not query team_members table: {db_err}")
+
     # 1. Match by configured GUID
     if user_id:
         normalized = user_id.strip().lower()
@@ -99,11 +129,39 @@ def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = Non
         disp_name = (r.get("displayName") or "").lower().strip()
         r_type = (r.get("reactionType") or "").strip()
 
+        # Database team_members check
+        db_authorized = False
+        try:
+            from src.database import get_db
+            db = get_db()
+            row = None
+            if u_id:
+                row = db.execute(
+                    "SELECT role, can_approve FROM team_members WHERE is_active = 1 AND LOWER(user_id) = LOWER(?)",
+                    (u_id,),
+                ).fetchone()
+            if not row and disp_name:
+                row = db.execute(
+                    "SELECT role, can_approve FROM team_members WHERE is_active = 1 AND LOWER(display_name) = LOWER(?)",
+                    (disp_name,),
+                ).fetchone()
+
+            if row:
+                m_role = (row["role"] or "").upper()
+                if m_role == "PM":
+                    db_authorized = True
+                elif m_role == "CLIENT":
+                    db_authorized = bool(allow_self and row["can_approve"] == 1)
+                elif row["can_approve"] == 1:
+                    db_authorized = True
+        except Exception:
+            pass
+
         # Is reaction from PM? Matches configured PM GUID or name containing "santosh"
         is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
         # If self-approval / single-user mode is enabled, client (Dhruv) emoji acts as PM approval
         is_client = (bool(client_id) and u_id == client_id) or ("dhruv" in disp_name)
-        is_authorized = is_pm or (allow_self and is_client)
+        is_authorized = db_authorized or is_pm or (allow_self and is_client)
 
         # Strictly only 'Admission tickets' (🎟️) and 'Ticket' (🎫) approve
         is_approval = is_ticket_approval_reaction(r_type)
@@ -126,9 +184,36 @@ def is_pm_confirmation_approval(reactions: Optional[list], allow_client: Optiona
         disp_name = (r.get("displayName") or "").lower().strip()
         r_type = (r.get("reactionType") or "").strip().lower()
 
+        db_authorized = False
+        try:
+            from src.database import get_db
+            db = get_db()
+            row = None
+            if u_id:
+                row = db.execute(
+                    "SELECT role, can_approve FROM team_members WHERE is_active = 1 AND LOWER(user_id) = LOWER(?)",
+                    (u_id,),
+                ).fetchone()
+            if not row and disp_name:
+                row = db.execute(
+                    "SELECT role, can_approve FROM team_members WHERE is_active = 1 AND LOWER(display_name) = LOWER(?)",
+                    (disp_name,),
+                ).fetchone()
+
+            if row:
+                m_role = (row["role"] or "").upper()
+                if m_role == "PM":
+                    db_authorized = True
+                elif m_role == "CLIENT":
+                    db_authorized = bool(allow_self and row["can_approve"] == 1)
+                elif row["can_approve"] == 1:
+                    db_authorized = True
+        except Exception:
+            pass
+
         is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
         is_client = (bool(client_id) and u_id == client_id) or ("dhruv" in disp_name)
-        is_authorized = is_pm or (allow_self and is_client)
+        is_authorized = db_authorized or is_pm or (allow_self and is_client)
 
         # In Step 2, accept 🎟️, 🎫, as well as instant quick reaction 👍 (like)
         is_approval = is_ticket_approval_reaction(r_type) or r_type in {"like", "👍"}

@@ -85,6 +85,11 @@ class JiraConfig:
 
 class AppConfig:
     def __init__(self):
+        self.reload()
+
+    def reload(self):
+        """Reload configuration from disk without restarting process."""
+        load_dotenv(dotenv_path=env_path, override=True)
         self.microsoft = MicrosoftConfig()
         self.teams = TeamsConfig()
         self.roles = RolesConfig()

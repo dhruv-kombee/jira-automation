@@ -106,6 +106,8 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+from src.routes.admin import router as admin_router
+
 # Serve Dashboard at root and /dashboard
 @app.get("/", response_class=FileResponse)
 @app.get("/dashboard", response_class=FileResponse)
@@ -114,7 +116,17 @@ def serve_dashboard():
     return FileResponse(str(index_file))
 
 
+# Serve Admin / Settings Management Hub at /settings and /admin
+@app.get("/settings", response_class=FileResponse)
+@app.get("/admin", response_class=FileResponse)
+def serve_settings():
+    settings_file = STATIC_DIR / "settings.html"
+    return FileResponse(str(settings_file))
+
+
 # Include routers
 app.include_router(health_router)
 app.include_router(webhooks_router)
 app.include_router(dashboard_router)
+app.include_router(admin_router)
+
