@@ -604,7 +604,7 @@ async def check_and_auto_create_jira_ticket(
             priority=priority,
             assignee=assignee,
             reporter=reporter,
-            approval_note=f"Approved by {approver_name} via Teams 👍 reaction",
+            approval_note=f"Approved by {approver_name} via Teams 🎟️/🎫 reaction",
             chat_id=normalized_message.get("chatId"),
             team_id=normalized_message.get("teamId"),
             channel_id=normalized_message.get("channelId"),

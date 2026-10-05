@@ -495,6 +495,15 @@ function createMessageCard(msg, role) {
   }
 
   // Check if PM approved (Santosh or authorized Client in self-approval mode)
+  // ONLY 'Admission tickets' (🎟️) or 'Ticket' (🎫) count as approval
+  function isTicketEmoji(type) {
+    if (!type) return false;
+    const t = String(type).toLowerCase().trim();
+    if (t.includes('🎟') || t.includes('🎫')) return true;
+    const cleaned = t.replace(/[-_]/g, ' ').replace(/^:+|:+$/g, '').trim();
+    return ['admission ticket', 'admission tickets', 'ticket', 'tickets'].includes(cleaned);
+  }
+
   const pmId = (systemStatus?.roles?.pm?.id || '').toLowerCase().trim();
   const clientId = (systemStatus?.roles?.client?.id || '').toLowerCase().trim();
   const pmApproved = reactions.some(r => {
@@ -503,7 +512,7 @@ function createMessageCard(msg, role) {
     const type = (r.reactionType || '').toLowerCase();
     const isPm = (pmId && uId === pmId) || dispName.includes('santosh');
     const isClient = (clientId && uId === clientId) || dispName.includes('dhruv');
-    const isPos = ['like', '👍', 'heart', 'thumbsup', '❤️'].some(p => type.includes(p));
+    const isPos = isTicketEmoji(type);
     return (isPm || isClient) && isPos;
   });
 
@@ -516,7 +525,14 @@ function createMessageCard(msg, role) {
           const uId = (r.userId || '').toLowerCase().trim();
           const dispName = (r.displayName || '').toLowerCase().trim();
           const isPm = (pmId && uId === pmId) || dispName.includes('santosh') || (clientId && uId === clientId) || dispName.includes('dhruv');
-          const emoji = (r.reactionType === 'like' || r.reactionType === '👍') ? '👍' : (r.reactionType === 'heart' ? '❤️' : (r.reactionType || '👍'));
+          let emoji = r.reactionType || '🎟️';
+          if (isTicketEmoji(r.reactionType)) {
+            emoji = (String(r.reactionType).includes('🎫') || String(r.reactionType).toLowerCase().includes('ticket')) && !String(r.reactionType).toLowerCase().includes('admission') ? '🎫' : '🎟️';
+          } else if (r.reactionType === 'like' || r.reactionType === '👍') {
+            emoji = '👍';
+          } else if (r.reactionType === 'heart' || r.reactionType === '❤️') {
+            emoji = '❤️';
+          }
           const userName = r.displayName ? ` <span class="reaction-user">(${escapeHtml(r.displayName)})</span>` : '';
           return `<span class="reaction-badge ${isPm ? 'reaction-pm' : ''}" title="${isPm ? 'Approved Reaction' : 'Reaction'}">${emoji}${userName}</span>`;
         }).join('')}
@@ -594,7 +610,7 @@ function openPayloadModal(msg) {
       btnPm.className = 'btn btn-secondary';
       btnPm.style.fontSize = '12px';
       btnPm.style.padding = '5px 12px';
-      btnPm.innerHTML = '👍 Test PM Approval (Simulate)';
+      btnPm.innerHTML = '🎟️ Test PM Approval (Simulate)';
       btnPm.addEventListener('click', async () => {
         try {
           btnPm.disabled = true;
@@ -602,7 +618,7 @@ function openPayloadModal(msg) {
           const res = await fetch(`/api/test/simulate-pm-approval/${msg.message_id}`, { method: 'POST' });
           const data = await res.json();
           if (res.ok) {
-            showToast('✓ PM Santosh Yadav approved with 👍 in Teams!', 'success');
+            showToast('✓ PM Santosh Yadav approved with 🎟️ in Teams!', 'success');
             if (data.ticket && data.ticket.key) {
               showToast(`🎉 Auto-created Jira Ticket: ${data.ticket.key}!`, 'success');
             }
@@ -615,7 +631,7 @@ function openPayloadModal(msg) {
           showToast('Approval network error', 'error');
         } finally {
           btnPm.disabled = false;
-          btnPm.innerText = '👍 Test PM Approval (Simulate)';
+          btnPm.innerText = '🎟️ Test PM Approval (Simulate)';
         }
       });
       actionsBar.appendChild(btnPm);
@@ -701,8 +717,8 @@ function initWebSocket() {
             const type = (r.reactionType || '').toLowerCase();
             const isPm = (pmId && uId === pmId) || dispName.includes('santosh');
             const isClient = (clientId && uId === clientId) || dispName.includes('dhruv');
-            const isPos = ['like', '👍', 'heart', 'thumbsup', '❤️'].some(p => type.includes(p));
-            if ((isPm || isClient) && isPos) {
+            const isTicket = (type.includes('🎟') || type.includes('🎫') || ['admission ticket', 'admission tickets', 'ticket', 'tickets'].includes(type.replace(/[-_]/g, ' ').replace(/^:+|:+$/g, '').trim()));
+            if ((isPm || isClient) && isTicket) {
               approverTitle = isPm ? 'PM Santosh Yadav' : `${r.displayName || 'Client'} (Acting PM)`;
               return true;
             }
@@ -710,7 +726,7 @@ function initWebSocket() {
           });
 
           if (pmApproved) {
-            showToast(`✓ ${approverTitle} approved ticket with 👍 in Teams!`, 'success');
+            showToast(`✓ ${approverTitle} approved ticket with 🎟️/🎫 in Teams!`, 'success');
           }
 
           // Refresh list and metrics

@@ -333,7 +333,7 @@ async def simulate_pm_approval(message_id: str):
     msg = dict(row)
     pm_id = config.roles.pm or "d7bc3c28-33d9-4973-816e-445d51556b8b"
     pm_reaction = {
-        "reactionType": "👍",
+        "reactionType": "🎟️",
         "displayName": "Santosh Yadav",
         "userId": pm_id,
         "createdDateTime": datetime.now(timezone.utc).isoformat(),
@@ -348,7 +348,8 @@ async def simulate_pm_approval(message_id: str):
             reactions = []
 
     # Add reaction if not already there
-    if not any((r.get("userId") == pm_id and (r.get("reactionType") in ["👍", "like", "heart", "thumbsup"])) for r in reactions):
+    from src.services.sender_service import is_ticket_approval_reaction
+    if not any((r.get("userId") == pm_id and is_ticket_approval_reaction(r.get("reactionType"))) for r in reactions):
         reactions.append(pm_reaction)
 
     db.execute("UPDATE messages SET reactions = ? WHERE message_id = ?", (json.dumps(reactions), message_id))

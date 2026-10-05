@@ -47,8 +47,47 @@ def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[s
     return Roles.UNKNOWN
 
 
+TICKET_APPROVAL_NAMES = {
+    "admission ticket",
+    "admission tickets",
+    "admission_ticket",
+    "admission_tickets",
+    ":admission_tickets:",
+    ":admission_ticket:",
+    ":ticket:",
+    ":tickets:",
+    "ticket",
+    "tickets",
+}
+
+
+def is_ticket_approval_reaction(reaction_type: Optional[str]) -> bool:
+    """Check if reaction is specifically 'Admission tickets' (🎟️ / 🎟) or 'Ticket' (🎫)."""
+    if not reaction_type:
+        return False
+    raw = str(reaction_type).strip()
+    lower = raw.lower()
+
+    # 1. Direct emoji character check (handles standard and variation selector sequences)
+    if "🎟" in raw or "🎫" in raw or "\U0001f39f" in raw or "\U0001f3ab" in raw:
+        return True
+
+    # 2. Text or shortcode check (case-insensitive)
+    cleaned = lower.replace("-", " ").replace("_", " ").strip(": ")
+    if cleaned in {"admission ticket", "admission tickets", "ticket", "tickets"}:
+        return True
+
+    for name in TICKET_APPROVAL_NAMES:
+        if lower == name or f":{name}:" == lower:
+            return True
+
+    return False
+
+
 def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = None) -> bool:
-    """Check if PM (Santosh Yadav) or authorized approver reacted with an approval emoji (like, thumbsup, heart)."""
+    """Check if PM (Santosh Yadav) or authorized approver reacted specifically with
+    either 'Admission tickets' (🎟️) or 'Ticket' (🎫) to approve Jira ticket creation.
+    """
     if not reactions:
         return False
     pm_id = (config.roles.pm or "").lower().strip()
@@ -58,7 +97,7 @@ def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = Non
     for r in reactions:
         u_id = (r.get("userId") or "").lower().strip()
         disp_name = (r.get("displayName") or "").lower().strip()
-        r_type = (r.get("reactionType") or "").lower().strip()
+        r_type = (r.get("reactionType") or "").strip()
 
         # Is reaction from PM? Matches configured PM GUID or name containing "santosh"
         is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
@@ -66,8 +105,8 @@ def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = Non
         is_client = (bool(client_id) and u_id == client_id) or ("dhruv" in disp_name)
         is_authorized = is_pm or (allow_self and is_client)
 
-        # Is reaction positive/approval? Strictly thumbs-up, like, or heart
-        is_approval = any(pos in r_type for pos in ["like", "👍", "heart", "thumbsup", "❤️"])
+        # Strictly only 'Admission tickets' (🎟️) and 'Ticket' (🎫) approve
+        is_approval = is_ticket_approval_reaction(r_type)
 
         if is_authorized and is_approval:
             return True
