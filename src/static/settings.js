@@ -38,6 +38,27 @@ document.addEventListener('DOMContentLoaded', () => {
   const memberCanApprove = document.getElementById('memberCanApprove');
   const btnSaveMember = document.getElementById('btnSaveMember');
 
+  // DOM Elements - Members Import
+  const btnOpenImportModal = document.getElementById('btnOpenImportModal');
+  const modalImportMembers = document.getElementById('modalImportMembers');
+  const importSubtabButtons = document.querySelectorAll('.import-subtab-btn');
+  const importTabPanes = document.querySelectorAll('.import-tab-pane');
+  const importSheetUrl = document.getElementById('importSheetUrl');
+  const btnFetchSheetUrl = document.getElementById('btnFetchSheetUrl');
+  const importCsvRaw = document.getElementById('importCsvRaw');
+  const btnParseRawCsv = document.getElementById('btnParseRawCsv');
+  const fileDropzone = document.getElementById('fileDropzone');
+  const memberFileInput = document.getElementById('memberFileInput');
+  const selectedFileName = document.getElementById('selectedFileName');
+  const btnInspectFile = document.getElementById('btnInspectFile');
+  const labelStrategyUpsert = document.getElementById('labelStrategyUpsert');
+  const labelStrategyReplace = document.getElementById('labelStrategyReplace');
+  const importPreviewArea = document.getElementById('importPreviewArea');
+  const previewSummaryText = document.getElementById('previewSummaryText');
+  const previewTableBody = document.getElementById('previewTableBody');
+  const importErrorMessage = document.getElementById('importErrorMessage');
+  const btnConfirmImport = document.getElementById('btnConfirmImport');
+
   // DOM Elements - Channels
   const channelsTableBody = document.getElementById('channelsTableBody');
   const btnOpenAddChannelModal = document.getElementById('btnOpenAddChannelModal');
@@ -430,6 +451,354 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // =========================================================================
+  // Bulk Import Team Members (Spreadsheet / Google Sheets / CSV)
+  // =========================================================================
+  let parsedImportMembers = [];
+  let currentUploadedFile = null;
+
+  function resetImportModal() {
+    parsedImportMembers = [];
+    currentUploadedFile = null;
+    if (importSheetUrl) importSheetUrl.value = '';
+    if (importCsvRaw) importCsvRaw.value = '';
+    if (memberFileInput) memberFileInput.value = '';
+    if (selectedFileName) {
+      selectedFileName.textContent = '';
+      selectedFileName.style.display = 'none';
+    }
+    if (btnInspectFile) btnInspectFile.style.display = 'none';
+    if (importPreviewArea) importPreviewArea.style.display = 'none';
+    if (previewTableBody) previewTableBody.innerHTML = '';
+    if (importErrorMessage) {
+      importErrorMessage.textContent = '';
+      importErrorMessage.style.display = 'none';
+    }
+    if (btnConfirmImport) {
+      btnConfirmImport.disabled = true;
+      btnConfirmImport.style.opacity = '0.5';
+      btnConfirmImport.style.cursor = 'not-allowed';
+      btnConfirmImport.textContent = 'Confirm & Import';
+    }
+    const upsertRadio = document.querySelector('input[name="importStrategy"][value="upsert"]');
+    if (upsertRadio) upsertRadio.checked = true;
+    if (labelStrategyUpsert) labelStrategyUpsert.classList.add('selected');
+    if (labelStrategyReplace) labelStrategyReplace.classList.remove('selected');
+  }
+
+  if (btnOpenImportModal) {
+    btnOpenImportModal.addEventListener('click', () => {
+      resetImportModal();
+      modalImportMembers.classList.add('active');
+    });
+  }
+
+  // Strategy Radio Toggle Styling
+  document.querySelectorAll('input[name="importStrategy"]').forEach(radio => {
+    radio.addEventListener('change', (e) => {
+      if (e.target.value === 'replace') {
+        if (labelStrategyReplace) labelStrategyReplace.classList.add('selected');
+        if (labelStrategyUpsert) labelStrategyUpsert.classList.remove('selected');
+      } else {
+        if (labelStrategyUpsert) labelStrategyUpsert.classList.add('selected');
+        if (labelStrategyReplace) labelStrategyReplace.classList.remove('selected');
+      }
+    });
+  });
+
+  // Modal Subtabs (Link / CSV vs File Upload)
+  importSubtabButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      importSubtabButtons.forEach(b => b.classList.remove('active'));
+      importTabPanes.forEach(p => p.classList.remove('active'));
+
+      btn.classList.add('active');
+      const targetPane = document.getElementById(btn.getAttribute('data-subtab'));
+      if (targetPane) targetPane.classList.add('active');
+    });
+  });
+
+  // Display error helper
+  function showImportError(msg) {
+    if (!importErrorMessage) return;
+    importErrorMessage.textContent = msg;
+    importErrorMessage.style.display = 'block';
+    if (importPreviewArea) importPreviewArea.style.display = 'none';
+    if (btnConfirmImport) {
+      btnConfirmImport.disabled = true;
+      btnConfirmImport.style.opacity = '0.5';
+      btnConfirmImport.style.cursor = 'not-allowed';
+      btnConfirmImport.textContent = 'Confirm & Import';
+    }
+  }
+
+  function hideImportError() {
+    if (!importErrorMessage) return;
+    importErrorMessage.textContent = '';
+    importErrorMessage.style.display = 'none';
+  }
+
+  // Render preview table
+  function renderImportPreview(members) {
+    parsedImportMembers = members || [];
+    hideImportError();
+
+    if (!parsedImportMembers.length) {
+      showImportError('No valid member rows could be detected. Please verify your column headers (e.g. Name, Email, Role, Specialty).');
+      return;
+    }
+
+    if (previewSummaryText) {
+      previewSummaryText.textContent = `Found ${parsedImportMembers.length} valid members ready to import`;
+    }
+
+    if (previewTableBody) {
+      previewTableBody.innerHTML = parsedImportMembers.map((m, idx) => {
+        const roleUpper = (m.role || 'DEVELOPER').toUpperCase();
+        let roleBadgeClass = 'badge-general';
+        let roleIcon = '💻';
+        if (roleUpper === 'CLIENT') { roleBadgeClass = 'badge-confirmed'; roleIcon = '👤'; }
+        else if (roleUpper === 'PM') { roleBadgeClass = 'badge-reminder'; roleIcon = '👑'; }
+        else if (roleUpper === 'ADMIN') { roleBadgeClass = 'badge-triage'; roleIcon = '🛡️'; }
+
+        return `
+          <tr>
+            <td style="color:var(--text-muted); font-size:0.75rem;">${idx + 1}</td>
+            <td><strong>${escapeHtml(m.display_name || '—')}</strong></td>
+            <td><code style="color:var(--accent-primary); font-size:0.78rem;">${escapeHtml(m.email || '—')}</code></td>
+            <td>
+              <span class="badge-mini ${roleBadgeClass}" style="font-size:0.75rem;">
+                ${roleIcon} ${roleUpper}
+              </span>
+            </td>
+            <td><span style="font-size:0.8rem; color:var(--text-muted);">${escapeHtml(m.specialty || 'General')}</span></td>
+            <td><code style="font-size:0.75rem; color:var(--text-faint);">${escapeHtml(m.user_id ? (m.user_id.length > 15 ? m.user_id.substring(0, 12) + '...' : m.user_id) : '—')}</code></td>
+            <td style="text-align:center;">
+              <span style="color:${m.can_approve ? '#34d399' : 'var(--text-faint)'}; font-size:0.9rem;">
+                ${m.can_approve ? '✓ Yes' : '—'}
+              </span>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    if (importPreviewArea) importPreviewArea.style.display = 'flex';
+
+    if (btnConfirmImport) {
+      btnConfirmImport.disabled = false;
+      btnConfirmImport.style.opacity = '1';
+      btnConfirmImport.style.cursor = 'pointer';
+      btnConfirmImport.textContent = `Confirm & Import (${parsedImportMembers.length} members)`;
+    }
+  }
+
+  // Parse via Link
+  if (btnFetchSheetUrl) {
+    btnFetchSheetUrl.addEventListener('click', async () => {
+      const url = (importSheetUrl.value || '').trim();
+      if (!url) {
+        showImportError('Please enter a Google Sheets URL or public CSV URL.');
+        return;
+      }
+      hideImportError();
+      const origText = btnFetchSheetUrl.innerHTML;
+      btnFetchSheetUrl.innerHTML = '<span>⏳ Inspecting...</span>';
+      btnFetchSheetUrl.disabled = true;
+
+      try {
+        const res = await fetch('/api/admin/members/parse-sheet', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url }),
+        });
+        const data = await res.json();
+        if (data.success && data.preview) {
+          renderImportPreview(data.preview);
+        } else {
+          showImportError(data.detail || 'Could not parse spreadsheet from the provided URL.');
+        }
+      } catch (err) {
+        showImportError(`Network error inspecting link: ${err.message || err}`);
+      } finally {
+        btnFetchSheetUrl.innerHTML = origText;
+        btnFetchSheetUrl.disabled = false;
+      }
+    });
+  }
+
+  // Parse via Raw CSV
+  if (btnParseRawCsv) {
+    btnParseRawCsv.addEventListener('click', async () => {
+      const csv = (importCsvRaw.value || '').trim();
+      if (!csv) {
+        showImportError('Please paste CSV text to inspect.');
+        return;
+      }
+      hideImportError();
+      const origText = btnParseRawCsv.innerHTML;
+      btnParseRawCsv.innerHTML = '<span>⏳ Inspecting...</span>';
+      btnParseRawCsv.disabled = true;
+
+      try {
+        const res = await fetch('/api/admin/members/parse-sheet', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ csv_text: csv }),
+        });
+        const data = await res.json();
+        if (data.success && data.preview) {
+          renderImportPreview(data.preview);
+        } else {
+          showImportError(data.detail || 'Could not parse the pasted CSV.');
+        }
+      } catch (err) {
+        showImportError(`Error inspecting CSV: ${err.message || err}`);
+      } finally {
+        btnParseRawCsv.innerHTML = origText;
+        btnParseRawCsv.disabled = false;
+      }
+    });
+  }
+
+  // File Dropzone Handling
+  if (fileDropzone && memberFileInput) {
+    fileDropzone.addEventListener('click', () => {
+      memberFileInput.click();
+    });
+
+    ['dragenter', 'dragover'].forEach(evt => {
+      fileDropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        fileDropzone.classList.add('dragover');
+      });
+    });
+
+    ['dragleave', 'drop'].forEach(evt => {
+      fileDropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        fileDropzone.classList.remove('dragover');
+      });
+    });
+
+    fileDropzone.addEventListener('drop', (e) => {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+        handleFileSelected(e.dataTransfer.files[0]);
+      }
+    });
+
+    memberFileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length) {
+        handleFileSelected(e.target.files[0]);
+      }
+    });
+  }
+
+  function handleFileSelected(file) {
+    if (!file) return;
+    currentUploadedFile = file;
+    const sizeKb = Math.round(file.size / 1024);
+    if (selectedFileName) {
+      selectedFileName.textContent = `📄 Selected: ${file.name} (${sizeKb} KB)`;
+      selectedFileName.style.display = 'block';
+    }
+    if (btnInspectFile) {
+      btnInspectFile.style.display = 'inline-flex';
+    }
+    inspectSelectedFile(file);
+  }
+
+  if (btnInspectFile) {
+    btnInspectFile.addEventListener('click', () => {
+      if (currentUploadedFile) {
+        inspectSelectedFile(currentUploadedFile);
+      }
+    });
+  }
+
+  async function inspectSelectedFile(file) {
+    hideImportError();
+    if (btnInspectFile) {
+      btnInspectFile.disabled = true;
+      btnInspectFile.innerHTML = '<span>⏳ Inspecting File...</span>';
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('/api/admin/members/parse-file', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json();
+      if (data.success && data.preview) {
+        renderImportPreview(data.preview);
+      } else {
+        showImportError(data.detail || 'Could not parse the selected file.');
+      }
+    } catch (err) {
+      showImportError(`Error reading spreadsheet: ${err.message || err}`);
+    } finally {
+      if (btnInspectFile) {
+        btnInspectFile.disabled = false;
+        btnInspectFile.innerHTML = '<span>⚡ Inspect Selected File</span>';
+      }
+    }
+  }
+
+  // Confirm & Import
+  if (btnConfirmImport) {
+    btnConfirmImport.addEventListener('click', async () => {
+      if (!parsedImportMembers.length) {
+        showToast('Please inspect a spreadsheet or link first', 'error');
+        return;
+      }
+
+      const strategyRadio = document.querySelector('input[name="importStrategy"]:checked');
+      const strategy = strategyRadio ? strategyRadio.value : 'upsert';
+
+      if (strategy === 'replace') {
+        const ok = confirm(`⚠️ CAUTION: "Replace All" will remove all existing team members and replace them with these ${parsedImportMembers.length} imported members.\n\nDo you want to continue?`);
+        if (!ok) return;
+      }
+
+      const origText = btnConfirmImport.textContent;
+      btnConfirmImport.disabled = true;
+      btnConfirmImport.textContent = 'Importing...';
+
+      try {
+        const res = await fetch('/api/admin/members/import-json', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            members: parsedImportMembers,
+            strategy: strategy,
+          }),
+        });
+
+        const data = await res.json();
+        if (data.success) {
+          showToast(`Successfully imported ${data.imported_count} new, updated ${data.updated_count} members!`);
+          modalImportMembers.classList.remove('active');
+          await loadMembers();
+          await loadOverview();
+        } else {
+          showImportError(data.detail || 'Import failed. Please check the spreadsheet data.');
+          showToast(data.detail || 'Import failed', 'error');
+        }
+      } catch (err) {
+        showImportError(`Error during import: ${err.message || err}`);
+        showToast(`Import error: ${err.message || err}`, 'error');
+      } finally {
+        btnConfirmImport.disabled = false;
+        btnConfirmImport.textContent = origText;
+      }
+    });
+  }
+
+  // =========================================================================
   // Monitored Channels & Chats
   // =========================================================================
   async function loadChannels() {
@@ -674,6 +1043,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.addEventListener('click', () => {
       modalMember.classList.remove('active');
       modalChannel.classList.remove('active');
+      if (modalImportMembers) modalImportMembers.classList.remove('active');
     });
   });
 

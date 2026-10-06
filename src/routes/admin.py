@@ -1,7 +1,11 @@
+import csv
+import io
+import re
 import time
 from typing import Optional, List, Dict, Any
+import httpx
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form, Response
 from fastapi.responses import JSONResponse
 
 from src.database import get_db
@@ -26,6 +30,13 @@ class MemberCreateRequest(BaseModel):
     user_id: Optional[str] = None
     specialty: Optional[str] = None
     can_approve: bool = False
+
+
+class MemberImportRequest(BaseModel):
+    url: Optional[str] = None
+    csv_text: Optional[str] = None
+    strategy: str = "upsert"  # upsert or replace
+    members: Optional[List[Dict[str, Any]]] = None
 
 
 class MemberUpdateRequest(BaseModel):
@@ -237,6 +248,287 @@ def delete_team_member(member_id: int):
         ("MEMBERS", "MEMBER_DELETED", f"Removed member '{name}' (ID {member_id})"),
     )
     return {"success": True, "message": f"Member '{name}' removed successfully."}
+
+
+# =========================================================================
+# Team Members Spreadsheet & Link Import Endpoints
+# =========================================================================
+
+async def fetch_sheet_csv_from_url(url: str) -> str:
+    """Fetch CSV content from a Google Sheets URL or public web CSV link."""
+    clean_url = url.strip()
+    gsheet_match = re.search(r"docs\.google\.com/spreadsheets/d/([a-zA-Z0-9-_]+)", clean_url)
+    if gsheet_match:
+        sheet_id = gsheet_match.group(1)
+        gid_match = re.search(r"[#&?]gid=([0-9]+)", clean_url)
+        gid_part = f"&gid={gid_match.group(1)}" if gid_match else ""
+        clean_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv{gid_part}"
+
+    try:
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+            res = await client.get(clean_url)
+            if res.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not download sheet (HTTP {res.status_code}). Ensure link is shared as 'Anyone with the link can view'."
+                )
+            return res.text
+    except HTTPException:
+        raise
+    except Exception as fetch_err:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch sheet from link: {fetch_err}")
+
+
+def parse_rows_from_content(
+    file_bytes: Optional[bytes] = None,
+    text_content: Optional[str] = None,
+    filename: str = ""
+) -> List[Dict[str, Any]]:
+    """Parse member rows from CSV text, uploaded CSV file, or Excel .xlsx workbook."""
+    raw_rows: List[Dict[str, Any]] = []
+
+    # Case 1: Excel workbook (.xlsx / .xls)
+    if file_bytes and (filename.endswith(".xlsx") or filename.endswith(".xls") or file_bytes[:4] == b"PK\x03\x04"):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+            ws = wb.active
+            rows_iter = list(ws.iter_rows(values_only=True))
+            if not rows_iter:
+                return []
+            header = [str(c or "").strip() for c in rows_iter[0]]
+            for r in rows_iter[1:]:
+                if not any(r):
+                    continue
+                row_dict = {header[i]: (str(val).strip() if val is not None else "") for i, val in enumerate(r) if i < len(header)}
+                raw_rows.append(row_dict)
+        except Exception as xl_err:
+            raise HTTPException(status_code=400, detail=f"Failed to read Excel workbook: {xl_err}")
+
+    # Case 2: CSV text or file
+    else:
+        text = text_content
+        if not text and file_bytes:
+            for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+                try:
+                    text = file_bytes.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+        if not text:
+            return []
+
+        delimiter = ","
+        first_line = text.strip().split("\n")[0] if text.strip() else ""
+        if "\t" in first_line:
+            delimiter = "\t"
+        elif ";" in first_line and "," not in first_line:
+            delimiter = ";"
+
+        reader = csv.DictReader(io.StringIO(text.strip()), delimiter=delimiter)
+        for r in reader:
+            if not any(r.values()):
+                continue
+            raw_rows.append({str(k or "").strip(): str(v or "").strip() for k, v in r.items()})
+
+    # Normalize rows into standard member structures
+    normalized_members: List[Dict[str, Any]] = []
+    for r in raw_rows:
+        name = ""
+        email = ""
+        role = "DEVELOPER"
+        specialty = ""
+        user_id = ""
+        can_approve = None
+
+        for k, v in r.items():
+            k_clean = k.lower().replace(" ", "_").replace("-", "_")
+            val_clean = str(v).strip()
+            if not val_clean:
+                continue
+
+            if k_clean in ("name", "display_name", "member_name", "full_name", "member", "user"):
+                name = val_clean
+            elif k_clean in ("email", "mail", "email_address", "e_mail"):
+                email = val_clean
+            elif k_clean in ("role", "roles", "assigned_role", "designation", "type"):
+                r_upper = val_clean.upper()
+                if "CLIENT" in r_upper or "CUSTOMER" in r_upper:
+                    role = "CLIENT"
+                elif "PM" in r_upper or "PROJECT_MANAGER" in r_upper or "SCRUM" in r_upper:
+                    role = "PM"
+                elif "DEV" in r_upper or "ENGINEER" in r_upper or "TECH" in r_upper:
+                    role = "DEVELOPER"
+                else:
+                    role = r_upper
+            elif k_clean in ("specialty", "specialisation", "focus", "focus_area", "skills", "skill", "area"):
+                specialty = val_clean
+            elif k_clean in ("user_id", "teams_user_id", "graph_id", "azure_id", "teams_id", "id"):
+                user_id = val_clean
+            elif k_clean in ("can_approve", "approver", "approve"):
+                can_approve = val_clean.lower() in ("1", "true", "yes", "y", "t")
+
+        if not name:
+            continue
+
+        if can_approve is None:
+            can_approve = (role in ("CLIENT", "PM"))
+
+        normalized_members.append({
+            "display_name": name,
+            "email": email,
+            "role": role,
+            "specialty": specialty or (
+                "Client Product Owner" if role == "CLIENT" else
+                "Project Manager / Scrum Master" if role == "PM" else
+                "Software Engineer"
+            ),
+            "user_id": user_id,
+            "can_approve": bool(can_approve),
+        })
+
+    return normalized_members
+
+
+def execute_members_upsert(members: List[Dict[str, Any]], strategy: str = "upsert") -> Dict[str, Any]:
+    """Execute insertion or update into SQLite team_members."""
+    db = get_db()
+    cursor = db.cursor()
+    imported_count = 0
+    updated_count = 0
+
+    if strategy == "replace":
+        cursor.execute("DELETE FROM team_members")
+
+    for m in members:
+        disp_name = (m.get("display_name") or "").strip()
+        if not disp_name:
+            continue
+        email = (m.get("email") or "").strip()
+        role = (m.get("role") or "DEVELOPER").upper().strip()
+        specialty = (m.get("specialty") or "").strip()
+        user_id = (m.get("user_id") or "").strip()
+        can_approve = 1 if m.get("can_approve") else 0
+
+        existing = None
+        if email:
+            existing = cursor.execute("SELECT id FROM team_members WHERE LOWER(email) = LOWER(?)", (email,)).fetchone()
+        if not existing:
+            existing = cursor.execute("SELECT id FROM team_members WHERE LOWER(display_name) = LOWER(?)", (disp_name,)).fetchone()
+
+        if existing and strategy != "replace":
+            m_id = existing["id"]
+            cursor.execute(
+                """
+                UPDATE team_members
+                SET display_name = ?, email = COALESCE(NULLIF(?, ''), email),
+                    role = ?, specialty = COALESCE(NULLIF(?, ''), specialty),
+                    user_id = COALESCE(NULLIF(?, ''), user_id),
+                    can_approve = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (disp_name, email, role, specialty, user_id, can_approve, m_id),
+            )
+            updated_count += 1
+        else:
+            cursor.execute(
+                """
+                INSERT INTO team_members (user_id, display_name, email, role, specialty, can_approve, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                """,
+                (user_id, disp_name, email, role, specialty, can_approve),
+            )
+            imported_count += 1
+
+    action_label = "REPLACED_ALL" if strategy == "replace" else "IMPORTED_OR_UPDATED"
+    db.execute(
+        "INSERT INTO admin_audit_log (category, action, details) VALUES (?, ?, ?)",
+        ("MEMBERS", f"MEMBERS_{action_label}", f"Imported {imported_count} new, updated {updated_count} members via spreadsheet import"),
+    )
+
+    all_rows = db.execute("SELECT * FROM team_members ORDER BY id ASC").fetchall()
+    return {
+        "success": True,
+        "imported_count": imported_count,
+        "updated_count": updated_count,
+        "total": len(all_rows),
+        "members": [dict(r) for r in all_rows],
+    }
+
+
+@router.get("/members/template")
+def download_members_template():
+    """Download standard CSV template for team members import."""
+    csv_content = (
+        "Name,Email,Role,Specialty,Teams_User_ID,Can_Approve\n"
+        "Dhruv Dobariya,dhruv.d.kombee@gmail.com,CLIENT,Client Product Owner,35e03956-1723-469c-b561-90f03fc566ed,1\n"
+        "Hemil Ghori,hemil.ghori@kombee.com,PM,Project Manager / Scrum Master,83b10217-f4c0-4f87-97f9-d95a33ddaaa0,1\n"
+        "Santosh Yadav,santosh.yadav@kombee.com,DEVELOPER,Backend & API Lead,d7bc3c28-33d9-4973-816e-445d51556b8b,0\n"
+        "Musaib Khan,musaib.khan@kombee.com,DEVELOPER,Frontend & UI Lead,c5a63f53-cc7a-4c05-ac9a-77e6991bc974,0\n"
+    )
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=team_members_template.csv"},
+    )
+
+
+@router.post("/members/parse-sheet")
+async def parse_members_sheet(req: MemberImportRequest):
+    """Parse sheet URL or raw CSV text and return preview of rows."""
+    text_content = req.csv_text
+    if req.url and req.url.strip():
+        text_content = await fetch_sheet_csv_from_url(req.url.strip())
+
+    if not text_content:
+        raise HTTPException(status_code=400, detail="Provide a Google Sheets URL or raw CSV text.")
+
+    members = parse_rows_from_content(text_content=text_content)
+    return {"success": True, "count": len(members), "preview": members}
+
+
+@router.post("/members/parse-file")
+async def parse_members_file(file: UploadFile = File(...)):
+    """Parse CSV or Excel (.xlsx) file and return preview rows without saving."""
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    members = parse_rows_from_content(file_bytes=content, filename=file.filename or "")
+    return {"success": True, "count": len(members), "preview": members}
+
+
+
+@router.post("/members/import-json")
+async def import_members_json(req: MemberImportRequest):
+    """Import team members from parsed list, Google Sheets URL, or raw CSV text."""
+    members = req.members
+    if not members:
+        text_content = req.csv_text
+        if req.url and req.url.strip():
+            text_content = await fetch_sheet_csv_from_url(req.url.strip())
+        if not text_content:
+            raise HTTPException(status_code=400, detail="No members data, URL, or CSV text provided.")
+        members = parse_rows_from_content(text_content=text_content)
+
+    if not members:
+        raise HTTPException(status_code=400, detail="No valid member rows found in the sheet.")
+
+    return execute_members_upsert(members, strategy=req.strategy or "upsert")
+
+
+@router.post("/members/import-file")
+async def import_members_file(file: UploadFile = File(...), strategy: str = Form("upsert")):
+    """Upload CSV or Excel (.xlsx) file directly to import members."""
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    members = parse_rows_from_content(file_bytes=content, filename=file.filename or "")
+    if not members:
+        raise HTTPException(status_code=400, detail="No valid member rows found in the uploaded file.")
+
+    return execute_members_upsert(members, strategy=strategy)
 
 
 # =========================================================================
