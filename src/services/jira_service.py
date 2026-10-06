@@ -324,30 +324,88 @@ async def get_assignable_users(project_key: Optional[str] = None) -> List[Dict[s
     return _assignable_users_cache.get(pk, [])
 
 
+_resolved_assignee_cache: Dict[str, str] = {}
+
+
 async def resolve_jira_assignee(name_or_query: Optional[str], project_key: Optional[str] = None) -> Optional[str]:
-    """Resolve a developer name or query to an Atlassian accountId."""
+    """Resolve a developer name, email, or query to an Atlassian accountId."""
     if not name_or_query:
         return None
+    raw_query = name_or_query.strip()
+    if raw_query.lower() in ("unassigned", "none", ""):
+        return None
+
+    # Check cache first
+    cache_key = raw_query.lower()
+    if cache_key in _resolved_assignee_cache:
+        return _resolved_assignee_cache[cache_key]
+
+    clean_query = re.sub(r"\s+", " ", raw_query).strip()
+    query_lower = clean_query.lower()
+
+    # 1. Check assignable users in project
     users = await get_assignable_users(project_key)
-    query = name_or_query.strip().lower()
-
-    # 1. Exact match on accountId
     for u in users:
-        if u.get("accountId") == name_or_query:
-            return u["accountId"]
-
-    # 2. Match on displayName or emailAddress
-    for u in users:
+        acc_id = u.get("accountId")
+        if acc_id == raw_query:
+            _resolved_assignee_cache[cache_key] = acc_id
+            return acc_id
         display = (u.get("displayName") or "").lower()
         email = (u.get("emailAddress") or "").lower()
-        if query == display or query == email:
-            return u.get("accountId")
+        if query_lower == display or query_lower == email or query_lower in display or display in query_lower:
+            _resolved_assignee_cache[cache_key] = acc_id
+            return acc_id
 
-    # 3. Substring match (e.g. "dhruv" in "Dhruv Dobariya")
-    for u in users:
-        display = (u.get("displayName") or "").lower()
-        if query in display or display in query:
-            return u.get("accountId")
+    # 2. Check Member.xlsx to find their registered email and clean name
+    member_email = None
+    first_name = clean_query.split()[0] if clean_query else ""
+    try:
+        from src.services.member_sync_service import get_all_members_from_excel
+        members = get_all_members_from_excel()
+        for m in members:
+            c_name = re.sub(r"\s+", " ", m.get("display_name", "")).strip().lower()
+            if query_lower in c_name or c_name in query_lower or (first_name and first_name.lower() in c_name):
+                member_email = m.get("email")
+                break
+    except Exception:
+        pass
+
+    # 3. Query Jira Cloud User Search API (/rest/api/3/user/search)
+    search_terms = [clean_query]
+    if member_email:
+        search_terms.append(member_email)
+    if first_name and first_name not in search_terms:
+        search_terms.append(first_name)
+
+    base_url = config.jira.base_url
+    auth = _get_auth()
+    headers = _get_headers()
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for term in search_terms:
+                res = await client.get(
+                    f"{base_url}/rest/api/3/user/search?query={term}",
+                    auth=auth,
+                    headers=headers,
+                )
+                if res.status_code == 200:
+                    found_users = res.json()
+                    for u in found_users:
+                        u_name = (u.get("displayName") or "").lower()
+                        u_email = (u.get("emailAddress") or "").lower()
+                        acc_id = u.get("accountId")
+                        if (
+                            query_lower in u_name
+                            or u_name in query_lower
+                            or (member_email and member_email.lower() == u_email)
+                            or (first_name and first_name.lower() in u_name)
+                        ):
+                            if acc_id:
+                                _resolved_assignee_cache[cache_key] = acc_id
+                                return acc_id
+    except Exception as err:
+        logger.warning(f"Error querying Jira user search API for '{name_or_query}': {err}")
 
     return None
 

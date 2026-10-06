@@ -18,44 +18,68 @@ def build_adaptive_card_payload(
     ticket_key: str,
     ticket_url: str,
     summary: str,
-    issue_type: str,
-    priority: str,
-    created_at: str,
-    assignee: str,
-    reporter: str,
-    approval_note: str,
+    issue_type: str = "Task",
+    priority: str = "Medium",
+    created_at: Optional[str] = None,
+    assignee: str = "Unassigned",
+    reporter: Optional[str] = None,
+    approval_note: Optional[str] = None,
     module: Optional[str] = None,
     evidence: Optional[list] = None,
 ) -> Dict[str, Any]:
-    """Build a Teams-compatible Adaptive Card payload."""
+    """Build a minimal, compact Teams Adaptive Card payload sent after reaction/approval.
+    Strictly contains: Topic Details, Scrum Link, and Assignee.
+    """
     clean_summary = summary.replace("\n", " ").strip()
+    scrum_link_md = f"[{ticket_key}]({ticket_url})" if ticket_url else ticket_key
+
     plain_text = (
-        f"🎟️ Jira Ticket Created: {ticket_key} - {clean_summary}\n"
-        f"Link: {ticket_url}\n"
-        f"Date: {created_at}\n"
-        f"Assignee: {assignee}\n"
-        f"Approval: {approval_note}"
+        f"🎟️ Ticket Created: {ticket_key}\n"
+        f"Topic Details: {clean_summary}\n"
+        f"Scrum Link: {ticket_url or ticket_key}\n"
+        f"Assignee: {assignee}"
     )
 
     facts = [
-        {"title": "Ticket:", "value": f"[{ticket_key}]({ticket_url})"},
-        {"title": "Summary:", "value": clean_summary},
-        {"title": "Type & Priority:", "value": f"{issue_type} | {priority}"},
+        {"title": "Topic Details:", "value": clean_summary},
+        {"title": "Scrum Link:", "value": scrum_link_md},
+        {"title": "Assignee:", "value": assignee or "Unassigned"},
     ]
-    if module and module != "General":
-        facts.append({"title": "Module:", "value": module})
-    if evidence and len(evidence) > 0:
-        ev_text = "; ".join(str(e) for e in evidence[:2])
-        if len(ev_text) > 80:
-            ev_text = ev_text[:77] + "..."
-        facts.append({"title": "Evidence:", "value": ev_text})
 
-    facts.extend([
-        {"title": "Date & Time:", "value": created_at},
-        {"title": "Assignee:", "value": assignee},
-        {"title": "Reporter:", "value": reporter},
-        {"title": "Approval:", "value": approval_note},
-    ])
+    card_content: Dict[str, Any] = {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [
+            {
+                "type": "Container",
+                "style": "emphasis",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "🎟️ Ticket Created",
+                        "weight": "Bolder",
+                        "size": "Medium",
+                        "color": "Good",
+                        "wrap": True,
+                    }
+                ],
+            },
+            {
+                "type": "FactSet",
+                "facts": facts,
+            },
+        ],
+    }
+
+    if ticket_url:
+        card_content["actions"] = [
+            {
+                "type": "Action.OpenUrl",
+                "title": f"Open {ticket_key}",
+                "url": ticket_url,
+            }
+        ]
 
     return {
         "type": "message",
@@ -64,30 +88,7 @@ def build_adaptive_card_payload(
             {
                 "contentType": "application/vnd.microsoft.card.adaptive",
                 "contentUrl": None,
-                "content": {
-                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                    "type": "AdaptiveCard",
-                    "version": "1.4",
-                    "body": [
-                        {
-                            "type": "Container",
-                            "style": "emphasis",
-                            "items": [
-                                {
-                                    "type": "TextBlock",
-                                    "text": "🎟️ Jira Ticket Created",
-                                    "weight": "Bolder",
-                                    "size": "Medium",
-                                    "color": "Good",
-                                }
-                            ],
-                        },
-                        {
-                            "type": "FactSet",
-                            "facts": facts,
-                        },
-                    ],
-                },
+                "content": card_content,
             }
         ],
     }
@@ -97,31 +98,23 @@ def build_html_message(
     ticket_key: str,
     ticket_url: str,
     summary: str,
-    issue_type: str,
-    priority: str,
-    created_at: str,
-    assignee: str,
-    reporter: str,
-    approval_note: str,
+    issue_type: str = "Task",
+    priority: str = "Medium",
+    created_at: Optional[str] = None,
+    assignee: str = "Unassigned",
+    reporter: Optional[str] = None,
+    approval_note: Optional[str] = None,
     module: Optional[str] = None,
     evidence: Optional[list] = None,
 ) -> str:
-    """Build formatted HTML confirmation message."""
+    """Build formatted HTML confirmation message with only topic details, scrum link, and assignee."""
     clean_summary = summary.replace("\n", " ").strip()
-    extra_info = ""
-    if module and module != "General":
-        extra_info += f"<br/>📦 <b>Module</b>: {module}"
-    if evidence:
-        extra_info += f"<br/>🔍 <b>Evidence</b>: {'; '.join(str(e) for e in evidence[:2])}"
-
+    scrum_link = f"<a href='{ticket_url}'><b>{ticket_key}</b></a>" if ticket_url else f"<b>{ticket_key}</b>"
     return (
-        f"🎟️ <b>Jira Ticket Created</b>: <a href='{ticket_url}'><b>{ticket_key}</b></a><br/>"
-        f"📅 <b>Date & Time</b>: {created_at}<br/>"
-        f"📝 <b>Summary</b>: {clean_summary}<br/>"
-        f"⚡ <b>Type & Priority</b>: {issue_type} | {priority}{extra_info}<br/>"
-        f"👤 <b>Assignee</b>: {assignee}<br/>"
-        f"🗣️ <b>Reporter</b>: {reporter}<br/>"
-        f"✅ <i>{approval_note}</i>"
+        f"🎟️ <b>Ticket Created</b><br/>"
+        f"📌 <b>Topic Details</b>: {clean_summary}<br/>"
+        f"🔗 <b>Scrum Link</b>: {scrum_link}<br/>"
+        f"👤 <b>Assignee</b>: {assignee or 'Unassigned'}"
     )
 
 
@@ -244,50 +237,24 @@ def build_pending_approval_card(
     duplicate_warning: Optional[Dict[str, Any]] = None,
     extractor_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build Adaptive Card prompting PM for final confirmation (Approve / Decline) of identified issue(s)."""
+    """Build a minimal, compact Adaptive Card prompting PM for approval of identified issue(s).
+    Strictly focuses on: Topic Details, Scrum Project, and Assignee.
+    """
     app_base = base_url or get_app_base_url()
     issue_count = len(issues)
-    clean_raw = (raw_message or "").replace("\n", " ").strip()
-    if len(clean_raw) > 120:
-        clean_raw = clean_raw[:117] + "..."
+    project_key = config.jira.project_key or "SCRUM"
 
-    issue_summaries = "\n".join(f"• Issue #{i+1}: {iss.get('summary', 'Issue')}" for i, iss in enumerate(issues))
-    dup_text = f"\n⚠️ Potential duplicate of {duplicate_warning.get('key')} created recently\n" if duplicate_warning else ""
-    plain_text = (
-        f"📋 PM Triage: {issue_count} Issue(s) Identified\n"
-        f"Reporter: {reporter}\n"
-        f"{dup_text}"
-        f"Message: {clean_raw}\n\n"
-        f"Issues:\n{issue_summaries}\n\n"
-        f"👉 To Approve: React with 🎟️ or 🎫\n"
-        f"👉 To Reject: React with ❌"
-    )
-
-    facts = [
-        {"title": "Reporter:", "value": reporter},
-        {"title": "Identified Issues:", "value": f"{issue_count} issue{'s' if issue_count > 1 else ''}"},
-    ]
-    if extractor_mode:
-        facts.append({"title": "Engine:", "value": extractor_mode})
-    facts.append({"title": "Original Text:", "value": clean_raw or "[No text, see attachments]"})
-
-    body_elements = [
+    body_elements: List[Dict[str, Any]] = [
         {
             "type": "Container",
             "style": "warning",
             "items": [
                 {
                     "type": "TextBlock",
-                    "text": f"📋 Issue Triage — PM Approval Required ({issue_count} Issue{'s' if issue_count > 1 else ''} Identified)",
+                    "text": f"📋 Issue Approval Required ({issue_count} Issues)" if issue_count > 1 else "📋 Issue Approval Required",
                     "weight": "Bolder",
                     "size": "Medium",
                     "color": "Warning",
-                    "wrap": True,
-                },
-                {
-                    "type": "TextBlock",
-                    "text": "Review identified issue specifications below. React to Approve or Reject:",
-                    "isSubtle": True,
                     "wrap": True,
                 },
             ],
@@ -297,99 +264,125 @@ def build_pending_approval_card(
     if duplicate_warning:
         dup_key = duplicate_warning.get("key", "Recent Ticket")
         dup_url = duplicate_warning.get("url", "#")
-        dup_conf = int(duplicate_warning.get("confidence", 0.5) * 100)
         body_elements.append({
-            "type": "Container",
-            "style": "attention",
-            "items": [
-                {
-                    "type": "TextBlock",
-                    "text": f"⚠️ **Potential Duplicate**: Similar ticket [{dup_key}]({dup_url}) was created recently ({dup_conf}% keyword match).",
-                    "weight": "Bolder",
-                    "color": "Attention",
-                    "wrap": True,
-                }
-            ],
+            "type": "TextBlock",
+            "text": f"⚠️ Potential duplicate of [{dup_key}]({dup_url})",
+            "color": "Attention",
+            "weight": "Bolder",
+            "wrap": True,
         })
+
+    import urllib.parse
+    import re
+    from src.services.member_sync_service import get_all_members_from_excel
+
+    # Dynamically retrieve team members from Member.xlsx for assignee options
+    try:
+        raw_members = get_all_members_from_excel()
+    except Exception:
+        raw_members = []
+
+    assignable_choices = []
+    seen_names = set()
+    for m in raw_members:
+        role = (m.get("role") or "").upper()
+        if role != "CLIENT":
+            c_name = re.sub(r"\s+", " ", m.get("display_name", "")).strip()
+            if c_name and c_name not in seen_names:
+                seen_names.add(c_name)
+                spec = m.get("specialty") or role
+                assignable_choices.append({
+                    "name": c_name,
+                    "specialty": spec,
+                    "role": role,
+                })
+
+    if not assignable_choices:
+        assignable_choices = [
+            {"name": "Santosh Yadav", "specialty": "Backend & API Lead", "role": "DEVELOPER"},
+            {"name": "Musaib Khan", "specialty": "Frontend & UI Lead", "role": "DEVELOPER"},
+            {"name": "Nishi Sharma", "specialty": "AI Developer", "role": "DEVELOPER"},
+            {"name": "Hemil Ghori", "specialty": "Project Manager / Scrum Master", "role": "PM"},
+        ]
+
+    facts: List[Dict[str, str]] = []
+    plain_summary_lines = []
+    primary_assignee = "Unassigned"
+
+    for i, iss in enumerate(issues):
+        iss_summary = (iss.get("summary") or "Issue Report").replace("\n", " ").strip()
+        iss_assignee = (iss.get("suggested_assignee") or "Unassigned").strip()
+        if i == 0:
+            primary_assignee = iss_assignee
+
+        if issue_count > 1:
+            facts.append({"title": f"Topic #{i+1}:", "value": iss_summary})
+            facts.append({"title": f"Assignee #{i+1}:", "value": iss_assignee})
+            plain_summary_lines.append(f"• Issue #{i+1}: {iss_summary} (Assignee: {iss_assignee})")
+        else:
+            facts.append({"title": "Topic Details:", "value": iss_summary})
+            facts.append({"title": "Scrum Project:", "value": project_key})
+            facts.append({"title": "Assignee:", "value": iss_assignee})
+            plain_summary_lines.append(f"• Topic: {iss_summary}\n• Scrum Project: {project_key}\n• Assignee: {iss_assignee}")
+
+    if issue_count > 1:
+        facts.append({"title": "Scrum Project:", "value": project_key})
 
     body_elements.append({
         "type": "FactSet",
         "facts": facts,
     })
 
-    for i, iss in enumerate(issues):
-        iss_summary = iss.get("summary", "Issue Report")
-        iss_type = iss.get("issue_type", "Bug")
-        iss_priority = iss.get("priority", "Medium")
-        iss_module = iss.get("affected_module", "General")
-        iss_assignee = iss.get("suggested_assignee") or "Unassigned"
-        iss_obs = iss.get("observed_behavior") or ""
-        if len(iss_obs) > 140:
-            iss_obs = iss_obs[:137] + "..."
-
-        issue_facts = [
-            {"title": "Type & Priority:", "value": f"{iss_type} | {iss_priority}"},
-            {"title": "Module:", "value": iss_module},
-            {"title": "Specialist:", "value": iss_assignee},
-        ]
-
-        issue_items = [
-            {
-                "type": "TextBlock",
-                "text": f"Issue #{i+1}: {iss_summary}",
-                "weight": "Bolder",
-                "color": "Accent",
-                "wrap": True,
-            },
-            {
-                "type": "FactSet",
-                "facts": issue_facts,
-            },
-        ]
-        if iss_obs:
-            issue_items.append({
-                "type": "TextBlock",
-                "text": f"Details: {iss_obs}",
-                "isSubtle": True,
-                "wrap": True,
-            })
-
-        body_elements.append({
-            "type": "Container",
-            "style": "emphasis",
-            "items": issue_items,
-        })
-
     body_elements.append({
-        "type": "Container",
-        "style": "emphasis",
-        "items": [
-            {
-                "type": "TextBlock",
-                "text": "Click **Approve** / **Reject** below, or simply react 👍 to Approve (100% inside Teams, zero redirects):",
-                "weight": "Bolder",
-                "size": "Medium",
-                "color": "Accent",
-                "wrap": True,
-            },
-        ],
+        "type": "TextBlock",
+        "text": "React 👍 to Approve or select assignee below:",
+        "isSubtle": True,
+        "wrap": True,
     })
 
-    confirm_label = (
-        f"✅ Approve All ({issue_count})"
-        if issue_count > 1
-        else "✅ Approve"
-    )
-    reject_label = (
-        f"❌ Reject All ({issue_count})"
-        if issue_count > 1
-        else "❌ Reject"
-    )
+    short_assignee = primary_assignee.split()[0] if primary_assignee != "Unassigned" else "Suggested"
+    confirm_label = f"✅ Approve ({short_assignee})" if issue_count == 1 else f"✅ Approve All ({issue_count})"
+    reject_label = f"❌ Reject All ({issue_count})" if issue_count > 1 else "❌ Reject"
+
+    # Build inline reassign sub-card actions for each team member
+    reassign_subcard_actions = []
+    for m in assignable_choices:
+        m_name = m["name"]
+        short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
+        reassign_subcard_actions.append({
+            "type": "Action.OpenUrl",
+            "title": f"Assign {m_name} ({short_role})",
+            "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(m_name)}&auto=1",
+        })
+
+    reassign_subcard_actions.append({
+        "type": "Action.OpenUrl",
+        "title": "⚙️ More / Web Dropdown Selector",
+        "url": f"{app_base}/api/jira/confirm-approval/{message_id}",
+    })
+
     actions = [
         {
             "type": "Action.OpenUrl",
             "title": confirm_label,
-            "url": f"{app_base}/api/jira/confirm-approval/{message_id}",
+            "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(primary_assignee)}&auto=1",
+        },
+        {
+            "type": "Action.ShowCard",
+            "title": "👥 Select Assignee ▾",
+            "card": {
+                "type": "AdaptiveCard",
+                "body": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Select Developer to Assign:",
+                        "weight": "Bolder",
+                        "size": "Small",
+                        "wrap": True,
+                    }
+                ],
+                "actions": reassign_subcard_actions,
+            },
         },
         {
             "type": "Action.OpenUrl",
@@ -398,18 +391,11 @@ def build_pending_approval_card(
         },
     ]
 
-    if issue_count > 1:
-        for i, iss in enumerate(issues[:3]):
-            actions.append({
-                "type": "Action.OpenUrl",
-                "title": f"Approve #{i+1}",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/{i}",
-            })
-            actions.append({
-                "type": "Action.OpenUrl",
-                "title": f"Reject #{i+1}",
-                "url": f"{app_base}/api/jira/decline-issue/{message_id}/{i}",
-            })
+    plain_text = (
+        f"📋 Issue Approval Required ({issue_count} Issue{'s' if issue_count > 1 else ''})\n"
+        + "\n".join(plain_summary_lines)
+        + "\n\nReact 👍 to Approve or select assignee"
+    )
 
     return {
         "type": "message",

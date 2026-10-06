@@ -1,9 +1,9 @@
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 
 from src.config import config
@@ -249,6 +249,7 @@ async def simulate_message(req: SimulateMessageRequest):
 
     from src.services.member_sync_service import get_active_pm_from_excel, get_all_members_from_excel
     pm_info = get_active_pm_from_excel()
+    role = (req.role or "CLIENT").upper()
     role_map = {
         "CLIENT": (config.roles.client, req.sender_name or "Dhruv dobariya"),
         "PM": (pm_info.get("user_id") or config.roles.pm, req.sender_name or pm_info.get("name", "Project Manager")),
@@ -573,45 +574,371 @@ def render_confirmation_html(
     return HTMLResponse(content=html_content, status_code=200)
 
 
+def render_assignee_dropdown_html(
+    message_id: str,
+    summary: str,
+    project_key: str,
+    suggested_assignee: str,
+    members: List[Dict[str, str]],
+    approver: str,
+) -> HTMLResponse:
+    """Render a dedicated, responsive Assignee Selection & Approval modal dialog."""
+    options_html = []
+    clean_suggested = suggested_assignee.strip().lower()
+
+    for m in members:
+        name = m.get("name", "")
+        spec = m.get("specialty", "")
+        # Match if suggested name overlaps
+        is_sel = (name.lower() in clean_suggested or clean_suggested in name.lower())
+        sel_attr = "selected" if is_sel else ""
+        label = f"{name} — {spec}" if spec else name
+        options_html.append(f'<option value="{name}" {sel_attr}>{label}</option>')
+
+    # Add Unassigned option
+    unassigned_sel = "selected" if clean_suggested in ("unassigned", "") else ""
+    options_html.append(f'<option value="Unassigned" {unassigned_sel}>Unassigned</option>')
+
+    options_joined = "\n          ".join(options_html)
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Approve Jira Ticket — Select Assignee</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }}
+    .card {{
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 14px;
+      max-width: 520px;
+      width: 100%;
+      padding: 30px;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 700;
+      background: #f59e0b22;
+      color: #f59e0b;
+      border: 1px solid #f59e0b44;
+      margin-bottom: 16px;
+    }}
+    h1 {{
+      font-size: 20px;
+      margin: 0 0 10px 0;
+      color: #ffffff;
+    }}
+    p.subtext {{
+      color: #94a3b8;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0 0 20px 0;
+    }}
+    .facts-box {{
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 20px;
+      text-align: left;
+      font-size: 13px;
+    }}
+    .fact-row {{
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px solid #1e293b;
+    }}
+    .fact-row:last-child {{ border-bottom: none; }}
+    .fact-label {{ color: #94a3b8; font-weight: 500; min-width: 110px; }}
+    .fact-val {{ color: #f8fafc; font-weight: 600; text-align: right; word-break: break-word; }}
+    .form-group {{
+      text-align: left;
+      margin-bottom: 22px;
+    }}
+    label {{
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #cbd5e1;
+      margin-bottom: 8px;
+    }}
+    select {{
+      width: 100%;
+      padding: 12px 14px;
+      background: #0f172a;
+      border: 1.5px solid #3b82f6;
+      border-radius: 8px;
+      color: #f8fafc;
+      font-size: 14px;
+      font-weight: 500;
+      outline: none;
+      cursor: pointer;
+    }}
+    select:focus {{
+      border-color: #60a5fa;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+    }}
+    .btn-approve {{
+      width: 100%;
+      padding: 13px 20px;
+      background: #10b981;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: background 0.15s ease;
+    }}
+    .btn-approve:hover {{
+      background: #059669;
+    }}
+    .btn-reject {{
+      display: inline-block;
+      margin-top: 14px;
+      color: #ef4444;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 600;
+    }}
+    .btn-reject:hover {{
+      text-decoration: underline;
+    }}
+    .footer-note {{
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 22px;
+      text-align: center;
+    }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">📋 Issue Approval Required</div>
+    <h1>Confirm Jira Ticket Creation</h1>
+    <p class="subtext">Select the developer who should be assigned to this ticket before creating it in Jira.</p>
+
+    <div class="facts-box">
+      <div class="fact-row">
+        <span class="fact-label">Topic Details:</span>
+        <span class="fact-val">{summary}</span>
+      </div>
+      <div class="fact-row">
+        <span class="fact-label">Scrum Project:</span>
+        <span class="fact-val">{project_key}</span>
+      </div>
+      <div class="fact-row">
+        <span class="fact-label">AI Suggestion:</span>
+        <span class="fact-val" style="color:#60a5fa;">{suggested_assignee}</span>
+      </div>
+    </div>
+
+    <form method="POST" action="/api/jira/confirm-approval/{message_id}">
+      <div class="form-group">
+        <label for="assigneeSelect">👤 Assignee Dropdown:</label>
+        <select name="assignee" id="assigneeSelect">
+          {options_joined}
+        </select>
+      </div>
+
+      <button type="submit" class="btn-approve">
+        🚀 Confirm & Create Jira Ticket
+      </button>
+    </form>
+
+    <div style="text-align: center;">
+      <a href="/api/jira/decline-approval/{message_id}" class="btn-reject">❌ Reject Ticket Creation</a>
+    </div>
+
+    <div class="footer-note">Microsoft Teams &bull; Jira Cloud Automation &bull; Closed-Loop Sync</div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html_content, status_code=200)
+
+
 @router.get("/api/jira/confirm-approval/{message_id}", response_class=HTMLResponse)
-async def confirm_approval_get(message_id: str):
-    """1-Click PM Approval endpoint for Teams card action links (GET)."""
+async def confirm_approval_get(
+    message_id: str,
+    assignee: Optional[str] = None,
+    auto: Optional[str] = None,
+):
+    """PM Approval endpoint with interactive Assignee Dropdown and 1-Click execution."""
     from src.services.message_service import execute_jira_ticket_creation
-    from src.services.member_sync_service import get_active_pm_from_excel
+    from src.services.member_sync_service import get_active_pm_from_excel, get_all_members_from_excel
+    from src.database import get_db
+    import json
+    import re
+
     pm_info = get_active_pm_from_excel()
     approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
-    res = await execute_jira_ticket_creation(message_id, approver_name=approver)
-    if not res.get("success"):
+    # If auto=1, execute ticket creation immediately with chosen or suggested assignee
+    if auto in ("1", "true", "yes"):
+        res = await execute_jira_ticket_creation(
+            message_id, approver_name=approver, assignee_override=assignee
+        )
+        if not res.get("success"):
+            return render_confirmation_html(
+                title="Action Failed",
+                status_type="error",
+                heading="Error",
+                message=res.get("error", "Failed to create Jira ticket"),
+            )
+        key = res.get("key", "Created")
+        url = res.get("url", "#")
+        already = res.get("already_existed", False)
+        target_dev = assignee or "Assigned Developer"
         return render_confirmation_html(
-            title="Action Failed",
+            title=f"Jira Ticket {'Already Active' if already else 'Created Successfully'}",
+            status_type="success",
+            heading="Approved by PM",
+            message=f"Ticket {key} has been created and assigned to {target_dev}. Confirmation posted to Teams.",
+            details={"Jira Ticket": key, "Status": "Created & Active", "Assignee": target_dev, "Approved By": approver},
+        )
+
+    # Otherwise: Render interactive Assignee Dropdown modal page
+    db = get_db()
+    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+    if not row:
+        return render_confirmation_html(
+            title="Message Not Found",
             status_type="error",
             heading="Error",
-            message=res.get("error", "Failed to create Jira ticket"),
+            message=f"Message ID '{message_id}' was not found in the database.",
         )
-    key = res.get("key", "Created")
-    url = res.get("url", "#")
-    already = res.get("already_existed", False)
-    return render_confirmation_html(
-        title=f"Jira Ticket {'Already Active' if already else 'Created Successfully'}",
-        status_type="success",
-        heading="Approved by PM",
-        message=f"Ticket {key} has been created and confirmation posted to Microsoft Teams. You can close this window now.",
-        details={"Jira Ticket": key, "Status": "Created & Active", "Approved By": approver},
+
+    if row["jira_issue_key"]:
+        return render_confirmation_html(
+            title="Ticket Already Created",
+            status_type="success",
+            heading="Active in Jira",
+            message=f"Ticket {row['jira_issue_key']} has already been created for this issue.",
+            details={"Jira Ticket": row["jira_issue_key"], "Status": "Active"},
+        )
+
+    ai_ticket = {}
+    if row["ai_ticket"]:
+        try:
+            ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
+        except Exception:
+            ai_ticket = {}
+
+    summary = ai_ticket.get("summary") or row["message_text"] or "Issue Report"
+    project_key = config.jira.project_key or "SCRUM"
+    suggested_assignee = assignee or ai_ticket.get("suggested_assignee") or "Santosh Yadav"
+
+    # Get assignable members from Member.xlsx
+    try:
+        raw_members = get_all_members_from_excel()
+    except Exception:
+        raw_members = []
+
+    assignable_list = []
+    seen = set()
+    for m in raw_members:
+        r = (m.get("role") or "").upper()
+        if r != "CLIENT":
+            c_name = re.sub(r"\s+", " ", m.get("display_name", "")).strip()
+            if c_name and c_name not in seen:
+                seen.add(c_name)
+                assignable_list.append({
+                    "name": c_name,
+                    "specialty": m.get("specialty") or r,
+                    "role": r,
+                })
+
+    if not assignable_list:
+        assignable_list = [
+            {"name": "Santosh Yadav", "specialty": "Backend & API Lead", "role": "DEVELOPER"},
+            {"name": "Musaib Khan", "specialty": "Frontend & UI Lead", "role": "DEVELOPER"},
+            {"name": "Nishi Sharma", "specialty": "AI Developer", "role": "DEVELOPER"},
+            {"name": "Hemil Ghori", "specialty": "Project Manager / Scrum Master", "role": "PM"},
+        ]
+
+    return render_assignee_dropdown_html(
+        message_id=message_id,
+        summary=summary,
+        project_key=project_key,
+        suggested_assignee=suggested_assignee,
+        members=assignable_list,
+        approver=approver,
     )
 
 
 @router.post("/api/jira/confirm-approval/{message_id}")
-async def confirm_approval_post(message_id: str):
-    """Programmatic / Dashboard PM Approval endpoint (POST)."""
+async def confirm_approval_post(
+    message_id: str,
+    request: Request,
+):
+    """Programmatic / Web Form PM Approval endpoint (POST)."""
     from src.services.message_service import execute_jira_ticket_creation
     from src.services.member_sync_service import get_active_pm_from_excel
     pm_info = get_active_pm_from_excel()
     approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
-    res = await execute_jira_ticket_creation(message_id, approver_name=approver)
+    assignee = None
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            assignee = body.get("assignee")
+        except Exception:
+            pass
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            assignee = form.get("assignee")
+        except Exception:
+            pass
+
+    res = await execute_jira_ticket_creation(
+        message_id, approver_name=approver, assignee_override=assignee
+    )
     if not res.get("success"):
+        if "text/html" in request.headers.get("accept", "") or "form" in content_type:
+            return render_confirmation_html(
+                title="Action Failed",
+                status_type="error",
+                heading="Error",
+                message=res.get("error", "Failed to create Jira ticket"),
+            )
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to create ticket"))
+
+    if "text/html" in request.headers.get("accept", "") or "form" in content_type:
+        key = res.get("key", "Created")
+        target_dev = assignee or "Assigned Developer"
+        return render_confirmation_html(
+            title="Jira Ticket Created Successfully",
+            status_type="success",
+            heading="Approved by PM",
+            message=f"Ticket {key} has been created and assigned to {target_dev}. Confirmation posted to Teams.",
+            details={"Jira Ticket": key, "Status": "Created & Active", "Assignee": target_dev, "Approved By": approver},
+        )
     return res
 
 

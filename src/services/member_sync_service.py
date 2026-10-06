@@ -26,7 +26,7 @@ from src.graph_client import get_access_token
 from src.logger import logger
 
 # Primary shared OneDrive folder path on user's machine (synced with cloud & Teams)
-ONEDRIVE_MEMBER_PATH = Path(r"C:\Users\Admin\OneDrive\Jira-Automation\Member.xlsx")
+ONEDRIVE_MEMBER_PATH = Path.home() / "OneDrive" / "Jira-Automation" / "Member.xlsx"
 LOCAL_MEMBER_PATH = Path("data/Member.xlsx")
 
 DEFAULT_ONEDRIVE_URL = os.getenv(

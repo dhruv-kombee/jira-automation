@@ -508,6 +508,7 @@ async def execute_jira_ticket_creation(
     message_id: str,
     approver_name: Optional[str] = None,
     issue_idx: Optional[int] = None,
+    assignee_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute Jira issue creation after PM final confirmation.
 
@@ -581,7 +582,12 @@ async def execute_jira_ticket_creation(
         item_desc = item.get("description") or ai_ticket.get("description", "")
         item_type = item.get("issue_type") or ai_ticket.get("issue_type", config.jira.default_issue_type)
         item_priority = item.get("priority") or ai_ticket.get("priority", "Medium")
-        item_assignee = item.get("suggested_assignee") or ai_ticket.get("suggested_assignee") or "Unassigned"
+        item_assignee = (
+            assignee_override
+            or item.get("suggested_assignee")
+            or ai_ticket.get("suggested_assignee")
+            or "Unassigned"
+        )
         item_module = item.get("affected_module") or ai_ticket.get("affected_module")
         item_evidence = item.get("evidence") or ai_ticket.get("evidence")
 
@@ -848,14 +854,57 @@ async def check_and_auto_create_jira_ticket(
                 approver_name = f"{m.get('display_name')} (Client Approver)"
                 break
 
+    # Check if this message is a client text message
+    is_client_message = bool(row and row["message_text"])
+
+    # If this is a client issue message that has not yet been triaged:
+    # A reaction with ticket emoji (🎟️, 🎫) or thumbs up must execute STEP 1
+    # to display the Confirmation Block in Teams for PM approval.
+    target_msg_id = msg_id
+    if is_client_message and confirmation_status != "AWAITING_FINAL_CONFIRMATION":
+        if not (has_approval or has_conf_approval):
+            return None
+        # Fall through to STEP 1 below to post the Confirmation Block!
+
+    elif confirmation_status != "AWAITING_FINAL_CONFIRMATION" and (has_conf_approval or has_disapproval):
+        # This is a reaction on an Adaptive Card or bot message in Teams (not a text message).
+        # Map it to the pending message awaiting final confirmation in this chat.
+        chat_id = normalized_message.get("chatId") or (row["chat_id"] if row else None)
+        team_id = normalized_message.get("teamId") or (row["team_id"] if row else None)
+        channel_id = normalized_message.get("channelId") or (row["channel_id"] if row else None)
+
+        query = """
+            SELECT * FROM messages
+            WHERE confirmation_status = 'AWAITING_FINAL_CONFIRMATION'
+              AND (jira_issue_key IS NULL OR jira_issue_key = '')
+        """
+        params = []
+        if chat_id:
+            query += " AND chat_id = ?"
+            params.append(chat_id)
+        elif team_id and channel_id:
+            query += " AND team_id = ? AND channel_id = ?"
+            params.extend([team_id, channel_id])
+
+        query += " ORDER BY id DESC LIMIT 1"
+        pending_row = db.execute(query, tuple(params)).fetchone()
+        if pending_row:
+            logger.info(
+                f"Mapped card reaction on {msg_id} to pending message {pending_row['message_id']}",
+                extra={"event": "CARD_REACTION_MAPPED", "cardMessageId": msg_id, "targetMessageId": pending_row["message_id"]},
+            )
+            row = pending_row
+            target_msg_id = pending_row["message_id"]
+            confirmation_status = pending_row["confirmation_status"] or ""
+
     # =========================================================================
     # STEP 2: Final confirmation resolution (if already awaiting confirmation)
     # =========================================================================
     if confirmation_status == "AWAITING_FINAL_CONFIRMATION":
         if has_disapproval:
-            return await execute_jira_ticket_decline(msg_id, approver_name=approver_name)
+            return await execute_jira_ticket_decline(target_msg_id, approver_name=approver_name)
         elif has_conf_approval:
-            return await execute_jira_ticket_creation(msg_id, approver_name=approver_name)
+            return await execute_jira_ticket_creation(target_msg_id, approver_name=approver_name)
         return None
 
     # If already declined, do not process unless re-approved
@@ -865,7 +914,7 @@ async def check_and_auto_create_jira_ticket(
     # =========================================================================
     # STEP 1: Issue triage & confirmation request (upon first PM 🎟️/🎫 reaction)
     # =========================================================================
-    if not has_approval:
+    if not (has_approval or has_conf_approval):
         # Reaction was disapproval on a non-triaged message; ignore
         return None
 
