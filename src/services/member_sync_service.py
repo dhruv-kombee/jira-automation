@@ -534,6 +534,23 @@ def feed_member_to_excel(
     # Update subtitle timestamp
     ws.cell(row=2, column=1).value = f"Single Source of Truth for Team Members, Roles & Permissions | Last Updated: {now_str}"
 
+    # Ensure in-cell dropdown data validations exist
+    try:
+        from openpyxl.worksheet.datavalidation import DataValidation
+        has_role_dv = any("C" in str(getattr(v, "sqref", "")) for v in getattr(ws.data_validations, "dataValidation", []))
+        if not has_role_dv:
+            role_dv = DataValidation(type="list", formula1='"CLIENT, PM, DEVELOPER"', allow_blank=True)
+            ws.add_data_validation(role_dv)
+            role_dv.add("C5:C500")
+            approve_dv = DataValidation(type="list", formula1='"1, 0"', allow_blank=True)
+            ws.add_data_validation(approve_dv)
+            approve_dv.add("F5:F500")
+            status_dv = DataValidation(type="list", formula1='"Active, Inactive"', allow_blank=True)
+            ws.add_data_validation(status_dv)
+            status_dv.add("H5:H500")
+    except Exception:
+        pass
+
     save_workbook_to_all(wb)
     sync_db_from_excel()
 
@@ -674,7 +691,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
 
         current_row += 1
 
-    # Column widths
+    # Auto-adjust column widths
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
@@ -685,6 +702,30 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
             if len(val) > max_len and cell.row > 2:
                 max_len = len(val)
         ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+
+    # Add In-Cell Dropdown Data Validations
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    # 1. Assigned Role Dropdown (CLIENT, PM, DEVELOPER) for column C
+    role_dv = DataValidation(type="list", formula1='"CLIENT, PM, DEVELOPER"', allow_blank=True)
+    role_dv.error = "Please choose a valid role: CLIENT, PM, or DEVELOPER"
+    role_dv.errorTitle = "Invalid Role"
+    role_dv.prompt = "Choose role from dropdown: CLIENT, PM, or DEVELOPER"
+    role_dv.promptTitle = "Role Selection"
+    ws.add_data_validation(role_dv)
+    role_dv.add("C5:C500")
+
+    # 2. Can Approve Dropdown (1, 0) for column F
+    approve_dv = DataValidation(type="list", formula1='"1, 0"', allow_blank=True)
+    approve_dv.error = "Enter 1 for approval permissions, or 0"
+    approve_dv.errorTitle = "Invalid Permission"
+    ws.add_data_validation(approve_dv)
+    approve_dv.add("F5:F500")
+
+    # 3. Status Dropdown (Active, Inactive) for column H
+    status_dv = DataValidation(type="list", formula1='"Active, Inactive"', allow_blank=True)
+    ws.add_data_validation(status_dv)
+    status_dv.add("H5:H500")
 
     return save_workbook_to_all(wb)
 

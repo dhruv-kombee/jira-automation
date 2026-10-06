@@ -172,7 +172,8 @@ function setupEventListeners() {
       showToast('Please type a message', 'error');
       return;
     }
-    const role = document.querySelector('input[name="simRole"]:checked').value;
+    const roleSelect = document.getElementById('simRoleSelect');
+    const role = roleSelect ? roleSelect.value : (document.querySelector('input[name="simRole"]:checked')?.value || 'CLIENT');
 
     try {
       elBtnSubmitSim.disabled = true;
@@ -382,14 +383,14 @@ function renderStatus(data) {
     const elDevLabel = document.getElementById('metricDevLabel');
     if (elDevLabel) elDevLabel.innerText = `Developer (${devName})`;
 
-    const elSimPm = document.getElementById('simPillPm');
-    if (elSimPm) elSimPm.innerText = `PM (${pmName})`;
+    const elOptPm = document.getElementById('simOptPm');
+    if (elOptPm) elOptPm.innerText = `PM (${pmName})`;
 
-    const elSimClient = document.getElementById('simPillClient');
-    if (elSimClient) elSimClient.innerText = `Client (${clientName})`;
+    const elOptClient = document.getElementById('simOptClient');
+    if (elOptClient) elOptClient.innerText = `Client (${clientName})`;
 
-    const elSimDev = document.getElementById('simPillDev');
-    if (elSimDev) elSimDev.innerText = `Developer (${devName})`;
+    const elOptDev = document.getElementById('simOptDev');
+    if (elOptDev) elOptDev.innerText = `Developer (${devName})`;
   }
 
   // Update auto-renew info subtext

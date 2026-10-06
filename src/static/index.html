@@ -320,20 +320,13 @@
         <p class="modal-desc">Test message detection, role assignment, and pipeline drafting instantly without opening Teams.</p>
         
         <div class="form-group">
-          <label>Sender Role:</label>
-          <div class="role-picker">
-            <label class="role-option">
-              <input type="radio" name="simRole" value="CLIENT" checked>
-              <span class="role-pill-opt pill-client" id="simPillClient">Client</span>
-            </label>
-            <label class="role-option">
-              <input type="radio" name="simRole" value="PM">
-              <span class="role-pill-opt pill-pm" id="simPillPm">PM</span>
-            </label>
-            <label class="role-option">
-              <input type="radio" name="simRole" value="DEVELOPER">
-              <span class="role-pill-opt pill-dev" id="simPillDev">Developer</span>
-            </label>
+          <label for="simRoleSelect">Sender Role:</label>
+          <div style="position:relative; margin-top:0.35rem;">
+            <select id="simRoleSelect" class="input-textarea" style="width:100%; height:44px; padding:0 0.85rem; border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text-main); border:1px solid var(--border-subtle); font-size:0.95rem; font-weight:500; cursor:pointer;">
+              <option value="CLIENT" id="simOptClient" selected>Client</option>
+              <option value="PM" id="simOptPm">PM</option>
+              <option value="DEVELOPER" id="simOptDev">Developer</option>
+            </select>
           </div>
         </div>
 
