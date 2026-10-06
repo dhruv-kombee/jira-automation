@@ -22,7 +22,6 @@ from src.services.teams_notifier import send_pm_followup_reminder
 
 _reminder_task: Optional[asyncio.Task] = None
 REMINDER_CHECK_INTERVAL = 30  # Run check every 30 seconds
-_MONITOR_START_TIME: datetime = datetime.now(timezone.utc)
 
 
 def get_active_pm() -> Dict[str, str]:
@@ -131,9 +130,9 @@ async def check_and_send_message_reminder(
         if elapsed < timeout_minutes and not force:
             return {"skipped": True, "reason": f"Under timeout threshold ({int(elapsed)}m < {timeout_minutes}m)"}
 
-        # Guard: suppress automatic emails/reminders for messages that predate current monitor session
-        if not force and msg_dt < _MONITOR_START_TIME:
-            return {"skipped": True, "reason": "Message predates active monitor session (historical email suppressed)"}
+        # Guard: do not send automatic reminders for messages older than 24 hours (ancient backlog)
+        if not force and elapsed > 1440:
+            return {"skipped": True, "reason": "Message is older than 24 hours (ancient backlog suppressed)"}
 
     # Parse AI ticket / issues
     raw_ai = msg.get("ai_ticket")
