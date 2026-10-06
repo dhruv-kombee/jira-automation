@@ -170,18 +170,26 @@ async def get_chat_message(chat_id: str, message_id: str) -> Dict[str, Any]:
         return response.json()
 
 
-async def send_chat_message(chat_id: str, content: str, content_type: str = "html") -> Optional[Dict[str, Any]]:
-    """Send a message/notification to a Teams group chat."""
+async def send_chat_message(
+    chat_id: str,
+    content: str,
+    content_type: str = "html",
+    mentions: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Send a message/notification to a Teams group chat with optional @mentions."""
     try:
         token = get_access_token()
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         url = f"{GRAPH_BASE_URL}/chats/{chat_id}/messages"
-        payload = {
+        payload: Dict[str, Any] = {
             "body": {
                 "contentType": content_type,
                 "content": content,
             }
         }
+        if mentions:
+            payload["mentions"] = mentions
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(url, json=payload, headers=headers)
             if response.status_code in (200, 201):
@@ -197,18 +205,28 @@ async def send_chat_message(chat_id: str, content: str, content_type: str = "htm
         return None
 
 
-async def send_channel_reply(team_id: str, channel_id: str, parent_message_id: str, content: str, content_type: str = "html") -> Optional[Dict[str, Any]]:
-    """Send a reply to a Teams channel thread."""
+async def send_channel_reply(
+    team_id: str,
+    channel_id: str,
+    parent_message_id: str,
+    content: str,
+    content_type: str = "html",
+    mentions: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Send a reply to a Teams channel thread with optional @mentions."""
     try:
         token = get_access_token()
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         url = f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages/{parent_message_id}/replies"
-        payload = {
+        payload: Dict[str, Any] = {
             "body": {
                 "contentType": content_type,
                 "content": content,
             }
         }
+        if mentions:
+            payload["mentions"] = mentions
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(url, json=payload, headers=headers)
             if response.status_code in (200, 201):
@@ -221,6 +239,46 @@ async def send_channel_reply(team_id: str, channel_id: str, parent_message_id: s
             return None
     except Exception as err:
         logger.warning(f"Failed to post confirmation to Teams channel: {err}", extra={"event": "TEAMS_SEND_ERROR", "error": str(err)})
+        return None
+
+
+async def send_chat_reply_with_quote(
+    chat_id: str,
+    message_id: str,
+    content: str,
+    content_type: str = "html",
+    mentions: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Reply to a specific Teams chat message quoting the original message."""
+    try:
+        token = get_access_token()
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        url = f"{GRAPH_BASE_URL}/chats/{chat_id}/messages/replyWithQuote"
+        reply_msg: Dict[str, Any] = {
+            "body": {
+                "contentType": content_type,
+                "content": content,
+            }
+        }
+        if mentions:
+            reply_msg["mentions"] = mentions
+
+        payload = {
+            "messageIds": [message_id],
+            "replyMessage": reply_msg,
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            if response.status_code in (200, 201):
+                logger.info("Teams chat replyWithQuote sent", extra={"event": "TEAMS_QUOTE_REPLY_SENT", "messageId": message_id})
+                return response.json()
+            logger.debug(
+                f"Teams replyWithQuote warning ({response.status_code}): {response.text[:200]}",
+                extra={"event": "TEAMS_QUOTE_REPLY_WARN", "status": response.status_code},
+            )
+            return None
+    except Exception as err:
+        logger.debug(f"Failed to reply with quote in chat: {err}")
         return None
 
 

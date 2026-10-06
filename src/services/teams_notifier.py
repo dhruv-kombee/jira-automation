@@ -587,3 +587,213 @@ async def send_ticket_declined_notification(
 
     return {"success": False, "method": "none"}
 
+
+def build_pm_followup_reminder_card(
+    message_id: str,
+    pm_name: str,
+    pm_user_id: Optional[str],
+    reporter: str,
+    elapsed_minutes: int,
+    issues: list,
+    raw_message: str,
+    base_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a compact one-line Adaptive Card mentioning PM for follow-up on client issue."""
+    app_base = base_url or get_app_base_url()
+
+    first_summary = ""
+    if issues and len(issues) > 0:
+        first_summary = issues[0].get("summary", "")
+    clean_snippet = first_summary or (raw_message or "").replace("\n", " ").strip()
+    if len(clean_snippet) > 90:
+        clean_snippet = clean_snippet[:87] + "..."
+
+    # One-line concise message mentioning PM directly
+    card_text = (
+        f"⏰ <at>{pm_name}</at> Please review client issue from **{reporter}**: "
+        f"*\"{clean_snippet}\"* — react 🎟️ to approve or ❌ to decline."
+    )
+    plain_text = f"⏰ @{pm_name} Please review client issue from {reporter}: \"{clean_snippet}\" (React 🎟️ to approve, ❌ to decline)"
+
+    body_elements: list = [
+        {
+            "type": "TextBlock",
+            "text": card_text,
+            "wrap": True,
+            "size": "Medium",
+        }
+    ]
+
+    actions: list = [
+        {
+            "type": "Action.OpenUrl",
+            "title": "🎟️ Approve",
+            "url": f"{app_base}/api/jira/confirm-issue/{message_id}",
+        },
+        {
+            "type": "Action.OpenUrl",
+            "title": "❌ Decline",
+            "url": f"{app_base}/api/jira/decline-issue/{message_id}",
+        },
+    ]
+
+    card_content: Dict[str, Any] = {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": body_elements,
+        "actions": actions,
+    }
+
+    # Tag PM using official Teams mention schema
+    if pm_name:
+        card_content["msteams"] = {
+            "entities": [
+                {
+                    "type": "mention",
+                    "text": f"<at>{pm_name}</at>",
+                    "mentioned": {
+                        "id": pm_user_id or "",
+                        "name": pm_name,
+                    },
+                }
+            ]
+        }
+
+    return {
+        "type": "message",
+        "text": plain_text,
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "contentUrl": None,
+                "content": card_content,
+            }
+        ],
+    }
+
+
+async def send_pm_followup_reminder(
+    message_id: str,
+    pm_name: str,
+    pm_user_id: Optional[str],
+    reporter: str,
+    elapsed_minutes: int,
+    issues: list,
+    raw_message: str,
+    chat_id: Optional[str] = None,
+    team_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Send Teams follow-up card with PM mention in reply mode to client's message if possible, falling back to webhook."""
+    webhook_url = (config.teams.webhook_url or "").strip()
+    effective_chat_id = chat_id or config.teams.chat_id
+    effective_team_id = team_id or config.teams.team_id
+    effective_channel_id = channel_id or config.teams.channel_id
+
+    first_summary = ""
+    if issues and len(issues) > 0:
+        first_summary = issues[0].get("summary", "")
+    snippet = first_summary or (raw_message or "").replace("\n", " ").strip()
+    if len(snippet) > 90:
+        snippet = snippet[:87] + "..."
+
+    # HTML content for Graph API with standard @mention tag
+    html_msg = (
+        f"⏰ <at id=\"0\">{pm_name}</at> Please review client issue from <b>{reporter}</b>: "
+        f"<i>\"{snippet}\"</i> (React 🎟️ to approve, ❌ to decline)"
+    )
+    mentions_payload = [
+        {
+            "id": 0,
+            "mentionText": pm_name,
+            "mentioned": {
+                "user": {
+                    "id": pm_user_id or "",
+                    "displayName": pm_name,
+                }
+            },
+        }
+    ] if pm_name else None
+
+    # Step 1: Attempt direct reply mode via Microsoft Graph API
+    # 1A. Teams Channel Reply (threaded reply under client message)
+    if effective_team_id and effective_channel_id and message_id:
+        try:
+            from src.graph_client import send_channel_reply
+            reply_res = await send_channel_reply(
+                team_id=effective_team_id,
+                channel_id=effective_channel_id,
+                parent_message_id=message_id,
+                content=html_msg,
+                mentions=mentions_payload,
+            )
+            if reply_res:
+                logger.info(
+                    f"⏰ Successfully posted PM follow-up as channel reply to message {message_id}",
+                    extra={"event": "TEAMS_PM_REMINDER_SUCCESS", "method": "channel_reply", "messageId": message_id},
+                )
+                return {"success": True, "method": "channel_reply", "result": reply_res}
+        except Exception as c_err:
+            logger.debug(f"Graph channel reply error: {c_err}")
+
+    # 1B. Teams Chat Quoted Reply (replyWithQuote in group chat / 1:1 chat)
+    if effective_chat_id and message_id:
+        try:
+            from src.graph_client import send_chat_reply_with_quote
+            quote_res = await send_chat_reply_with_quote(
+                chat_id=effective_chat_id,
+                message_id=message_id,
+                content=html_msg,
+                mentions=mentions_payload,
+            )
+            if quote_res:
+                logger.info(
+                    f"⏰ Successfully posted PM follow-up as chat quoted reply for message {message_id}",
+                    extra={"event": "TEAMS_PM_REMINDER_SUCCESS", "method": "chat_quote_reply", "messageId": message_id},
+                )
+                return {"success": True, "method": "chat_quote_reply", "result": quote_res}
+        except Exception as q_err:
+            logger.debug(f"Graph chat quoted reply error: {q_err}")
+
+    # Step 2: Post compact one-line card via Teams Webhook
+    if webhook_url:
+        card_payload = build_pm_followup_reminder_card(
+            message_id=message_id,
+            pm_name=pm_name,
+            pm_user_id=pm_user_id,
+            reporter=reporter,
+            elapsed_minutes=elapsed_minutes,
+            issues=issues,
+            raw_message=raw_message,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res = await client.post(webhook_url, json=card_payload)
+                if res.status_code in (200, 201, 202):
+                    logger.info(
+                        f"⏰ Successfully posted compact PM follow-up reminder card to Teams for message {message_id}",
+                        extra={"event": "TEAMS_PM_REMINDER_SUCCESS", "method": "webhook", "messageId": message_id},
+                    )
+                    return {"success": True, "method": "webhook", "status": res.status_code}
+                else:
+                    logger.warning(
+                        f"Teams Webhook reminder returned HTTP {res.status_code}: {res.text[:200]}",
+                        extra={"event": "TEAMS_PM_REMINDER_WARN", "status": res.status_code},
+                    )
+        except Exception as webhook_err:
+            logger.error(f"Error calling Teams Webhook for reminder: {webhook_err}")
+
+    # Step 3: Fallback to Graph API chat message
+    if effective_chat_id:
+        try:
+            from src.graph_client import send_chat_message
+            graph_res = await send_chat_message(effective_chat_id, html_msg, mentions=mentions_payload)
+            if graph_res:
+                return {"success": True, "method": "graph_chat", "result": graph_res}
+        except Exception as g_err:
+            logger.debug(f"Graph chat reminder error: {g_err}")
+
+    return {"success": False, "method": "none", "error": "No delivery channel succeeded"}
+
+

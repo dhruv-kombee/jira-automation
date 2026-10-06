@@ -47,6 +47,10 @@ async def lifespan(app: FastAPI):
     # 5. Start background auto-renewal loop
     start_auto_renew()
 
+    # 6. Start PM Follow-up SLA reminder monitor
+    from src.services.reminder_service import start_reminder_monitor, stop_reminder_monitor
+    start_reminder_monitor()
+
     logger.info(
         f"Teams to Jira Automation Hub online at http://localhost:{config.port}",
         extra={
@@ -61,6 +65,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     stop_auto_renew()
+    stop_reminder_monitor()
     from src.tunnel import stop_tunnel
     stop_tunnel()
     close_database()

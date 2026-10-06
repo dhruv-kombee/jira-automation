@@ -348,6 +348,13 @@ def read_system_config(raw: bool = Query(False, description="Whether to include 
     return {"success": True, "config": get_system_config(include_raw_secrets=raw)}
 
 
+def is_secret_masked(val: Optional[str]) -> bool:
+    if not val:
+        return False
+    val_str = str(val).strip()
+    return "•" in val_str or "…" in val_str or val_str.startswith("••")
+
+
 @router.post("/config")
 def save_system_config(req: ConfigUpdateRequest):
     """Save updated system configuration to .env and apply changes live."""
@@ -357,7 +364,7 @@ def save_system_config(req: ConfigUpdateRequest):
         updates["JIRA_BASE_URL"] = req.jira_base_url.rstrip("/")
     if req.jira_email is not None:
         updates["JIRA_EMAIL"] = req.jira_email.strip()
-    if req.jira_api_token is not None and req.jira_api_token.strip() and not req.jira_api_token.startswith("••"):
+    if req.jira_api_token is not None and req.jira_api_token.strip() and not is_secret_masked(req.jira_api_token):
         updates["JIRA_API_TOKEN"] = req.jira_api_token.strip()
     if req.jira_project_key is not None:
         updates["JIRA_PROJECT_KEY"] = req.jira_project_key.upper().strip()
@@ -375,12 +382,12 @@ def save_system_config(req: ConfigUpdateRequest):
     if req.allow_self_approval is not None:
         updates["ALLOW_SELF_APPROVAL"] = "true" if req.allow_self_approval else "false"
 
-    if req.gemini_api_key_1 is not None and not req.gemini_api_key_1.startswith("••"):
+    if req.gemini_api_key_1 is not None and not is_secret_masked(req.gemini_api_key_1):
         updates["GEMINI_API_KEY_1"] = req.gemini_api_key_1.strip()
         updates["GEMINI_API_KEY"] = req.gemini_api_key_1.strip()
-    if req.gemini_api_key_2 is not None and not req.gemini_api_key_2.startswith("••"):
+    if req.gemini_api_key_2 is not None and not is_secret_masked(req.gemini_api_key_2):
         updates["GEMINI_API_KEY_2"] = req.gemini_api_key_2.strip()
-    if req.gemini_api_key_3 is not None and not req.gemini_api_key_3.startswith("••"):
+    if req.gemini_api_key_3 is not None and not is_secret_masked(req.gemini_api_key_3):
         updates["GEMINI_API_KEY_3"] = req.gemini_api_key_3.strip()
     if req.gemini_model is not None:
         updates["GEMINI_MODEL"] = req.gemini_model.strip()
@@ -404,7 +411,7 @@ async def test_jira(req: TestJiraRequest):
     """Test connection to Jira Cloud with given credentials."""
     # If API token is masked (e.g. user didn't modify it), use the active token from config
     token = req.api_token
-    if not token or token.startswith("••"):
+    if not token or is_secret_masked(token):
         token = config.jira.api_token
 
     res = await test_jira_credentials(
@@ -420,7 +427,7 @@ async def test_jira(req: TestJiraRequest):
 async def test_gemini(req: TestGeminiRequest):
     """Test Gemini API key connectivity and latency."""
     key = req.api_key
-    if not key or key.startswith("••"):
+    if not key or is_secret_masked(key):
         key = config.gemini.api_key
 
     res = await test_gemini_credentials(api_key=key, model=req.model or config.gemini.model)
@@ -436,6 +443,44 @@ async def test_teams(req: TestTeamsRequest):
 
     res = await test_teams_webhook_payload(webhook_url=url)
     return res
+
+
+class TestEmailRequest(BaseModel):
+    to_email: Optional[str] = None
+    subject: Optional[str] = None
+
+
+@router.post("/test/email")
+async def test_email(req: TestEmailRequest):
+    """Test Outlook email delivery to PM or custom address."""
+    from src.services.email_service import send_pm_followup_email
+    from src.services.reminder_service import get_active_pm
+    pm = get_active_pm()
+    target_email = req.to_email or pm.get("email") or "santosh.yadav@kombee.com"
+    target_name = pm.get("name") or "Santosh Yadav"
+
+    res = await send_pm_followup_email(
+        pm_email=target_email,
+        pm_name=target_name,
+        reporter_name="Client Test User",
+        elapsed_minutes=15,
+        issues=[{
+            "summary": "Sample client issue: Search dropdown filter unresponsive on product catalog",
+            "issue_type": config.jira.default_issue_type,
+            "priority": "High",
+            "affected_module": "Product Catalog",
+            "suggested_assignee": "Frontend & UI Lead (Musaib Khan)",
+            "observed_behavior": "Clicking the category filter results in a frozen dropdown and console error 500."
+        }],
+        raw_message="#issue The product catalog search dropdown is unresponsive when selecting multiple categories.",
+        message_id="test_email_verification",
+        created_at_str="2026-10-06 09:30:00",
+    )
+    return {
+        "success": res.get("success", False),
+        "target_email": target_email,
+        "details": res,
+    }
 
 
 @router.get("/audit-log")

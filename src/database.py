@@ -101,7 +101,11 @@ def init_database(db_path: Optional[str] = None) -> sqlite3.Connection:
     """)
 
     # Safe migration for existing databases
-    for col in ["reactions", "ai_ticket", "jira_issue_key", "jira_issue_url", "confirmation_status", "confirmation_message_id"]:
+    for col in [
+        "reactions", "ai_ticket", "jira_issue_key", "jira_issue_url",
+        "confirmation_status", "confirmation_message_id",
+        "reminder_sent_at", "reminder_count", "reminder_channel_status", "reminder_email_status"
+    ]:
         try:
             _db_conn.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT;")
         except Exception:

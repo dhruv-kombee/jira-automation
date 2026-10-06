@@ -737,19 +737,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (jiraBaseUrl.value.trim()) payload.jira_base_url = jiraBaseUrl.value.trim();
     if (jiraProjectKey.value.trim()) payload.jira_project_key = jiraProjectKey.value.trim().toUpperCase();
     if (jiraEmail.value.trim()) payload.jira_email = jiraEmail.value.trim();
-    if (jiraApiToken.value.trim() && !jiraApiToken.value.startsWith('••')) {
+    const isMaskedVal = (str) => !str || str.includes('•') || str.includes('…') || str.startsWith('••');
+
+    if (jiraApiToken.value.trim() && !isMaskedVal(jiraApiToken.value.trim())) {
       payload.jira_api_token = jiraApiToken.value.trim();
     }
     if (jiraDefaultIssueType.value) payload.jira_default_issue_type = jiraDefaultIssueType.value;
 
     if (geminiModel.value) payload.gemini_model = geminiModel.value;
-    if (geminiApiKey1.value.trim() && !geminiApiKey1.value.startsWith('••')) {
+    if (geminiApiKey1.value.trim() && !isMaskedVal(geminiApiKey1.value.trim())) {
       payload.gemini_api_key_1 = geminiApiKey1.value.trim();
     }
-    if (geminiApiKey2.value.trim() && !geminiApiKey2.value.startsWith('••')) {
+    if (geminiApiKey2.value.trim() && !isMaskedVal(geminiApiKey2.value.trim())) {
       payload.gemini_api_key_2 = geminiApiKey2.value.trim();
     }
-    if (geminiApiKey3.value.trim() && !geminiApiKey3.value.startsWith('••')) {
+    if (geminiApiKey3.value.trim() && !isMaskedVal(geminiApiKey3.value.trim())) {
       payload.gemini_api_key_3 = geminiApiKey3.value.trim();
     }
 

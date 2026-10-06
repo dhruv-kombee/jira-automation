@@ -627,6 +627,30 @@ async def decline_approval_post(message_id: str):
     return res
 
 
+@router.get("/api/jira/confirm-issue/{message_id}", response_class=HTMLResponse)
+async def confirm_issue_all_get(message_id: str):
+    """1-Click PM Approval for all issues / main issue in a message (GET)."""
+    return await confirm_approval_get(message_id)
+
+
+@router.post("/api/jira/confirm-issue/{message_id}")
+async def confirm_issue_all_post(message_id: str):
+    """Programmatic PM Approval for all issues / main issue in a message (POST)."""
+    return await confirm_approval_post(message_id)
+
+
+@router.get("/api/jira/decline-issue/{message_id}", response_class=HTMLResponse)
+async def decline_issue_all_get(message_id: str):
+    """1-Click PM Decline for all issues in a message (GET)."""
+    return await decline_approval_get(message_id)
+
+
+@router.post("/api/jira/decline-issue/{message_id}")
+async def decline_issue_all_post(message_id: str):
+    """Programmatic PM Decline for all issues in a message (POST)."""
+    return await decline_approval_post(message_id)
+
+
 @router.get("/api/jira/confirm-issue/{message_id}/{issue_idx}", response_class=HTMLResponse)
 async def confirm_issue_get(message_id: str, issue_idx: int):
     """1-Click PM Approval for a specific single issue in a multi-issue triage card (GET)."""
@@ -808,7 +832,82 @@ async def test_teams_webhook():
         reporter="Client (Dhruv dobariya)",
         approval_note="Test message sent from Dashboard",
     )
+@router.post("/api/messages/{message_id}/send-reminder")
+async def trigger_message_pm_reminder(message_id: str):
+    """Manually trigger the PM follow-up reminder (Teams @mention card + Outlook email) for testing."""
+    db = get_db()
+    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    from src.services.reminder_service import check_and_send_message_reminder
+    res = await check_and_send_message_reminder(row, force=True)
     return res
+
+
+@router.post("/api/test/simulate-pm-followup/{message_id}")
+async def simulate_pm_followup_by_id(message_id: str):
+    """Trigger a test PM follow-up reminder for a specific message."""
+    db = get_db()
+    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    from src.services.reminder_service import check_and_send_message_reminder
+    res = await check_and_send_message_reminder(row, force=True)
+    return {"success": True, "message_id": message_id, "result": res}
+
+
+@router.post("/api/test/simulate-pm-followup")
+async def simulate_pm_followup_latest():
+    """Trigger a test PM follow-up reminder on the most recent client issue in the database."""
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM messages WHERE message_text IS NOT NULL AND message_text != '' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+
+    if not row:
+        # Create a simulated test message first
+        from src.services.message_service import process_incoming_chat_message
+        sim_msg = {
+            "messageId": f"sim-followup-{int(datetime.now().timestamp())}",
+            "chatId": config.teams.chat_id,
+            "sender": {"userId": "client-test-id", "displayName": "Dhruv dobariya"},
+            "message": {"text": "#issue Checkout button returns 500 error on payment page"},
+            "createdDateTime": datetime.now(timezone.utc).isoformat(),
+        }
+        await process_incoming_chat_message(sim_msg)
+        row = db.execute("SELECT * FROM messages WHERE message_id = ?", (sim_msg["messageId"],)).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="No message available for follow-up testing")
+
+@router.post("/api/test/test-email")
+async def test_email_endpoint(to_email: Optional[str] = None):
+    """Test sending an alert email via Microsoft Graph / SMTP."""
+    from src.services.email_service import send_pm_followup_email
+    from src.services.reminder_service import get_active_pm
+    pm_info = get_active_pm()
+    target_email = to_email or pm_info.get("email") or "santosh.yadav@kombee.com"
+
+    res = await send_pm_followup_email(
+        pm_email=target_email,
+        pm_name=pm_info.get("name", "Santosh Yadav"),
+        reporter_name="Client (Test)",
+        elapsed_minutes=15,
+        issues=[{
+            "summary": "Test issue for email verification",
+            "issue_type": "Task",
+            "priority": "High",
+            "affected_module": "Authentication",
+            "suggested_assignee": "Musaib Khan",
+            "observed_behavior": "This is a test notification to verify Outlook / SMTP email delivery."
+        }],
+        raw_message="Test message for email configuration verification",
+        message_id="test-email-verification",
+        created_at_str="Just now",
+    )
+    return {"to": target_email, "result": res}
 
 
 @router.websocket("/ws")

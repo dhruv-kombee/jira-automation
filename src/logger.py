@@ -60,6 +60,13 @@ def setup_logger(name: str = 'teams-mvp') -> logging.Logger:
     level = getattr(logging, config.log_level, logging.INFO)
     logger.setLevel(level)
 
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     # Avoid duplicate handlers if re-called
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)

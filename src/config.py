@@ -83,6 +83,21 @@ class JiraConfig:
         return bool(self.base_url and self.email and self.api_token and self.project_key)
 
 
+class EmailConfig:
+    def __init__(self):
+        self.smtp_host = os.getenv('SMTP_HOST')
+        self.smtp_port = int(os.getenv('SMTP_PORT', '587'))
+        self.smtp_user = os.getenv('SMTP_USER')
+        self.smtp_password = os.getenv('SMTP_PASSWORD')
+        self.smtp_from = os.getenv('SMTP_FROM_EMAIL') or os.getenv('SMTP_USER') or 'automation@kombee.com'
+        self.smtp_use_tls = os.getenv('SMTP_USE_TLS', 'true').lower() in ('true', '1', 'yes')
+        self.graph_sender = os.getenv('GRAPH_SENDER_EMAIL')
+
+    @property
+    def is_smtp_configured(self) -> bool:
+        return bool(self.smtp_host and self.smtp_user and self.smtp_password)
+
+
 class AppConfig:
     def __init__(self):
         self.reload()
@@ -95,10 +110,12 @@ class AppConfig:
         self.roles = RolesConfig()
         self.gemini = GeminiConfig()
         self.jira = JiraConfig()
+        self.email = EmailConfig()
         self.port = int(os.getenv('PORT', '3000'))
         self.webhook_public_url = os.getenv('WEBHOOK_PUBLIC_URL')
         self.log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
         self.database_path = os.getenv('DATABASE_PATH', './data/messages.db')
+        self.pm_reminder_timeout_minutes = int(os.getenv('PM_REMINDER_TIMEOUT_MINUTES', '15'))
 
 
 config = AppConfig()

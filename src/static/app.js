@@ -230,6 +230,31 @@ function setupEventListeners() {
     });
   }
 
+  // Header Test Follow-Up button
+  const elBtnHeaderTestFollowup = document.getElementById('btnHeaderTestFollowup');
+  if (elBtnHeaderTestFollowup) {
+    elBtnHeaderTestFollowup.addEventListener('click', async () => {
+      try {
+        elBtnHeaderTestFollowup.disabled = true;
+        elBtnHeaderTestFollowup.innerHTML = '<span class="status-dot"></span> Sending...';
+        const res = await fetch('/api/test/simulate-pm-followup', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          const method = data.result?.teams?.method || 'delivered';
+          showToast(`⏰ Test Follow-Up sent to PM (${method}) for message #${data.message_id}!`, 'success');
+          await fetchMessages();
+        } else {
+          showToast(data.detail || data.error || 'Failed to trigger follow-up', 'error');
+        }
+      } catch (err) {
+        showToast('Network error triggering follow-up', 'error');
+      } finally {
+        elBtnHeaderTestFollowup.disabled = false;
+        elBtnHeaderTestFollowup.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span>Test Follow-Up</span>';
+      }
+    });
+  }
+
   // Test Teams Webhook button
   const elBtnTestWebhook = document.getElementById('btnTestWebhook');
   if (elBtnTestWebhook) {
@@ -251,6 +276,45 @@ function setupEventListeners() {
         elBtnTestWebhook.innerText = '⚡ Test Card';
       }
     });
+  }
+
+  // Test Email buttons (header & pipeline step 6)
+  const triggerEmailTest = async (btn) => {
+    try {
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Sending...';
+      }
+      const res = await fetch('/api/test/test-email', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.result?.success) {
+        showToast(`✉️ Test alert email sent to ${data.to} via ${data.result.method || 'SMTP'}!`, 'success');
+      } else {
+        const errMsg = data.result?.error || data.detail || 'Email send failed';
+        showToast(`Email error: ${errMsg}`, 'error');
+      }
+    } catch (err) {
+      showToast('Network error sending test email', 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        if (btn.id === 'btnHeaderTestEmail') {
+          btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg><span>Test Email</span>';
+        } else {
+          btn.innerText = '✉️ Test Email';
+        }
+      }
+    }
+  };
+
+  const elBtnHeaderTestEmail = document.getElementById('btnHeaderTestEmail');
+  if (elBtnHeaderTestEmail) {
+    elBtnHeaderTestEmail.addEventListener('click', () => triggerEmailTest(elBtnHeaderTestEmail));
+  }
+
+  const elBtnTestEmail = document.getElementById('btnTestEmail');
+  if (elBtnTestEmail) {
+    elBtnTestEmail.addEventListener('click', () => triggerEmailTest(elBtnTestEmail));
   }
 }
 
@@ -553,12 +617,15 @@ function createMessageCard(msg, role) {
         </a>
       </div>
     `;
-  } else if (msg.confirmation_status === 'AWAITING_FINAL_CONFIRMATION') {
+  } else if (msg.confirmation_status === 'AWAITING_FINAL_CONFIRMATION' || (!msg.jira_issue_key && msg.ai_ticket)) {
+    const reminderBadge = msg.reminder_sent_at ? `<span class="badge-reminder-sent" title="15m SLA follow-up sent to PM">⏰ 15m Escalated</span>` : '';
     statusHtml = `
       <div class="pending-triage-strip">
         <span class="pending-triage-label">📋 Awaiting PM Confirmation</span>
+        ${reminderBadge}
         <button class="btn-triage-approve btn-approve-card" data-id="${escapeHtml(msg.message_id)}">⚡ Approve in Jira</button>
         <button class="btn-triage-decline btn-decline-card" data-id="${escapeHtml(msg.message_id)}">❌ Decline</button>
+        <button class="btn-triage-reminder btn-reminder-card" data-id="${escapeHtml(msg.message_id)}" title="Trigger 15m PM follow-up reminder now (Teams & Outlook)">⏰ Follow-up PM</button>
       </div>
     `;
   } else if (msg.confirmation_status === 'DECLINED') {
@@ -623,10 +690,10 @@ function createMessageCard(msg, role) {
       try {
         btnDecline.disabled = true;
         btnDecline.innerText = 'Declining...';
-        const res = await fetch(`/api/jira/decline-approval/${msg.message_id}`, { method: 'POST' });
+        const res = await fetch(`/api/jira/decline-issue/${msg.message_id}`, { method: 'POST' });
         const data = await res.json();
         if (res.ok) {
-          showToast('❌ Ticket creation declined', 'info');
+          showToast('Ticket creation declined', 'info');
           await fetchMessages();
         } else {
           showToast(data.detail || 'Decline failed', 'error');
@@ -636,6 +703,31 @@ function createMessageCard(msg, role) {
       } finally {
         btnDecline.disabled = false;
         btnDecline.innerText = '❌ Decline';
+      }
+    });
+  }
+
+  const btnReminder = card.querySelector('.btn-reminder-card');
+  if (btnReminder) {
+    btnReminder.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        btnReminder.disabled = true;
+        btnReminder.innerText = 'Escalating...';
+        const res = await fetch(`/api/messages/${msg.message_id}/send-reminder`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          const method = data.teams?.method || 'delivered';
+          showToast(`⏰ Follow-up sent to PM (${data.pm?.name || 'Santosh Yadav'}) via ${method}!`, 'success');
+          await fetchMessages();
+        } else {
+          showToast(data.detail || data.reason || data.error || 'Failed to send reminder', 'error');
+        }
+      } catch (err) {
+        showToast('Escalation network error', 'error');
+      } finally {
+        btnReminder.disabled = false;
+        btnReminder.innerText = '⏰ Follow-up PM';
       }
     });
   }
@@ -812,6 +904,35 @@ function openPayloadModal(msg) {
         }
       });
       actionsBar.appendChild(btnCreate);
+
+      const btnFollowup = document.createElement('button');
+      btnFollowup.className = 'btn btn-secondary';
+      btnFollowup.style.fontSize = '12px';
+      btnFollowup.style.padding = '5px 12px';
+      btnFollowup.innerHTML = '⏰ Test Follow-Up Message';
+      btnFollowup.title = 'Send compact one-line PM follow-up reminder with @mention in Teams';
+      btnFollowup.addEventListener('click', async () => {
+        try {
+          btnFollowup.disabled = true;
+          btnFollowup.innerText = 'Sending...';
+          const res = await fetch(`/api/test/simulate-pm-followup/${msg.message_id}`, { method: 'POST' });
+          const data = await res.json();
+          if (res.ok && data.success) {
+            const method = data.result?.teams?.method || 'delivered';
+            showToast(`⏰ Test Follow-Up sent to PM (${method})!`, 'success');
+            elPayloadModal.classList.remove('active');
+            await fetchMessages();
+          } else {
+            showToast(data.detail || data.reason || data.error || 'Failed to send follow-up', 'error');
+          }
+        } catch (err) {
+          showToast('Follow-up network error', 'error');
+        } finally {
+          btnFollowup.disabled = false;
+          btnFollowup.innerText = '⏰ Test Follow-Up Message';
+        }
+      });
+      actionsBar.appendChild(btnFollowup);
     }
   }
 
@@ -835,6 +956,13 @@ function initWebSocket() {
     ws.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
+
+        // PM SLA Follow-up Reminder Sent
+        if (payload.type === 'PM_REMINDER_SENT') {
+          showToast(`⏰ 15m SLA escalation sent to PM (${payload.pmName}) via Teams & Outlook!`, 'info');
+          fetchMessages();
+          return;
+        }
 
         // Subscription auto-renewed
         if (payload.type === 'subscription_renewed') {

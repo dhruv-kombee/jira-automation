@@ -53,6 +53,16 @@
         Simulate Message
       </button>
 
+      <button id="btnHeaderTestFollowup" class="btn btn-secondary" title="Send one-line PM follow-up reminder with @mention in Teams">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span>Test Follow-Up</span>
+      </button>
+
+      <button id="btnHeaderTestEmail" class="btn btn-secondary" title="Send test PM follow-up email via SMTP / Gmail to Outlook">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+        <span>Test Email</span>
+      </button>
+
       <button id="btnRefresh" class="btn btn-icon" title="Refresh Data">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       </button>
@@ -241,6 +251,18 @@
                 <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
                   <span class="status-tag status-pending" id="teamsWebhookTag">WEBHOOK READY</span>
                   <button id="btnTestWebhook" class="btn-text" style="display:none; padding:2px 8px; font-size:11px; border:1px solid #06B6D4; border-radius:4px; color:#06B6D4; background:rgba(6,182,212,0.1);">⚡ Test Card</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="pipe-step step-done" id="phase6Card">
+              <div class="step-num">6</div>
+              <div class="step-info">
+                <h4>6. PM Email Escalation</h4>
+                <p id="emailStatusDesc">15m Unanswered SLA &bull; Gmail &rarr; Outlook</p>
+                <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
+                  <span class="status-tag status-active" id="emailStatusTag">SMTP READY</span>
+                  <button id="btnTestEmail" class="btn-text" style="padding:2px 8px; font-size:11px; border:1px solid #3B82F6; border-radius:4px; color:#3B82F6; background:rgba(59,130,246,0.1);">✉️ Test Email</button>
                 </div>
               </div>
             </div>

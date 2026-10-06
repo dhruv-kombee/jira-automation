@@ -85,7 +85,7 @@ def ensure_tunnel(port: int = 3000) -> Optional[str]:
             creation_flags = subprocess.CREATE_NO_WINDOW
 
         _ngrok_process = subprocess.Popen(
-            [binary, "http", str(port)],
+            [binary, "http", f"127.0.0.1:{port}"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creation_flags,

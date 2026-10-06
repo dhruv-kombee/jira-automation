@@ -67,6 +67,7 @@ def main():
         host="0.0.0.0",
         port=port,
         reload=True,
+        reload_dirs=["src"],
     )
 
 
