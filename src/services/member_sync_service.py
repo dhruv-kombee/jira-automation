@@ -7,6 +7,7 @@ Member.xlsx is the SINGLE SOURCE OF TRUTH (SSOT) for all team member data:
      they are fed directly into Member.xlsx first, which immediately updates the shared cloud workbook.
   4. Database tables (team_members) serve as a synchronized read-cache populated directly from Member.xlsx.
 """
+import asyncio
 import io
 import json
 import os
@@ -368,17 +369,31 @@ def feed_member_to_excel(
     user_id_clean = (user_id or "").strip()
     email_clean = (email or "").strip().lower()
 
+    # If user_id is provided but profile fields (name, email, specialty) are missing, resolve via Graph API
+    if user_id_clean and (not email_clean or not specialty or not name_clean):
+        try:
+            from src.graph_client import get_user_profile
+            prof = get_user_profile(user_id_clean)
+            if prof:
+                if not name_clean and prof.get("displayName"):
+                    name_clean = prof.get("displayName").strip()
+                if not email_clean:
+                    email_clean = (prof.get("mail") or prof.get("userPrincipalName") or "").strip().lower()
+                if not specialty and prof.get("jobTitle"):
+                    specialty = prof.get("jobTitle").strip()
+        except Exception:
+            pass
+
     # Determine role
     assigned_role = role
     if not assigned_role:
         name_lower = name_clean.lower()
-        if "dhruv" in name_lower:
+        spec_lower = (specialty or "").lower()
+        if "dhruv" in name_lower or "client" in spec_lower or "product owner" in spec_lower:
             assigned_role = "CLIENT"
-        elif "hemil" in name_lower:
+        elif "hemil" in name_lower or "pm" in spec_lower or "project manager" in spec_lower or "scrum" in spec_lower:
             assigned_role = "PM"
-        elif "santosh" in name_lower:
-            assigned_role = "DEVELOPER"
-        elif "musaib" in name_lower or "musain" in name_lower:
+        elif "santosh" in name_lower or "musaib" in name_lower or "musain" in name_lower or "nishi" in name_lower or "developer" in spec_lower or "engineer" in spec_lower:
             assigned_role = "DEVELOPER"
         else:
             assigned_role = "DEVELOPER"
@@ -490,6 +505,8 @@ def feed_member_to_excel(
             ws.cell(row=row_idx, column=col_map["user_id"]).value = user_id_clean
         if email_clean and not ws.cell(row=row_idx, column=col_map["email"]).value:
             ws.cell(row=row_idx, column=col_map["email"]).value = email_clean
+        if specialty and (not ws.cell(row=row_idx, column=col_map["specialty"]).value or ws.cell(row=row_idx, column=col_map["specialty"]).value == "Software Engineer"):
+            ws.cell(row=row_idx, column=col_map["specialty"]).value = specialty
         if role and ws.cell(row=row_idx, column=col_map["role"]).value != assigned_role:
             ws.cell(row=row_idx, column=col_map["role"]).value = assigned_role
         ws.cell(row=row_idx, column=col_map["updated"]).value = now_str
@@ -730,62 +747,121 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
     return save_workbook_to_all(wb)
 
 
-def sync_teams_chat_roster(chat_id: Optional[str] = None) -> Dict[str, Any]:
-    """Poll Microsoft Graph API for all members in the Teams chat/channel
-    and feed them directly into Member.xlsx first!
+def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str] = None) -> Dict[str, Any]:
+    """Poll Microsoft Graph API for all members in the Teams chat and team/channel roster
+    and feed newly arrived or updated members directly into Member.xlsx first!
     """
-    target_chat_id = chat_id or config.teams.chat_id
-    if not target_chat_id:
-        return {"success": False, "error": "No Teams chat ID configured"}
-
     token = get_access_token()
     if not token:
         return {"success": False, "error": "Could not acquire Microsoft Graph token"}
 
     headers = {"Authorization": f"Bearer {token}"}
-    endpoint = f"https://graph.microsoft.com/v1.0/chats/{target_chat_id}/members"
+    target_chat_id = chat_id or config.teams.chat_id
+    target_team_id = team_id or config.teams.team_id
 
-    try:
-        res = httpx.get(endpoint, headers=headers, timeout=12.0)
-        if res.status_code != 200:
-            return {"success": False, "error": f"Graph API returned {res.status_code}: {res.text[:150]}"}
+    endpoints = []
+    if target_chat_id:
+        endpoints.append(f"https://graph.microsoft.com/v1.0/chats/{target_chat_id}/members")
+    if target_team_id:
+        endpoints.append(f"https://graph.microsoft.com/v1.0/teams/{target_team_id}/members")
 
-        members = res.json().get("value", [])
-        discovered_count = 0
-        updated_count = 0
+    if not endpoints:
+        return {"success": False, "error": "Neither Teams chat ID nor team ID configured"}
 
-        for m in members:
-            u_id = m.get("userId") or ""
-            d_name = m.get("displayName") or ""
-            email = m.get("email") or ""
+    discovered_count = 0
+    updated_count = 0
+    all_roster_members = []
+    seen_ids = set()
 
-            if not email and "@" in str(m.get("userPrincipalName", "")):
-                email = m.get("userPrincipalName")
+    for endpoint in endpoints:
+        try:
+            res = httpx.get(endpoint, headers=headers, timeout=12.0)
+            if res.status_code == 200:
+                members = res.json().get("value", [])
+                for m in members:
+                    u_id = m.get("userId") or m.get("id") or ""
+                    if u_id and u_id in seen_ids:
+                        continue
+                    if u_id:
+                        seen_ids.add(u_id)
+                    all_roster_members.append(m)
+            else:
+                logger.debug(f"Roster fetch HTTP {res.status_code} on {endpoint}")
+        except Exception as err:
+            logger.debug(f"Roster fetch error on {endpoint}: {err}")
 
-            res_feed = feed_member_to_excel(
-                display_name=d_name,
-                user_id=u_id,
-                email=email,
-            )
-            if res_feed.get("action") == "created":
-                discovered_count += 1
-            elif res_feed.get("action") == "updated":
-                updated_count += 1
+    for m in all_roster_members:
+        u_id = m.get("userId") or m.get("id") or ""
+        d_name = m.get("displayName") or ""
+        email = m.get("email") or ""
 
-        all_members = get_all_members_from_excel()
+        if not email and "@" in str(m.get("userPrincipalName", "")):
+            email = m.get("userPrincipalName")
 
-        return {
-            "success": True,
-            "chat_id": target_chat_id,
-            "found_in_chat": len(members),
-            "new_registered": discovered_count,
-            "updated": updated_count,
-            "total_members": len(all_members),
-            "excel_file": str(get_primary_excel_path()),
-        }
-    except Exception as err:
-        logger.error(f"Error syncing chat members from Teams: {err}")
-        return {"success": False, "error": str(err)}
+        res_feed = feed_member_to_excel(
+            display_name=d_name,
+            user_id=u_id,
+            email=email,
+        )
+        if res_feed.get("action") == "created":
+            discovered_count += 1
+            logger.info(f"✨ New member discovered and added to Member.xlsx: {d_name or u_id}")
+        elif res_feed.get("action") == "updated":
+            updated_count += 1
+
+    all_members = get_all_members_from_excel()
+
+    return {
+        "success": True,
+        "chat_id": target_chat_id,
+        "found_in_chat": len(all_roster_members),
+        "new_registered": discovered_count,
+        "updated": updated_count,
+        "total_members": len(all_members),
+        "excel_file": str(get_primary_excel_path()),
+    }
+
+
+# Background periodic monitor for roster auto-discovery
+_roster_monitor_task: Optional[asyncio.Task] = None
+ROSTER_MONITOR_INTERVAL_SECONDS = 60  # Poll Teams roster every 60 seconds
+
+
+async def _roster_monitor_loop():
+    """Background loop that polls Teams roster every 60s to ensure newly added members are placed in Member.xlsx."""
+    logger.info(
+        f"Teams roster background monitor started (polling every {ROSTER_MONITOR_INTERVAL_SECONDS}s)",
+        extra={"event": "ROSTER_MONITOR_START"},
+    )
+    while True:
+        try:
+            await asyncio.sleep(ROSTER_MONITOR_INTERVAL_SECONDS)
+            # Run sync in background executor to avoid blocking event loop
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, sync_teams_chat_roster)
+        except asyncio.CancelledError:
+            break
+        except Exception as err:
+            logger.debug(f"Roster monitor check: {err}")
+
+
+def start_roster_monitor():
+    """Start the periodic background roster monitor."""
+    global _roster_monitor_task
+    if _roster_monitor_task is None or _roster_monitor_task.done():
+        try:
+            loop = asyncio.get_running_loop()
+            _roster_monitor_task = loop.create_task(_roster_monitor_loop())
+        except RuntimeError:
+            pass
+
+
+def stop_roster_monitor():
+    """Stop the background roster monitor."""
+    global _roster_monitor_task
+    if _roster_monitor_task and not _roster_monitor_task.done():
+        _roster_monitor_task.cancel()
+        _roster_monitor_task = None
 
 
 def sync_from_onedrive_sheet(url: Optional[str] = None) -> Dict[str, Any]:

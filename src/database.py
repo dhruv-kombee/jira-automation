@@ -9,7 +9,22 @@ _db_conn: Optional[sqlite3.Connection] = None
 
 
 def get_db_path() -> Path:
-    return Path(config.database_path).resolve()
+    p = Path(config.database_path).resolve()
+    # If the database path resides within OneDrive, redirect outside OneDrive
+    # to avoid file locking conflicts that cause OneDrive to stall (Reason: 341 db-shm)
+    if "onedrive" in str(p).lower():
+        safe_path = Path.home() / ".jira_automation" / "messages.db"
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists() and not safe_path.exists():
+            try:
+                import shutil
+                shutil.copy2(str(p), str(safe_path))
+                logger.info(f"Migrated SQLite database from {p} to {safe_path} to prevent OneDrive lock stalls.")
+            except Exception as e:
+                logger.warning(f"Failed to copy db to safe path: {e}")
+        return safe_path
+    return p
+
 
 
 def init_database(db_path: Optional[str] = None) -> sqlite3.Connection:

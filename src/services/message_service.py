@@ -377,6 +377,28 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
 
         normalized = normalize_message(graph_message, team_id=team_id, channel_id=channel_id)
 
+    # Process System Event Details (e.g. member added to chat or channel)
+    event_detail = graph_message.get("eventDetail") if graph_message else None
+    if event_detail:
+        event_type = str(event_detail.get("@odata.type") or "")
+        if "membersAdded" in event_type or event_detail.get("members"):
+            added_members = event_detail.get("members") or []
+            for am in added_members:
+                am_id = am.get("id") or am.get("userId")
+                am_name = am.get("displayName") or ""
+                if am_id:
+                    try:
+                        from src.services.member_sync_service import feed_member_to_excel
+                        feed_member_to_excel(display_name=am_name, user_id=am_id)
+                        logger.info(f"✨ Member added to Teams processed via eventDetail: {am_name or am_id}")
+                    except Exception as ev_err:
+                        logger.debug(f"EventDetail member feed error: {ev_err}")
+            try:
+                from src.services.member_sync_service import sync_teams_chat_roster
+                sync_teams_chat_roster()
+            except Exception:
+                pass
+
     # Feed new members directly into shared Member.xlsx first (Single Source of Truth)
     sender_id = normalized["sender"].get("userId")
     sender_name = normalized["sender"].get("displayName")

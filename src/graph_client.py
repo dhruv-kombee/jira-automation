@@ -594,3 +594,38 @@ async def download_attachment_bytes(content_url: str) -> Optional[tuple[bytes, s
     except Exception as err:
         logger.warning(f"Error downloading attachment bytes: {err}")
         return None
+
+
+def get_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch user profile details (displayName, mail, jobTitle, etc.) from Microsoft Graph."""
+    token = get_access_token()
+    if not token or not user_id:
+        return None
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{GRAPH_BASE_URL}/users/{user_id.strip()}"
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            res = client.get(url, headers=headers)
+            if res.status_code == 200:
+                return res.json()
+    except Exception as err:
+        logger.debug(f"Could not fetch user profile for {user_id}: {err}")
+    return None
+
+
+async def async_get_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
+    """Async fetch user profile details from Microsoft Graph."""
+    token = get_access_token()
+    if not token or not user_id:
+        return None
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{GRAPH_BASE_URL}/users/{user_id.strip()}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get(url, headers=headers)
+            if res.status_code == 200:
+                return res.json()
+    except Exception as err:
+        logger.debug(f"Could not async fetch user profile for {user_id}: {err}")
+    return None
+
