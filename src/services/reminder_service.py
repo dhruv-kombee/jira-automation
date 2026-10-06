@@ -24,26 +24,12 @@ _reminder_task: Optional[asyncio.Task] = None
 REMINDER_CHECK_INTERVAL = 30  # Run check every 30 seconds
 
 
+from src.services.member_sync_service import get_active_pm_from_excel, get_member_by_id_or_name
+
+
 def get_active_pm() -> Dict[str, str]:
-    """Retrieve active Project Manager identity (name, email, user_id) from database or config."""
-    db = get_db()
-    # Check team_members table for configured PM
-    row = db.execute(
-        "SELECT user_id, display_name, email FROM team_members WHERE is_active = 1 AND role = 'PM' ORDER BY id ASC LIMIT 1"
-    ).fetchone()
-
-    if row:
-        return {
-            "name": row["display_name"] or "Santosh Yadav",
-            "email": row["email"] or "santosh.yadav@kombee.com",
-            "user_id": row["user_id"] or config.roles.pm or "",
-        }
-
-    return {
-        "name": "Santosh Yadav",
-        "email": "santosh.yadav@kombee.com",
-        "user_id": config.roles.pm or "d7bc3c28-33d9-4973-816e-445d51556b8b",
-    }
+    """Retrieve active Project Manager identity (name, email, user_id) directly from Member.xlsx."""
+    return get_active_pm_from_excel()
 
 
 def parse_timestamp_to_utc(ts_str: Optional[str]) -> Optional[datetime]:
@@ -62,7 +48,7 @@ def parse_timestamp_to_utc(ts_str: Optional[str]) -> Optional[datetime]:
 
 
 def has_pm_reacted(reactions_raw: Any, pm_user_id: Optional[str] = None) -> bool:
-    """Check if the PM or any authorized reviewer has already added a reaction."""
+    """Check if the PM or any authorized reviewer from Member.xlsx has already added a reaction."""
     if not reactions_raw:
         return False
     try:
@@ -70,18 +56,32 @@ def has_pm_reacted(reactions_raw: Any, pm_user_id: Optional[str] = None) -> bool
         if not isinstance(reactions, list) or len(reactions) == 0:
             return False
 
-        pm_id_clean = (pm_user_id or config.roles.pm or "").lower().strip()
-        client_id_clean = (config.roles.client or "").lower().strip()
+        pm_info = get_active_pm()
+        pm_uid = (pm_info.get("user_id") or pm_user_id or config.roles.pm or "").lower().strip()
+        pm_name = (pm_info.get("name") or "").lower().strip()
+        client_uid = (config.roles.client or "").lower().strip()
 
         for r in reactions:
             uid = (r.get("userId") or "").lower().strip()
             dname = (r.get("displayName") or "").lower().strip()
-            # If PM reacted, or if single-user test allowed client reacted
-            if pm_id_clean and uid == pm_id_clean:
+
+            # Direct match with active PM from Member.xlsx
+            if pm_uid and uid == pm_uid:
                 return True
-            if "santosh" in dname or "pm" in dname:
+            if pm_name and (pm_name in dname or dname in pm_name):
                 return True
-            if config.roles.allow_self_approval and client_id_clean and uid == client_id_clean:
+
+            # Check if reactor has approval rights in Member.xlsx
+            member = get_member_by_id_or_name(user_id=uid, display_name=dname)
+            if member:
+                if (member.get("role") or "").upper() == "PM":
+                    return True
+                if member.get("can_approve"):
+                    return True
+                if config.roles.allow_self_approval and (member.get("role") or "").upper() == "CLIENT":
+                    return True
+
+            if config.roles.allow_self_approval and client_uid and uid == client_uid:
                 return True
         return False
     except Exception:

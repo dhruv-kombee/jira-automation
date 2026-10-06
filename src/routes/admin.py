@@ -158,49 +158,41 @@ def get_admin_overview():
 
 @router.get("/members")
 def list_team_members():
-    """List all team members and their roles."""
-    db = get_db()
-    rows = db.execute("SELECT * FROM team_members ORDER BY id ASC").fetchall()
-    return {"success": True, "members": [dict(r) for r in rows]}
+    """List all team members directly from Member.xlsx (Single Source of Truth)."""
+    from src.services.member_sync_service import get_all_members_from_excel
+    members = get_all_members_from_excel()
+    return {"success": True, "members": members}
 
 
 @router.post("/members")
 def create_team_member(req: MemberCreateRequest):
-    """Add a new member with designated role and specialty."""
+    """Add a new member with designated role and specialty directly to Member.xlsx first."""
     if not req.display_name or not req.display_name.strip():
         raise HTTPException(status_code=400, detail="Display name is required.")
 
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute(
-        """
-        INSERT INTO team_members (user_id, display_name, email, role, specialty, can_approve, is_active)
-        VALUES (?, ?, ?, ?, ?, ?, 1)
-        """,
-        (
-            req.user_id.strip() if req.user_id else "",
-            req.display_name.strip(),
-            req.email.strip() if req.email else "",
-            req.role.upper().strip(),
-            req.specialty.strip() if req.specialty else "",
-            1 if req.can_approve else 0,
-        ),
+    from src.services.member_sync_service import feed_member_to_excel, get_member_by_id_or_name
+    feed_res = feed_member_to_excel(
+        display_name=req.display_name.strip(),
+        user_id=req.user_id.strip() if req.user_id else "",
+        email=req.email.strip() if req.email else "",
+        role=req.role.upper().strip(),
+        specialty=req.specialty.strip() if req.specialty else "",
+        can_approve=bool(req.can_approve),
     )
-    new_id = cursor.lastrowid
 
-    # Audit log
+    db = get_db()
     db.execute(
         "INSERT INTO admin_audit_log (category, action, details) VALUES (?, ?, ?)",
-        ("MEMBERS", "MEMBER_CREATED", f"Added member '{req.display_name}' with role '{req.role.upper()}'"),
+        ("MEMBERS", "MEMBER_CREATED", f"Fed member '{req.display_name}' into Member.xlsx with role '{req.role.upper()}'"),
     )
 
-    row = db.execute("SELECT * FROM team_members WHERE id = ?", (new_id,)).fetchone()
-    return {"success": True, "member": dict(row)}
+    member = get_member_by_id_or_name(user_id=req.user_id, display_name=req.display_name)
+    return {"success": True, "member": member, "feed_result": feed_res}
 
 
 @router.put("/members/{member_id}")
 def update_team_member(member_id: int, req: MemberUpdateRequest):
-    """Update role, specialty, approval permission, or active status of a member."""
+    """Update role, specialty, approval permission, or active status of a member in DB and Member.xlsx."""
     db = get_db()
     row = db.execute("SELECT * FROM team_members WHERE id = ?", (member_id,)).fetchone()
     if not row:
@@ -229,13 +221,17 @@ def update_team_member(member_id: int, req: MemberUpdateRequest):
         ("MEMBERS", "MEMBER_UPDATED", f"Updated member '{new_name}': role={new_role}, can_approve={new_can_approve}, active={new_is_active}"),
     )
 
+    # Re-export to Member.xlsx
+    from src.services.member_sync_service import export_members_to_excel
+    export_members_to_excel()
+
     updated = db.execute("SELECT * FROM team_members WHERE id = ?", (member_id,)).fetchone()
     return {"success": True, "member": dict(updated)}
 
 
 @router.delete("/members/{member_id}")
 def delete_team_member(member_id: int):
-    """Delete a team member."""
+    """Delete a team member from database and Member.xlsx."""
     db = get_db()
     row = db.execute("SELECT * FROM team_members WHERE id = ?", (member_id,)).fetchone()
     if not row:
@@ -247,6 +243,11 @@ def delete_team_member(member_id: int):
         "INSERT INTO admin_audit_log (category, action, details) VALUES (?, ?, ?)",
         ("MEMBERS", "MEMBER_DELETED", f"Removed member '{name}' (ID {member_id})"),
     )
+
+    # Re-export to Member.xlsx
+    from src.services.member_sync_service import export_members_to_excel
+    export_members_to_excel()
+
     return {"success": True, "message": f"Member '{name}' removed successfully."}
 
 
@@ -516,15 +517,21 @@ async def sync_onedrive_sheet_endpoint(req: Optional[MemberImportRequest] = None
 @router.get("/members/onedrive-info")
 def get_onedrive_info():
     """Get connected OneDrive sheet details."""
-    from src.services.member_sync_service import DEFAULT_ONEDRIVE_URL, MEMBER_FILE_PATH
-    db = get_db()
-    total = db.execute("SELECT COUNT(*) FROM team_members").fetchone()[0]
+    from src.services.member_sync_service import (
+        DEFAULT_ONEDRIVE_URL,
+        get_primary_excel_path,
+        ONEDRIVE_MEMBER_PATH,
+        get_all_members_from_excel,
+    )
+    primary_path = get_primary_excel_path()
+    members = get_all_members_from_excel()
     return {
         "success": True,
         "sheet_url": DEFAULT_ONEDRIVE_URL,
         "file_name": "Member.xlsx",
-        "file_exists": MEMBER_FILE_PATH.exists(),
-        "total_members": total,
+        "file_path": str(primary_path),
+        "onedrive_synced": ONEDRIVE_MEMBER_PATH.exists(),
+        "total_members": len(members),
     }
 
 

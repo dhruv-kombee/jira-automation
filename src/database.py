@@ -111,54 +111,12 @@ def init_database(db_path: Optional[str] = None) -> sqlite3.Connection:
         except Exception:
             pass
 
-    # Seed default team members if table is empty
-    member_count = _db_conn.execute("SELECT COUNT(*) FROM team_members").fetchone()[0]
-    if member_count == 0:
-        default_members = [
-            (
-                config.roles.client or "35e03956-1723-469c-b561-90f03fc566ed",
-                "Dhruv dobariya",
-                "dhruv.d.kombee@gmail.com",
-                "CLIENT",
-                "Client Product Owner",
-                1 if getattr(config.roles, "allow_self_approval", True) else 0,
-                1,
-            ),
-            (
-                config.roles.pm or "d7bc3c28-33d9-4973-816e-445d51556b8b",
-                "Santosh Yadav",
-                "santosh.yadav@kombee.com",
-                "PM",
-                "Project Manager / Scrum Master",
-                1,
-                1,
-            ),
-            (
-                config.roles.developer or "c5a63f53-cc7a-4c05-ac9a-77e6991bc974",
-                "Musaib Khan",
-                "musaib.khan@kombee.com",
-                "DEVELOPER",
-                "Frontend & UI Lead",
-                0,
-                1,
-            ),
-            (
-                "",
-                "Hemil Ghori",
-                "hemil.ghori@kombee.com",
-                "DEVELOPER",
-                "Backend & API Lead",
-                0,
-                1,
-            ),
-        ]
-        _db_conn.executemany(
-            """
-            INSERT INTO team_members (user_id, display_name, email, role, specialty, can_approve, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            default_members,
-        )
+    # Populate team_members directly from Member.xlsx (Single Source of Truth)
+    try:
+        from src.services.member_sync_service import sync_db_from_excel
+        sync_db_from_excel()
+    except Exception as sync_err:
+        logger.warning(f"Initial sync from Member.xlsx: {sync_err}")
 
     # Seed default monitored channel if table is empty
     channel_count = _db_conn.execute("SELECT COUNT(*) FROM monitored_channels").fetchone()[0]

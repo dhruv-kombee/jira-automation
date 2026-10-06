@@ -142,7 +142,7 @@
       <div class="metric-card metric-pm" id="cardPm">
         <div class="metric-icon">⭐</div>
         <div class="metric-body">
-          <span class="metric-label">PM (Santosh Yadav)</span>
+          <span class="metric-label" id="metricPmLabel">PM</span>
           <span class="metric-value" id="valPm">0</span>
           <span class="metric-meta role-tag role-pm">PM Approvals</span>
         </div>
@@ -151,7 +151,7 @@
       <div class="metric-card metric-dev" id="cardDev">
         <div class="metric-icon">💻</div>
         <div class="metric-body">
-          <span class="metric-label">Developer (Musaib Khan)</span>
+          <span class="metric-label" id="metricDevLabel">Developer</span>
           <span class="metric-value" id="valDev">0</span>
           <span class="metric-meta role-tag role-dev">Developer Updates</span>
         </div>
@@ -275,7 +275,7 @@
             <h3>Configured User Roles</h3>
           </div>
 
-          <div class="role-list">
+          <div class="role-list" id="sidebarRoleList">
             <div class="role-row">
               <div class="role-avatar role-avatar-client">DD</div>
               <div class="role-details">
@@ -324,15 +324,15 @@
           <div class="role-picker">
             <label class="role-option">
               <input type="radio" name="simRole" value="CLIENT" checked>
-              <span class="role-pill-opt pill-client">Client (Dhruv)</span>
+              <span class="role-pill-opt pill-client" id="simPillClient">Client</span>
             </label>
             <label class="role-option">
               <input type="radio" name="simRole" value="PM">
-              <span class="role-pill-opt pill-pm">PM (Santosh)</span>
+              <span class="role-pill-opt pill-pm" id="simPillPm">PM</span>
             </label>
             <label class="role-option">
               <input type="radio" name="simRole" value="DEVELOPER">
-              <span class="role-pill-opt pill-dev">Developer (Musaib)</span>
+              <span class="role-pill-opt pill-dev" id="simPillDev">Developer</span>
             </label>
           </div>
         </div>

@@ -47,6 +47,7 @@ const elBtnCopyPayload = document.getElementById('btnCopyPayload');
 document.addEventListener('DOMContentLoaded', async () => {
   setupEventListeners();
   initWebSocket();
+  await loadTeamMembers();
   await fetchStatus();
   await fetchMessages();
 
@@ -369,6 +370,28 @@ function renderStatus(data) {
     elValDev.innerText = data.metrics.developer || 0;
   }
 
+  // Update Dynamic Role Labels from Member.xlsx
+  if (data.roles) {
+    const pmName = data.roles.pm?.name?.replace(' (PM)', '') || 'PM';
+    const devName = data.roles.developer?.name?.replace(' (Developer)', '') || 'Developer';
+    const clientName = data.roles.client?.name?.replace(' (Client)', '') || 'Client';
+
+    const elPmLabel = document.getElementById('metricPmLabel');
+    if (elPmLabel) elPmLabel.innerText = `PM (${pmName})`;
+
+    const elDevLabel = document.getElementById('metricDevLabel');
+    if (elDevLabel) elDevLabel.innerText = `Developer (${devName})`;
+
+    const elSimPm = document.getElementById('simPillPm');
+    if (elSimPm) elSimPm.innerText = `PM (${pmName})`;
+
+    const elSimClient = document.getElementById('simPillClient');
+    if (elSimClient) elSimClient.innerText = `Client (${clientName})`;
+
+    const elSimDev = document.getElementById('simPillDev');
+    if (elSimDev) elSimDev.innerText = `Developer (${devName})`;
+  }
+
   // Update auto-renew info subtext
   const elSubAutoInfo = document.getElementById('subAutoRenewInfo');
   if (elSubAutoInfo && sub.autoRenewThresholdText) {
@@ -477,21 +500,100 @@ async function fetchMessages() {
   }
 }
 
-// Identify Role from User ID or Display Name
-function getRoleForUserId(userId, displayName) {
+window.teamMembersList = [];
+
+async function loadTeamMembers() {
+  try {
+    const res = await fetch('/api/admin/members');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.members) {
+        window.teamMembersList = data.members;
+        renderDirectorySidebar();
+      }
+    }
+  } catch (e) {
+    console.debug('Failed to load members from Member.xlsx:', e);
+  }
+}
+
+function renderDirectorySidebar() {
+  const container = document.getElementById('sidebarRoleList');
+  if (!container || !window.teamMembersList.length) return;
+
+  const roleColors = {
+    CLIENT: 'role-avatar-client',
+    PM: 'role-avatar-pm',
+    DEVELOPER: 'role-avatar-dev',
+    ADMIN: 'role-avatar-admin',
+  };
+
+  const rolePillColors = {
+    CLIENT: 'role-client',
+    PM: 'role-pm',
+    DEVELOPER: 'role-dev',
+    ADMIN: 'role-admin',
+  };
+
+  container.innerHTML = window.teamMembersList.map(m => {
+    const role = (m.role || 'DEVELOPER').toUpperCase();
+    const initials = (m.display_name || 'U')
+      .split(' ')
+      .filter(Boolean)
+      .map(p => p[0])
+      .slice(0, 2)
+      .join('')
+      .toUpperCase();
+
+    const shortId = m.user_id ? `${m.user_id.slice(0, 8)}...` : (m.email || 'No ID');
+    const avatarClass = roleColors[role] || 'role-avatar-dev';
+    const pillClass = rolePillColors[role] || 'role-dev';
+
+    return `
+      <div class="role-row">
+        <div class="role-avatar ${avatarClass}">${initials}</div>
+        <div class="role-details">
+          <span class="role-name">${escapeHtml(m.display_name)}</span>
+          <span class="role-type ${pillClass}">${role}${m.can_approve ? ' (Approver)' : ''}</span>
+          <span class="role-id font-mono">${escapeHtml(shortId)}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function getMemberByUserIdOrName(userId, displayName) {
   const normId = (userId || '').toLowerCase().trim();
   const normName = (displayName || '').toLowerCase().trim();
+  const list = window.teamMembersList || [];
 
+  if (normId) {
+    const f = list.find(m => (m.user_id || '').toLowerCase().trim() === normId);
+    if (f) return f;
+  }
+  if (normName) {
+    const f = list.find(m => (m.display_name || '').toLowerCase().trim() === normName);
+    if (f) return f;
+    const first = normName.split(' ')[0];
+    if (first) {
+      const pf = list.find(m => (m.display_name || '').toLowerCase().trim().includes(first));
+      if (pf) return pf;
+    }
+  }
+  return null;
+}
+
+// Identify Role from User ID or Display Name dynamically using Member.xlsx
+function getRoleForUserId(userId, displayName) {
+  const m = getMemberByUserIdOrName(userId, displayName);
+  if (m && m.role) return m.role.toUpperCase();
+
+  const normId = (userId || '').toLowerCase().trim();
   if (systemStatus && systemStatus.roles) {
     if (normId && systemStatus.roles.client && systemStatus.roles.client.id && systemStatus.roles.client.id.toLowerCase() === normId) return 'CLIENT';
     if (normId && systemStatus.roles.pm && systemStatus.roles.pm.id && systemStatus.roles.pm.id.toLowerCase() === normId) return 'PM';
     if (normId && systemStatus.roles.developer && systemStatus.roles.developer.id && systemStatus.roles.developer.id.toLowerCase() === normId) return 'DEVELOPER';
   }
-
-  // Name-based fallback matching
-  if (normName.includes('dhruv')) return 'CLIENT';
-  if (normName.includes('santosh')) return 'PM';
-  if (normName.includes('musaib') || normName.includes('musain')) return 'DEVELOPER';
 
   return 'UNKNOWN';
 }
@@ -558,7 +660,7 @@ function createMessageCard(msg, role) {
     reactions = [];
   }
 
-  // Check if PM approved (Santosh or authorized Client in self-approval mode)
+  // Check if PM approved via Member.xlsx permissions
   // ONLY 'Admission tickets' (🎟️) or 'Ticket' (🎫) count as approval
   function isTicketEmoji(type) {
     if (!type) return false;
@@ -570,14 +672,20 @@ function createMessageCard(msg, role) {
 
   const pmId = (systemStatus?.roles?.pm?.id || '').toLowerCase().trim();
   const clientId = (systemStatus?.roles?.client?.id || '').toLowerCase().trim();
+
   const pmApproved = reactions.some(r => {
+    const isPos = isTicketEmoji(r.reactionType);
+    if (!isPos) return false;
+
+    const m = getMemberByUserIdOrName(r.userId, r.displayName);
+    if (m) {
+      if ((m.role || '').toUpperCase() === 'PM' || m.can_approve) return true;
+      if ((m.role || '').toUpperCase() === 'CLIENT') return true;
+    }
     const uId = (r.userId || '').toLowerCase().trim();
-    const dispName = (r.displayName || '').toLowerCase().trim();
-    const type = (r.reactionType || '').toLowerCase();
-    const isPm = (pmId && uId === pmId) || dispName.includes('santosh');
-    const isClient = (clientId && uId === clientId) || dispName.includes('dhruv');
-    const isPos = isTicketEmoji(type);
-    return (isPm || isClient) && isPos;
+    if (pmId && uId === pmId) return true;
+    if (clientId && uId === clientId) return true;
+    return false;
   });
 
   // Build reaction badges HTML - ONLY if reactions exist
@@ -586,9 +694,8 @@ function createMessageCard(msg, role) {
     reactionsHtml = `
       <div class="reactions-strip">
         ${reactions.map(r => {
-          const uId = (r.userId || '').toLowerCase().trim();
-          const dispName = (r.displayName || '').toLowerCase().trim();
-          const isPm = (pmId && uId === pmId) || dispName.includes('santosh') || (clientId && uId === clientId) || dispName.includes('dhruv');
+          const m = getMemberByUserIdOrName(r.userId, r.displayName);
+          const isPm = m ? ((m.role || '').toUpperCase() === 'PM' || m.can_approve) : false;
           let emoji = r.reactionType || '🎟️';
           if (isTicketEmoji(r.reactionType)) {
             emoji = (String(r.reactionType).includes('🎫') || String(r.reactionType).toLowerCase().includes('ticket')) && !String(r.reactionType).toLowerCase().includes('admission') ? '🎫' : '🎟️';
@@ -985,18 +1092,18 @@ function initWebSocket() {
         // Message updated (reaction added or message edited)
         if (payload.type === 'MESSAGE_UPDATED') {
           const reactions = payload.message?.reactions || [];
-          const pmId = (systemStatus?.roles?.pm?.id || '').toLowerCase().trim();
-          const clientId = (systemStatus?.roles?.client?.id || '').toLowerCase().trim();
           let approverTitle = 'PM';
           const pmApproved = reactions.some(r => {
-            const uId = (r.userId || '').toLowerCase().trim();
-            const dispName = (r.displayName || '').toLowerCase().trim();
-            const type = (r.reactionType || '').toLowerCase();
-            const isPm = (pmId && uId === pmId) || dispName.includes('santosh');
-            const isClient = (clientId && uId === clientId) || dispName.includes('dhruv');
-            const isTicket = (type.includes('🎟') || type.includes('🎫') || ['admission ticket', 'admission tickets', 'ticket', 'tickets'].includes(type.replace(/[-_]/g, ' ').replace(/^:+|:+$/g, '').trim()));
-            if ((isPm || isClient) && isTicket) {
-              approverTitle = isPm ? 'PM Santosh Yadav' : `${r.displayName || 'Client'} (Acting PM)`;
+            const isTicket = isTicketEmoji(r.reactionType);
+            if (!isTicket) return false;
+            const m = getMemberByUserIdOrName(r.userId, r.displayName);
+            const isPm = m ? ((m.role || '').toUpperCase() === 'PM' || m.can_approve) : false;
+            if (isPm) {
+              approverTitle = `PM ${m?.display_name || 'Approver'}`;
+              return true;
+            }
+            if (m && (m.role || '').toUpperCase() === 'CLIENT') {
+              approverTitle = `${m.display_name} (Acting PM)`;
               return true;
             }
             return false;

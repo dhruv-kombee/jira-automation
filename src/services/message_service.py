@@ -377,15 +377,15 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
 
         normalized = normalize_message(graph_message, team_id=team_id, channel_id=channel_id)
 
-    # Auto-register new members into team directory and sync Member.xlsx
+    # Feed new members directly into shared Member.xlsx first (Single Source of Truth)
     sender_id = normalized["sender"].get("userId")
     sender_name = normalized["sender"].get("displayName")
     if sender_name and sender_name.strip() and sender_name.lower() != "unknown":
         try:
-            from src.services.member_sync_service import auto_register_member
-            auto_register_member(display_name=sender_name, user_id=sender_id)
+            from src.services.member_sync_service import feed_member_to_excel
+            feed_member_to_excel(display_name=sender_name, user_id=sender_id)
         except Exception as reg_err:
-            logger.debug(f"Auto-register check: {reg_err}")
+            logger.debug(f"Excel member feed check: {reg_err}")
 
     sender_role = identify_sender_role(sender_id, sender_name)
 
@@ -484,7 +484,7 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
 
 async def execute_jira_ticket_creation(
     message_id: str,
-    approver_name: str = "PM Santosh Yadav",
+    approver_name: Optional[str] = None,
     issue_idx: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute Jira issue creation after PM final confirmation.
@@ -492,6 +492,10 @@ async def execute_jira_ticket_creation(
     Creates Jira ticket(s), uploads attachments, sends created Adaptive Card to Teams,
     and updates SQLite database.
     """
+    if not approver_name:
+        from src.services.member_sync_service import get_active_pm_from_excel
+        pm_info = get_active_pm_from_excel()
+        approver_name = f"PM {pm_info.get('name', 'Project Manager')}"
     from src.database import get_db
     from src.services.jira_service import create_jira_issue, upload_jira_attachment
     from src.services.teams_notifier import send_ticket_created_notification
@@ -660,7 +664,7 @@ async def execute_jira_ticket_creation(
 
 async def execute_jira_ticket_decline(
     message_id: str,
-    approver_name: str = "PM Santosh Yadav",
+    approver_name: Optional[str] = None,
     reason: Optional[str] = None,
     issue_idx: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -669,6 +673,10 @@ async def execute_jira_ticket_decline(
     Sends declined Adaptive Card to Teams, marks message as DECLINED in SQLite,
     and ensures zero Jira tickets are created.
     """
+    if not approver_name:
+        from src.services.member_sync_service import get_active_pm_from_excel
+        pm_info = get_active_pm_from_excel()
+        approver_name = f"PM {pm_info.get('name', 'Project Manager')}"
     from src.database import get_db
     from src.services.teams_notifier import send_ticket_declined_notification
 
@@ -798,16 +806,25 @@ async def check_and_auto_create_jira_ticket(
 
     confirmation_status = row["confirmation_status"] or ""
 
-    # Determine approver name from reactions
-    approver_name = "PM Santosh Yadav"
+    # Determine approver name from reactions dynamically using Member.xlsx
+    from src.services.member_sync_service import get_active_pm_from_excel, get_member_by_id_or_name
+    active_pm = get_active_pm_from_excel()
+    approver_name = f"PM {active_pm.get('name', 'Project Manager')}"
     for r in reactions:
         d_name = r.get("displayName") or ""
-        if "santosh" in d_name.lower():
-            approver_name = "PM Santosh Yadav"
-            break
-        elif "dhruv" in d_name.lower() or r.get("userId") == config.roles.client:
-            approver_name = f"{d_name} (PM Approver)"
-            break
+        u_id = r.get("userId") or ""
+        m = get_member_by_id_or_name(user_id=u_id, display_name=d_name)
+        if m:
+            m_role = (m.get("role") or "").upper()
+            if m_role == "PM":
+                approver_name = f"PM {m.get('display_name')}"
+                break
+            elif m.get("can_approve"):
+                approver_name = f"{m.get('display_name')} (Authorized Approver)"
+                break
+            elif config.roles.allow_self_approval and m_role == "CLIENT":
+                approver_name = f"{m.get('display_name')} (Client Approver)"
+                break
 
     # =========================================================================
     # STEP 2: Final confirmation resolution (if already awaiting confirmation)

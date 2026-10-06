@@ -553,13 +553,18 @@ async def send_ticket_declined_notification(
     message_id: str,
     issues: list,
     reporter: str = "Client",
-    approver: str = "PM Santosh Yadav",
+    approver: Optional[str] = None,
     reason: Optional[str] = None,
     chat_id: Optional[str] = None,
     team_id: Optional[str] = None,
     channel_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send card to Teams confirming ticket decline/cancellation."""
+    if not approver:
+        from src.services.member_sync_service import get_active_pm_from_excel
+        pm_info = get_active_pm_from_excel()
+        approver = f"PM {pm_info.get('name', 'Project Manager')}"
+
     webhook_url = (config.teams.webhook_url or "").strip()
     card_payload = build_declined_card_payload(
         message_id=message_id,

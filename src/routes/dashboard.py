@@ -45,26 +45,34 @@ def get_system_status():
     cursor.execute("SELECT COUNT(*) FROM messages")
     total_messages = cursor.fetchone()[0]
 
-    client_id = config.roles.client or ""
-    pm_id = config.roles.pm or ""
-    dev_id = config.roles.developer or ""
+    from src.services.member_sync_service import get_all_members_from_excel, get_active_pm_from_excel
+    members = get_all_members_from_excel()
+    client_m = next((m for m in members if (m.get("role") or "").upper() == "CLIENT"), None)
+    pm_m = next((m for m in members if (m.get("role") or "").upper() == "PM"), None)
+    dev_m = next((m for m in members if (m.get("role") or "").upper() == "DEVELOPER"), None)
 
-    # Match by ID or Name
+    client_id = (client_m.get("user_id") if client_m else None) or config.roles.client or ""
+    client_name = (client_m.get("display_name") if client_m else None) or "Client"
+    pm_id = (pm_m.get("user_id") if pm_m else None) or config.roles.pm or ""
+    pm_name = (pm_m.get("display_name") if pm_m else None) or "Project Manager"
+    dev_id = (dev_m.get("user_id") if dev_m else None) or config.roles.developer or ""
+    dev_name = (dev_m.get("display_name") if dev_m else None) or "Developer"
+
     cursor.execute(
-        "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE '%dhruv%'",
-        (client_id, client_id),
+        "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE ?",
+        (client_id, client_id, f"%{client_name.split()[0].lower()}%"),
     )
     client_msgs = cursor.fetchone()[0]
 
     cursor.execute(
-        "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE '%santosh%'",
-        (pm_id, pm_id),
+        "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE ?",
+        (pm_id, pm_id, f"%{pm_name.split()[0].lower()}%"),
     )
     pm_msgs = cursor.fetchone()[0]
 
     cursor.execute(
-        "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE '%musaib%' OR LOWER(sender_display_name) LIKE '%musain%'",
-        (dev_id, dev_id),
+        "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE ?",
+        (dev_id, dev_id, f"%{dev_name.split()[0].lower()}%"),
     )
     dev_msgs = cursor.fetchone()[0]
 
@@ -89,9 +97,9 @@ def get_system_status():
             "title": "Team To Jira Ticket Creation" if config.teams.chat_id else "Channel",
         },
         "roles": {
-            "client": {"id": client_id, "name": "Dhruv dobariya (Client)"},
-            "pm": {"id": pm_id, "name": "Santosh Yadav (PM)"},
-            "developer": {"id": dev_id, "name": "Musaib Khan (Developer)"},
+            "client": {"id": client_id, "name": f"{client_name} (Client)"},
+            "pm": {"id": pm_id, "name": f"{pm_name} (PM)"},
+            "developer": {"id": dev_id, "name": f"{dev_name} (Developer)"},
         },
         "pipeline": {
             "phase1": {"name": "Message Detection", "status": "active"},
@@ -239,10 +247,11 @@ async def simulate_message(req: SimulateMessageRequest):
     import base64
     from src.services.message_service import _message_attachment_cache
 
-    role = req.role.upper()
+    from src.services.member_sync_service import get_active_pm_from_excel, get_all_members_from_excel
+    pm_info = get_active_pm_from_excel()
     role_map = {
         "CLIENT": (config.roles.client, req.sender_name or "Dhruv dobariya"),
-        "PM": (config.roles.pm, req.sender_name or "Santosh Yadav"),
+        "PM": (pm_info.get("user_id") or config.roles.pm, req.sender_name or pm_info.get("name", "Project Manager")),
         "DEVELOPER": (config.roles.developer, req.sender_name or "Musaib Khan"),
     }
 
@@ -330,11 +339,12 @@ async def simulate_pm_approval(message_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    msg = dict(row)
-    pm_id = config.roles.pm or "d7bc3c28-33d9-4973-816e-445d51556b8b"
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    pm_id = pm_info.get("user_id") or config.roles.pm or "pm-user-id"
     pm_reaction = {
         "reactionType": "🎟️",
-        "displayName": "Santosh Yadav",
+        "displayName": pm_info.get("name", "Project Manager"),
         "userId": pm_id,
         "createdDateTime": datetime.now(timezone.utc).isoformat(),
     }
@@ -392,11 +402,12 @@ async def simulate_pm_disapproval(message_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    msg = dict(row)
-    pm_id = config.roles.pm or "d7bc3c28-33d9-4973-816e-445d51556b8b"
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    pm_id = pm_info.get("user_id") or config.roles.pm or "pm-user-id"
     pm_reaction = {
         "reactionType": "❌",
-        "displayName": "Santosh Yadav",
+        "displayName": pm_info.get("name", "Project Manager"),
         "userId": pm_id,
         "createdDateTime": datetime.now(timezone.utc).isoformat(),
     }
@@ -566,7 +577,11 @@ def render_confirmation_html(
 async def confirm_approval_get(message_id: str):
     """1-Click PM Approval endpoint for Teams card action links (GET)."""
     from src.services.message_service import execute_jira_ticket_creation
-    res = await execute_jira_ticket_creation(message_id, approver_name="PM Santosh Yadav")
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    approver = f"PM {pm_info.get('name', 'Project Manager')}"
+
+    res = await execute_jira_ticket_creation(message_id, approver_name=approver)
     if not res.get("success"):
         return render_confirmation_html(
             title="Action Failed",
@@ -582,7 +597,7 @@ async def confirm_approval_get(message_id: str):
         status_type="success",
         heading="Approved by PM",
         message=f"Ticket {key} has been created and confirmation posted to Microsoft Teams. You can close this window now.",
-        details={"Jira Ticket": key, "Status": "Created & Active", "Approved By": "PM Santosh Yadav"},
+        details={"Jira Ticket": key, "Status": "Created & Active", "Approved By": approver},
     )
 
 
@@ -590,7 +605,11 @@ async def confirm_approval_get(message_id: str):
 async def confirm_approval_post(message_id: str):
     """Programmatic / Dashboard PM Approval endpoint (POST)."""
     from src.services.message_service import execute_jira_ticket_creation
-    res = await execute_jira_ticket_creation(message_id, approver_name="PM Santosh Yadav")
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    approver = f"PM {pm_info.get('name', 'Project Manager')}"
+
+    res = await execute_jira_ticket_creation(message_id, approver_name=approver)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to create ticket"))
     return res
@@ -600,7 +619,11 @@ async def confirm_approval_post(message_id: str):
 async def decline_approval_get(message_id: str):
     """1-Click PM Decline/Reject endpoint for Teams card action links (GET)."""
     from src.services.message_service import execute_jira_ticket_decline
-    res = await execute_jira_ticket_decline(message_id, approver_name="PM Santosh Yadav")
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    approver = f"PM {pm_info.get('name', 'Project Manager')}"
+
+    res = await execute_jira_ticket_decline(message_id, approver_name=approver)
     if not res.get("success"):
         return render_confirmation_html(
             title="Reject Failed",
@@ -613,7 +636,7 @@ async def decline_approval_get(message_id: str):
         status_type="declined",
         heading="Rejected by PM",
         message="Ticket creation was rejected. No tickets were created in Jira, and notification has been posted to Teams. You can close this window now.",
-        details={"Status": "Rejected", "Rejected By": "PM Santosh Yadav"},
+        details={"Status": "Rejected", "Rejected By": approver},
     )
 
 
@@ -621,7 +644,11 @@ async def decline_approval_get(message_id: str):
 async def decline_approval_post(message_id: str):
     """Programmatic / Dashboard PM Decline endpoint (POST)."""
     from src.services.message_service import execute_jira_ticket_decline
-    res = await execute_jira_ticket_decline(message_id, approver_name="PM Santosh Yadav")
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    approver = f"PM {pm_info.get('name', 'Project Manager')}"
+
+    res = await execute_jira_ticket_decline(message_id, approver_name=approver)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to decline ticket"))
     return res
@@ -655,7 +682,11 @@ async def decline_issue_all_post(message_id: str):
 async def confirm_issue_get(message_id: str, issue_idx: int):
     """1-Click PM Approval for a specific single issue in a multi-issue triage card (GET)."""
     from src.services.message_service import execute_jira_ticket_creation
-    res = await execute_jira_ticket_creation(message_id, approver_name="PM Santosh Yadav", issue_idx=issue_idx)
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    approver = f"PM {pm_info.get('name', 'Project Manager')}"
+
+    res = await execute_jira_ticket_creation(message_id, approver_name=approver, issue_idx=issue_idx)
     if not res.get("success"):
         return render_confirmation_html(
             title="Issue Creation Failed",
@@ -670,7 +701,7 @@ async def confirm_issue_get(message_id: str, issue_idx: int):
         status_type="success",
         heading="Issue Approved & Created",
         message=f"Issue #{issue_idx + 1} was successfully created in Jira.",
-        details={"Jira Ticket": key, "Status": "Active in Jira", "Approved By": "PM Santosh Yadav"},
+        details={"Jira Ticket": key, "Status": "Active in Jira", "Approved By": approver},
         actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
     )
 
@@ -679,7 +710,11 @@ async def confirm_issue_get(message_id: str, issue_idx: int):
 async def confirm_issue_post(message_id: str, issue_idx: int):
     """Programmatic / Dashboard PM Approval for a specific single issue (POST)."""
     from src.services.message_service import execute_jira_ticket_creation
-    res = await execute_jira_ticket_creation(message_id, approver_name="PM Santosh Yadav", issue_idx=issue_idx)
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    approver = f"PM {pm_info.get('name', 'Project Manager')}"
+
+    res = await execute_jira_ticket_creation(message_id, approver_name=approver, issue_idx=issue_idx)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to create Jira issue"))
     return res
@@ -689,7 +724,11 @@ async def confirm_issue_post(message_id: str, issue_idx: int):
 async def decline_issue_get(message_id: str, issue_idx: int):
     """1-Click PM Decline for a specific single issue in a multi-issue triage card (GET)."""
     from src.services.message_service import execute_jira_ticket_decline
-    res = await execute_jira_ticket_decline(message_id, approver_name="PM Santosh Yadav", issue_idx=issue_idx)
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    approver = f"PM {pm_info.get('name', 'Project Manager')}"
+
+    res = await execute_jira_ticket_decline(message_id, approver_name=approver, issue_idx=issue_idx)
     if not res.get("success"):
         return render_confirmation_html(
             title="Action Failed",
@@ -702,7 +741,7 @@ async def decline_issue_get(message_id: str, issue_idx: int):
         status_type="declined",
         heading="Issue Rejected by PM",
         message=f"Issue #{issue_idx + 1} was rejected. No Jira ticket was created for this issue. You can close this window now.",
-        details={"Status": f"Issue #{issue_idx + 1} Rejected", "Rejected By": "PM Santosh Yadav"},
+        details={"Status": f"Issue #{issue_idx + 1} Rejected", "Rejected By": approver},
     )
 
 
@@ -710,7 +749,11 @@ async def decline_issue_get(message_id: str, issue_idx: int):
 async def decline_issue_post(message_id: str, issue_idx: int):
     """Programmatic / Dashboard PM Decline for a specific single issue (POST)."""
     from src.services.message_service import execute_jira_ticket_decline
-    res = await execute_jira_ticket_decline(message_id, approver_name="PM Santosh Yadav", issue_idx=issue_idx)
+    from src.services.member_sync_service import get_active_pm_from_excel
+    pm_info = get_active_pm_from_excel()
+    approver = f"PM {pm_info.get('name', 'Project Manager')}"
+
+    res = await execute_jira_ticket_decline(message_id, approver_name=approver, issue_idx=issue_idx)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to decline Jira issue"))
     return res

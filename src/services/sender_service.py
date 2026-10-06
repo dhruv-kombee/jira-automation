@@ -1,51 +1,36 @@
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from src.config import config
 from src.logger import logger
+from src.services.member_sync_service import (
+    get_member_by_id_or_name,
+    get_all_members_from_excel,
+    get_active_pm_from_excel,
+)
 
 
 class Roles:
     CLIENT = "CLIENT"
     PM = "PM"
     DEVELOPER = "DEVELOPER"
+    ADMIN = "ADMIN"
     UNKNOWN = "UNKNOWN"
 
 
 def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[str] = None) -> str:
-    """Identify the role of a user by Microsoft Graph user ID, falling back to display name.
-
-    Matches against database team_members first, then configured environment variables or known names.
+    """Identify the role of a user dynamically from Member.xlsx (The Single Source of Truth).
+    Falls back to configured environment variables if not yet present in Excel.
     """
-    # 0. Check dynamic database team_members first
+    # 1. Check Member.xlsx (Single Source of Truth)
     try:
-        from src.database import get_db
-        db = get_db()
-        if user_id and user_id.strip():
-            row = db.execute(
-                "SELECT role FROM team_members WHERE is_active = 1 AND LOWER(user_id) = LOWER(?)",
-                (user_id.strip(),),
-            ).fetchone()
-            if row and row["role"]:
-                return row["role"].upper()
+        member = get_member_by_id_or_name(user_id=user_id, display_name=display_name)
+        if member and member.get("role"):
+            role = member["role"].strip().upper()
+            if role in (Roles.CLIENT, Roles.PM, Roles.DEVELOPER, Roles.ADMIN):
+                return role
+    except Exception as err:
+        logger.debug(f"Error querying members from Excel: {err}")
 
-        if display_name and display_name.strip():
-            disp_clean = display_name.strip().lower()
-            row = db.execute(
-                "SELECT role FROM team_members WHERE is_active = 1 AND LOWER(display_name) = LOWER(?)",
-                (disp_clean,),
-            ).fetchone()
-            if row and row["role"]:
-                return row["role"].upper()
-
-            # Substring match if full name wasn't exact
-            for r in db.execute("SELECT display_name, role FROM team_members WHERE is_active = 1").fetchall():
-                m_name = (r["display_name"] or "").strip().lower()
-                first_name = m_name.split()[0] if m_name else ""
-                if first_name and (first_name in disp_clean or disp_clean in m_name):
-                    return r["role"].upper()
-    except Exception as db_err:
-        logger.debug(f"Could not query team_members table: {db_err}")
-
-    # 1. Match by configured GUID
+    # 2. Match by configured GUIDs in config
     if user_id:
         normalized = user_id.strip().lower()
         if config.roles.client and config.roles.client.strip().lower() == normalized:
@@ -53,16 +38,6 @@ def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[s
         if config.roles.pm and config.roles.pm.strip().lower() == normalized:
             return Roles.PM
         if config.roles.developer and config.roles.developer.strip().lower() == normalized:
-            return Roles.DEVELOPER
-
-    # 2. Match by display name (Dhruv -> Client, Santosh -> PM, Musaib -> Developer)
-    if display_name:
-        name_lower = display_name.strip().lower()
-        if "dhruv" in name_lower:
-            return Roles.CLIENT
-        if "santosh" in name_lower:
-            return Roles.PM
-        if "musaib" in name_lower or "musain" in name_lower:
             return Roles.DEVELOPER
 
     logger.info(
@@ -114,56 +89,49 @@ def is_ticket_approval_reaction(reaction_type: Optional[str]) -> bool:
     return False
 
 
+def is_user_authorized_approver(
+    user_id: Optional[str] = None,
+    display_name: Optional[str] = None,
+    allow_client: Optional[bool] = None,
+) -> bool:
+    """Check if a specific user has approval permissions based directly on Member.xlsx."""
+    allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
+
+    member = get_member_by_id_or_name(user_id=user_id, display_name=display_name)
+    if member:
+        role = (member.get("role") or "").upper()
+        can_approve = bool(member.get("can_approve"))
+        if role == "PM":
+            return True
+        if can_approve:
+            return True
+        if allow_self and role == "CLIENT":
+            return True
+
+    # Check fallback configured GUIDs
+    u_id_clean = (user_id or "").lower().strip()
+    if u_id_clean:
+        if config.roles.pm and config.roles.pm.lower().strip() == u_id_clean:
+            return True
+        if allow_self and config.roles.client and config.roles.client.lower().strip() == u_id_clean:
+            return True
+
+    return False
+
+
 def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = None) -> bool:
-    """Check if PM (Santosh Yadav) or authorized approver reacted specifically with
+    """Check if PM or authorized approver from Member.xlsx reacted specifically with
     either 'Admission tickets' (🎟️) or 'Ticket' (🎫) to approve Jira ticket creation.
     """
     if not reactions:
         return False
-    pm_id = (config.roles.pm or "").lower().strip()
-    client_id = (config.roles.client or "").lower().strip()
-    allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
 
     for r in reactions:
-        u_id = (r.get("userId") or "").lower().strip()
-        disp_name = (r.get("displayName") or "").lower().strip()
+        u_id = (r.get("userId") or "").strip()
+        disp_name = (r.get("displayName") or "").strip()
         r_type = (r.get("reactionType") or "").strip()
 
-        # Database team_members check
-        db_authorized = False
-        try:
-            from src.database import get_db
-            db = get_db()
-            row = None
-            if u_id:
-                row = db.execute(
-                    "SELECT role, can_approve FROM team_members WHERE is_active = 1 AND LOWER(user_id) = LOWER(?)",
-                    (u_id,),
-                ).fetchone()
-            if not row and disp_name:
-                row = db.execute(
-                    "SELECT role, can_approve FROM team_members WHERE is_active = 1 AND LOWER(display_name) = LOWER(?)",
-                    (disp_name,),
-                ).fetchone()
-
-            if row:
-                m_role = (row["role"] or "").upper()
-                if m_role == "PM":
-                    db_authorized = True
-                elif m_role == "CLIENT":
-                    db_authorized = bool(allow_self and row["can_approve"] == 1)
-                elif row["can_approve"] == 1:
-                    db_authorized = True
-        except Exception:
-            pass
-
-        # Is reaction from PM? Matches configured PM GUID or name containing "santosh"
-        is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
-        # If self-approval / single-user mode is enabled, client (Dhruv) emoji acts as PM approval
-        is_client = (bool(client_id) and u_id == client_id) or ("dhruv" in disp_name)
-        is_authorized = db_authorized or is_pm or (allow_self and is_client)
-
-        # Strictly only 'Admission tickets' (🎟️) and 'Ticket' (🎫) approve
+        is_authorized = is_user_authorized_approver(user_id=u_id, display_name=disp_name, allow_client=allow_client)
         is_approval = is_ticket_approval_reaction(r_type)
 
         if is_authorized and is_approval:
@@ -172,56 +140,23 @@ def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = Non
 
 
 def is_pm_confirmation_approval(reactions: Optional[list], allow_client: Optional[bool] = None) -> bool:
-    """Check if PM reacted to approve in Step 2 (supports 🎟️, 🎫, and instant quick-reaction 👍)."""
+    """Check if PM or authorized approver from Member.xlsx reacted to approve in Step 2
+    (supports 🎟️, 🎫, and instant quick-reaction 👍).
+    """
     if not reactions:
         return False
-    pm_id = (config.roles.pm or "").lower().strip()
-    client_id = (config.roles.client or "").lower().strip()
-    allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
 
     for r in reactions:
-        u_id = (r.get("userId") or "").lower().strip()
-        disp_name = (r.get("displayName") or "").lower().strip()
+        u_id = (r.get("userId") or "").strip()
+        disp_name = (r.get("displayName") or "").strip()
         r_type = (r.get("reactionType") or "").strip().lower()
 
-        db_authorized = False
-        try:
-            from src.database import get_db
-            db = get_db()
-            row = None
-            if u_id:
-                row = db.execute(
-                    "SELECT role, can_approve FROM team_members WHERE is_active = 1 AND LOWER(user_id) = LOWER(?)",
-                    (u_id,),
-                ).fetchone()
-            if not row and disp_name:
-                row = db.execute(
-                    "SELECT role, can_approve FROM team_members WHERE is_active = 1 AND LOWER(display_name) = LOWER(?)",
-                    (disp_name,),
-                ).fetchone()
-
-            if row:
-                m_role = (row["role"] or "").upper()
-                if m_role == "PM":
-                    db_authorized = True
-                elif m_role == "CLIENT":
-                    db_authorized = bool(allow_self and row["can_approve"] == 1)
-                elif row["can_approve"] == 1:
-                    db_authorized = True
-        except Exception:
-            pass
-
-        is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
-        is_client = (bool(client_id) and u_id == client_id) or ("dhruv" in disp_name)
-        is_authorized = db_authorized or is_pm or (allow_self and is_client)
-
-        # In Step 2, accept 🎟️, 🎫, as well as instant quick reaction 👍 (like)
+        is_authorized = is_user_authorized_approver(user_id=u_id, display_name=disp_name, allow_client=allow_client)
         is_approval = is_ticket_approval_reaction(r_type) or r_type in {"like", "👍"}
 
         if is_authorized and is_approval:
             return True
     return False
-
 
 
 TICKET_DISAPPROVAL_NAMES = {
@@ -264,24 +199,17 @@ def is_ticket_disapproval_reaction(reaction_type: Optional[str]) -> bool:
 
 
 def is_pm_disapproval(reactions: Optional[list], allow_client: Optional[bool] = None) -> bool:
-    """Check if PM or authorized user reacted with a disapproval emoji (❌, 👎)."""
+    """Check if PM or authorized approver from Member.xlsx reacted with a disapproval emoji (❌, 👎)."""
     if not reactions:
         return False
-    pm_id = (config.roles.pm or "").lower().strip()
-    client_id = (config.roles.client or "").lower().strip()
-    allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
 
     for r in reactions:
-        u_id = (r.get("userId") or "").lower().strip()
-        disp_name = (r.get("displayName") or "").lower().strip()
+        u_id = (r.get("userId") or "").strip()
+        disp_name = (r.get("displayName") or "").strip()
         r_type = (r.get("reactionType") or "").strip()
 
-        is_pm = (bool(pm_id) and u_id == pm_id) or ("santosh" in disp_name)
-        is_client = (bool(client_id) and u_id == client_id) or ("dhruv" in disp_name)
-        is_authorized = is_pm or (allow_self and is_client)
+        is_authorized = is_user_authorized_approver(user_id=u_id, display_name=disp_name, allow_client=allow_client)
 
         if is_authorized and is_ticket_disapproval_reaction(r_type):
             return True
     return False
-
-

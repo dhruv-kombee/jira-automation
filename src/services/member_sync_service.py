@@ -1,10 +1,11 @@
-"""Teams Roster & OneDrive Excel (Member.xlsx) Sync Service.
+"""Teams Roster & Shared Excel (Member.xlsx) Sync Service.
 
-Manages automatic discovery of members in Microsoft Teams group chats and channels,
-and maintains two-way synchronization with the shared Excel sheet (Member.xlsx):
-  1. Auto-registers new members when discovered in Teams chat/channel roster or when posting messages.
-  2. Generates & maintains a formatted Member.xlsx workbook containing all member details and project info.
-  3. Supports 1-click sync directly with the OneDrive shared sheet link.
+Member.xlsx is the SINGLE SOURCE OF TRUTH (SSOT) for all team member data:
+  1. All member data feeds into Member.xlsx first (located in the shared OneDrive folder).
+  2. The system strictly depends on Member.xlsx for identities, roles, specialties, and approval permissions.
+  3. When new members are discovered in Teams chat/channel roster or when posting messages,
+     they are fed directly into Member.xlsx first, which immediately updates the shared cloud workbook.
+  4. Database tables (team_members) serve as a synchronized read-cache populated directly from Member.xlsx.
 """
 import io
 import json
@@ -23,11 +24,31 @@ from src.database import get_db
 from src.graph_client import get_access_token
 from src.logger import logger
 
-MEMBER_FILE_PATH = Path("data/Member.xlsx")
+# Primary shared OneDrive folder path on user's machine (synced with cloud & Teams)
+ONEDRIVE_MEMBER_PATH = Path(r"C:\Users\Admin\OneDrive\Jira-Automation\Member.xlsx")
+LOCAL_MEMBER_PATH = Path("data/Member.xlsx")
+
 DEFAULT_ONEDRIVE_URL = os.getenv(
     "MEMBER_SHEET_URL",
     "https://1drv.ms/x/c/329A45768254A220/IQCs8zX7occ_T7QD0sO3qzfhAf0ZXEgkcl9IzywZD9Z1Ru0?e=xb5pxk",
 )
+
+
+def get_primary_excel_path() -> Path:
+    """Return the active shared Excel file path.
+    Prefers the synchronized OneDrive folder so any write or read directly syncs with cloud & Teams.
+    """
+    if ONEDRIVE_MEMBER_PATH.parent.exists():
+        return ONEDRIVE_MEMBER_PATH
+    return LOCAL_MEMBER_PATH
+
+
+MEMBER_FILE_PATH = get_primary_excel_path()
+
+
+# In-memory cache for fast lookups with mtime invalidation
+_cached_members: Optional[List[Dict[str, Any]]] = None
+_cached_mtime: float = 0.0
 
 
 def get_onedrive_download_url(share_url: str) -> str:
@@ -58,9 +79,495 @@ def download_onedrive_workbook(share_url: Optional[str] = None) -> Optional[byte
     return None
 
 
+def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
+    """Save workbook to both the live OneDrive sync path and local data folder."""
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    xlsx_bytes = buffer.getvalue()
+
+    # 1. Primary OneDrive folder (instantly syncs to cloud & Teams)
+    if ONEDRIVE_MEMBER_PATH.parent.exists():
+        try:
+            with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
+                f.write(xlsx_bytes)
+            logger.info(f"Saved Member.xlsx to OneDrive sync folder: {ONEDRIVE_MEMBER_PATH}")
+        except Exception as err:
+            logger.warning(f"Could not write to OneDrive path {ONEDRIVE_MEMBER_PATH}: {err}")
+
+    # 2. Local fallback folder
+    try:
+        LOCAL_MEMBER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOCAL_MEMBER_PATH, "wb") as f:
+            f.write(xlsx_bytes)
+    except Exception as err:
+        logger.warning(f"Could not write to local path {LOCAL_MEMBER_PATH}: {err}")
+
+    # Invalidate cache so next read uses fresh file
+    global _cached_members, _cached_mtime
+    _cached_members = None
+    _cached_mtime = 0.0
+
+    return xlsx_bytes
+
+
+def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Read all members directly from Member.xlsx (The Single Source of Truth).
+    Returns list of member dicts.
+    """
+    target = file_path or get_primary_excel_path()
+    if not target.exists() and target != LOCAL_MEMBER_PATH and LOCAL_MEMBER_PATH.exists():
+        target = LOCAL_MEMBER_PATH
+
+    if not target.exists():
+        logger.warning(f"Member.xlsx does not exist at {target}. Creating initial sheet...")
+        export_members_to_excel(target)
+
+    wb = openpyxl.load_workbook(target, data_only=True)
+    ws = wb.active
+
+    # Find the header row (first row where a cell contains 'Full Name' or 'Name')
+    header_row_idx = None
+    col_map = {}
+
+    for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        row_str = [str(c or "").strip().lower() for c in row]
+        if any("name" in c for c in row_str):
+            header_row_idx = row_idx
+            for col_idx, cell_val in enumerate(row_str, start=1):
+                if "name" in cell_val:
+                    col_map["name"] = col_idx
+                elif "email" in cell_val:
+                    col_map["email"] = col_idx
+                elif "role" in cell_val:
+                    col_map["role"] = col_idx
+                elif "specialty" in cell_val or "focus" in cell_val:
+                    col_map["specialty"] = col_idx
+                elif "id" in cell_val or "graph" in cell_val:
+                    col_map["user_id"] = col_idx
+                elif "approve" in cell_val:
+                    col_map["can_approve"] = col_idx
+                elif "project" in cell_val or "jira" in cell_val:
+                    col_map["project"] = col_idx
+                elif "status" in cell_val:
+                    col_map["status"] = col_idx
+                elif "updated" in cell_val:
+                    col_map["updated_at"] = col_idx
+            break
+
+    if not header_row_idx:
+        logger.warning("Could not locate header row in Member.xlsx. Rebuilding standard layout...")
+        export_members_to_excel(target)
+        return read_members_from_excel(target)
+
+    members: List[Dict[str, Any]] = []
+    for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        if row_idx <= header_row_idx:
+            continue
+        if not any(row):
+            continue
+
+        def get_col(key: str, default: Any = "") -> Any:
+            idx = col_map.get(key)
+            if idx and idx <= len(row):
+                val = row[idx - 1]
+                return val if val is not None else default
+            return default
+
+        name = str(get_col("name", "")).strip()
+        if not name or name.lower() == "none":
+            continue
+
+        email = str(get_col("email", "")).strip().lower()
+        role = str(get_col("role", "DEVELOPER")).strip().upper() or "DEVELOPER"
+        specialty = str(get_col("specialty", "")).strip()
+        user_id = str(get_col("user_id", "")).strip()
+        raw_approve = str(get_col("can_approve", "0")).strip().lower()
+        can_approve = raw_approve in ("1", "true", "yes", "y") or (role in ("PM", "CLIENT") and raw_approve not in ("0", "false", "no"))
+        project = str(get_col("project", config.jira.project_key or "SCRUM")).strip()
+        status = str(get_col("status", "Active")).strip()
+        is_active = status.lower() not in ("inactive", "disabled", "0", "false")
+        updated_at = str(get_col("updated_at", "")).strip()
+
+        members.append({
+            "display_name": name,
+            "email": email,
+            "role": role,
+            "specialty": specialty,
+            "user_id": user_id,
+            "can_approve": can_approve,
+            "jira_project": project,
+            "status": status,
+            "is_active": is_active,
+            "updated_at": updated_at,
+        })
+
+    return members
+
+
+def sync_db_from_excel() -> List[Dict[str, Any]]:
+    """Synchronize SQLite team_members cache directly from Member.xlsx.
+    Ensures database always mirrors the Single Source of Truth in Excel.
+    """
+    members = read_members_from_excel()
+    if not members:
+        return []
+
+    db = get_db()
+    cursor = db.cursor()
+
+    for m in members:
+        name = m["display_name"]
+        email = m["email"]
+        user_id = m["user_id"]
+        role = m["role"]
+        specialty = m["specialty"]
+        can_approve = 1 if m["can_approve"] else 0
+        is_active = 1 if m["is_active"] else 0
+
+        existing = None
+        if user_id:
+            existing = cursor.execute(
+                "SELECT id FROM team_members WHERE LOWER(user_id) = LOWER(?)", (user_id,)
+            ).fetchone()
+        if not existing and email:
+            existing = cursor.execute(
+                "SELECT id FROM team_members WHERE LOWER(email) = LOWER(?)", (email,)
+            ).fetchone()
+        if not existing:
+            existing = cursor.execute(
+                "SELECT id FROM team_members WHERE LOWER(display_name) = LOWER(?)", (name.lower(),)
+            ).fetchone()
+
+        if existing:
+            cursor.execute(
+                """
+                UPDATE team_members
+                SET display_name = ?,
+                    email = COALESCE(NULLIF(?, ''), email),
+                    user_id = COALESCE(NULLIF(?, ''), user_id),
+                    role = ?,
+                    specialty = ?,
+                    can_approve = ?,
+                    is_active = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (name, email, user_id, role, specialty, can_approve, is_active, existing["id"]),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO team_members (user_id, display_name, email, role, specialty, can_approve, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, name, email, role, specialty, can_approve, is_active),
+            )
+
+    logger.info(f"Synchronized database cache from Member.xlsx ({len(members)} members)")
+    return members
+
+
+def get_all_members_from_excel() -> List[Dict[str, Any]]:
+    """Get all members with file modification time caching.
+    Automatically re-reads from Member.xlsx whenever the Excel file is modified.
+    """
+    global _cached_members, _cached_mtime
+    target_path = get_primary_excel_path()
+
+    mtime = 0.0
+    if target_path.exists():
+        try:
+            mtime = os.path.getmtime(target_path)
+        except Exception:
+            mtime = 0.0
+
+    if _cached_members is None or mtime > _cached_mtime:
+        _cached_members = sync_db_from_excel()
+        _cached_mtime = mtime
+
+    return _cached_members or []
+
+
+def get_member_by_id_or_name(user_id: Optional[str] = None, display_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Lookup a member from Member.xlsx data by Graph user_id or display_name."""
+    members = get_all_members_from_excel()
+    u_id_clean = (user_id or "").strip().lower()
+    name_clean = (display_name or "").strip().lower()
+
+    if u_id_clean:
+        for m in members:
+            if (m.get("user_id") or "").strip().lower() == u_id_clean:
+                return m
+
+    if name_clean:
+        # Exact match
+        for m in members:
+            if (m.get("display_name") or "").strip().lower() == name_clean:
+                return m
+        # First name / partial match
+        first_clean = name_clean.split()[0] if name_clean else ""
+        for m in members:
+            m_name = (m.get("display_name") or "").strip().lower()
+            m_first = m_name.split()[0] if m_name else ""
+            if first_clean and m_first and (first_clean == m_first or first_clean in m_name or name_clean in m_name):
+                return m
+
+    return None
+
+
+def get_active_pm_from_excel() -> Dict[str, str]:
+    """Retrieve active Project Manager (PM) directly from Member.xlsx data.
+    Never relies on hardcoded names.
+    """
+    members = get_all_members_from_excel()
+
+    # 1. Look for explicit role 'PM'
+    for m in members:
+        if m.get("is_active") and (m.get("role") or "").upper() == "PM":
+            return {
+                "name": m.get("display_name") or "Project Manager",
+                "email": m.get("email") or "",
+                "user_id": m.get("user_id") or "",
+            }
+
+    # 2. Look for approver if no PM specified
+    for m in members:
+        if m.get("is_active") and m.get("can_approve"):
+            return {
+                "name": m.get("display_name") or "Approver",
+                "email": m.get("email") or "",
+                "user_id": m.get("user_id") or "",
+            }
+
+    # 3. Fallback
+    return {
+        "name": "Project Manager",
+        "email": "",
+        "user_id": "",
+    }
+
+
+def feed_member_to_excel(
+    display_name: str,
+    user_id: Optional[str] = None,
+    email: Optional[str] = None,
+    role: Optional[str] = None,
+    specialty: Optional[str] = None,
+    can_approve: Optional[bool] = None,
+    jira_project: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Feed member data directly into Member.xlsx FIRST (The SSOT).
+    If the member already exists, updates any missing fields.
+    If the member is new, appends them to the sheet and formats the row.
+    Immediately updates the shared OneDrive spreadsheet and syncs database cache.
+    """
+    name_clean = (display_name or "").strip()
+    if not name_clean:
+        return {"success": False, "reason": "Empty display name"}
+
+    user_id_clean = (user_id or "").strip()
+    email_clean = (email or "").strip().lower()
+
+    # Determine role
+    assigned_role = role
+    if not assigned_role:
+        name_lower = name_clean.lower()
+        if "dhruv" in name_lower:
+            assigned_role = "CLIENT"
+        elif "hemil" in name_lower:
+            assigned_role = "PM"
+        elif "santosh" in name_lower:
+            assigned_role = "DEVELOPER"
+        elif "musaib" in name_lower or "musain" in name_lower:
+            assigned_role = "DEVELOPER"
+        else:
+            assigned_role = "DEVELOPER"
+    assigned_role = assigned_role.upper()
+
+    # Specialty
+    if not specialty:
+        if assigned_role == "CLIENT":
+            specialty = "Client Product Owner"
+        elif assigned_role == "PM":
+            specialty = "Project Manager / Scrum Master"
+        else:
+            name_lower = name_clean.lower()
+            if "musaib" in name_lower:
+                specialty = "Frontend & UI Lead"
+            elif "santosh" in name_lower:
+                specialty = "Backend & API Lead"
+            else:
+                specialty = "Software Engineer"
+
+    if can_approve is None:
+        can_approve = assigned_role in ("PM", "CLIENT")
+
+    target_path = get_primary_excel_path()
+    if not target_path.exists():
+        export_members_to_excel(target_path)
+
+    wb = openpyxl.load_workbook(target_path)
+    ws = wb.active
+
+    # Find header row and column mapping
+    header_row_idx = 4
+    col_map = {
+        "name": 1,
+        "email": 2,
+        "role": 3,
+        "specialty": 4,
+        "user_id": 5,
+        "can_approve": 6,
+        "project": 7,
+        "status": 8,
+        "updated": 9,
+    }
+
+    for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        row_str = [str(c or "").strip().lower() for c in row]
+        if any("name" in c for c in row_str):
+            header_row_idx = r_idx
+            for c_idx, val in enumerate(row_str, start=1):
+                if "name" in val:
+                    col_map["name"] = c_idx
+                elif "email" in val:
+                    col_map["email"] = c_idx
+                elif "role" in val:
+                    col_map["role"] = c_idx
+                elif "specialty" in val or "focus" in val:
+                    col_map["specialty"] = c_idx
+                elif "id" in val or "graph" in val:
+                    col_map["user_id"] = c_idx
+                elif "approve" in val:
+                    col_map["can_approve"] = c_idx
+                elif "project" in val or "jira" in val:
+                    col_map["project"] = c_idx
+                elif "status" in val:
+                    col_map["status"] = c_idx
+                elif "updated" in val:
+                    col_map["updated"] = c_idx
+            break
+
+    # Look for existing member row
+    existing_row_idx = None
+    max_row = ws.max_row or header_row_idx
+
+    for r_idx in range(header_row_idx + 1, max_row + 1):
+        cell_name = str(ws.cell(row=r_idx, column=col_map["name"]).value or "").strip()
+        cell_email = str(ws.cell(row=r_idx, column=col_map["email"]).value or "").strip().lower()
+        cell_uid = str(ws.cell(row=r_idx, column=col_map["user_id"]).value or "").strip()
+
+        if user_id_clean and cell_uid and cell_uid.lower() == user_id_clean.lower():
+            existing_row_idx = r_idx
+            break
+        if email_clean and cell_email and cell_email == email_clean:
+            existing_row_idx = r_idx
+            break
+        if cell_name and cell_name.lower() == name_clean.lower():
+            existing_row_idx = r_idx
+            break
+
+    thin_border = Border(
+        left=Side(style="thin", color="334155"),
+        right=Side(style="thin", color="334155"),
+        top=Side(style="thin", color="334155"),
+        bottom=Side(style="thin", color="334155"),
+    )
+
+    role_colors = {
+        "CLIENT": ("EFF6FF", "1D4ED8"),
+        "PM": ("FEF3C7", "B45309"),
+        "DEVELOPER": ("ECFDF5", "047857"),
+        "ADMIN": ("F5F3FF", "6D28D9"),
+    }
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if existing_row_idx:
+        # Update missing fields in existing Excel row
+        row_idx = existing_row_idx
+        if user_id_clean and not ws.cell(row=row_idx, column=col_map["user_id"]).value:
+            ws.cell(row=row_idx, column=col_map["user_id"]).value = user_id_clean
+        if email_clean and not ws.cell(row=row_idx, column=col_map["email"]).value:
+            ws.cell(row=row_idx, column=col_map["email"]).value = email_clean
+        if role and ws.cell(row=row_idx, column=col_map["role"]).value != assigned_role:
+            ws.cell(row=row_idx, column=col_map["role"]).value = assigned_role
+        ws.cell(row=row_idx, column=col_map["updated"]).value = now_str
+        save_workbook_to_all(wb)
+        sync_db_from_excel()
+        logger.info(f"Updated member row in Member.xlsx: {name_clean}")
+        return {"success": True, "action": "updated", "name": name_clean, "role": assigned_role}
+
+    # Append new row to Member.xlsx
+    new_row_idx = max_row + 1
+    # Check if max_row is empty
+    if max_row > header_row_idx:
+        val_at_max = ws.cell(row=max_row, column=col_map["name"]).value
+        if not val_at_max:
+            new_row_idx = max_row
+
+    ws.row_dimensions[new_row_idx].height = 20
+    ws.cell(row=new_row_idx, column=col_map["name"], value=name_clean)
+    ws.cell(row=new_row_idx, column=col_map["email"], value=email_clean)
+    ws.cell(row=new_row_idx, column=col_map["role"], value=assigned_role)
+    ws.cell(row=new_row_idx, column=col_map["specialty"], value=specialty)
+    ws.cell(row=new_row_idx, column=col_map["user_id"], value=user_id_clean)
+    ws.cell(row=new_row_idx, column=col_map["can_approve"], value="1" if can_approve else "0")
+    ws.cell(row=new_row_idx, column=col_map["project"], value=jira_project or config.jira.project_key or "SCRUM")
+    ws.cell(row=new_row_idx, column=col_map["status"], value="Active")
+    ws.cell(row=new_row_idx, column=col_map["updated"], value=now_str)
+
+    # Style cells
+    bg_color, fg_color = role_colors.get(assigned_role, ("F8FAFC", "334155"))
+    for col_i in range(1, 10):
+        c = ws.cell(row=new_row_idx, column=col_i)
+        c.font = Font(name="Segoe UI", size=9.5)
+        c.border = thin_border
+        if col_i in (col_map["name"], col_map["email"], col_map["specialty"]):
+            c.alignment = Alignment(horizontal="left", vertical="center")
+        else:
+            c.alignment = Alignment(horizontal="center", vertical="center")
+        if col_i == col_map["role"]:
+            c.fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
+            c.font = Font(name="Segoe UI", size=9.5, bold=True, color=fg_color)
+
+    # Update subtitle timestamp
+    ws.cell(row=2, column=1).value = f"Single Source of Truth for Team Members, Roles & Permissions | Last Updated: {now_str}"
+
+    save_workbook_to_all(wb)
+    sync_db_from_excel()
+
+    logger.info(
+        f"Fed new member '{name_clean}' into Member.xlsx as {assigned_role}",
+        extra={"event": "MEMBER_FED_TO_EXCEL", "member_name": name_clean, "role": assigned_role},
+    )
+    return {"success": True, "action": "created", "name": name_clean, "role": assigned_role}
+
+
+def auto_register_member(
+    display_name: str,
+    user_id: Optional[str] = None,
+    email: Optional[str] = None,
+    role: Optional[str] = None,
+    specialty: Optional[str] = None,
+    can_approve: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Compatibility alias: Feeds member data directly into Member.xlsx first."""
+    return feed_member_to_excel(
+        display_name=display_name,
+        user_id=user_id,
+        email=email,
+        role=role,
+        specialty=specialty,
+        can_approve=can_approve,
+    )
+
+
 def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
-    """Generate a clean, styled Excel workbook containing all team members and project details."""
-    target_path = output_path or MEMBER_FILE_PATH
+    """Generate or refresh a clean, styled Member.xlsx workbook.
+    Writes to both OneDrive sync folder and local project folder.
+    """
+    target_path = output_path or get_primary_excel_path()
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     db = get_db()
@@ -71,8 +578,6 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Team Directory"
-
-    # Set gridlines
     ws.views.sheetView[0].showGridLines = True
 
     # Title block
@@ -87,7 +592,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
     # Subtitle with timestamp
     ws.merge_cells("A2:I2")
     sub_cell = ws.cell(row=2, column=1)
-    sub_cell.value = f"Synced with Microsoft Teams Chat & Jira Cloud | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    sub_cell.value = f"Single Source of Truth for Team Members, Roles & Permissions | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     sub_cell.font = Font(name="Segoe UI", size=9, italic=True, color="94A3B8")
     sub_cell.fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
     sub_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -105,7 +610,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
         "Status",
         "Last Updated",
     ]
-    ws.append([])  # blank row 3
+    ws.append([])  # row 3
     ws.append(headers)  # row 4
     ws.row_dimensions[4].height = 24
 
@@ -125,15 +630,13 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = thin_border
 
-    # Color palettes for roles
     role_colors = {
-        "CLIENT": ("EFF6FF", "1D4ED8"),     # blue-50, blue-700
-        "PM": ("FEF3C7", "B45309"),         # amber-100, amber-700
-        "DEVELOPER": ("ECFDF5", "047857"),  # green-50, green-700
-        "ADMIN": ("F5F3FF", "6D28D9"),      # purple-50, purple-700
+        "CLIENT": ("EFF6FF", "1D4ED8"),
+        "PM": ("FEF3C7", "B45309"),
+        "DEVELOPER": ("ECFDF5", "047857"),
+        "ADMIN": ("F5F3FF", "6D28D9"),
     }
 
-    # Data Rows
     current_row = 5
     for r in rows:
         role = (r["role"] or "DEVELOPER").upper()
@@ -160,22 +663,18 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
             cell.font = Font(name="Segoe UI", size=9.5)
             cell.border = thin_border
 
-            # Alignments
             if col_idx in (1, 2, 4):
                 cell.alignment = Alignment(horizontal="left", vertical="center")
-            elif col_idx in (3, 6, 7, 8):
-                cell.alignment = Alignment(horizontal="center", vertical="center")
             else:
                 cell.alignment = Alignment(horizontal="center", vertical="center")
 
-            # Highlight Role Column
             if col_idx == 3:
                 cell.fill = row_fill
                 cell.font = Font(name="Segoe UI", size=9.5, bold=True, color=fg_color)
 
         current_row += 1
 
-    # Auto-adjust column widths
+    # Column widths
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
@@ -187,136 +686,13 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
                 max_len = len(val)
         ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
 
-    # Save to disk
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    xlsx_bytes = buffer.getvalue()
-
-    try:
-        with open(target_path, "wb") as f:
-            f.write(xlsx_bytes)
-        logger.info(f"Updated Excel file: {target_path} ({len(rows)} members)", extra={"event": "MEMBER_EXCEL_SAVED"})
-    except Exception as save_err:
-        logger.warning(f"Could not write {target_path} to disk: {save_err}")
-
-    return xlsx_bytes
-
-
-def auto_register_member(
-    display_name: str,
-    user_id: Optional[str] = None,
-    email: Optional[str] = None,
-    role: Optional[str] = None,
-    specialty: Optional[str] = None,
-    can_approve: Optional[bool] = None,
-) -> Dict[str, Any]:
-    """Auto-register or update a discovered member into the system database."""
-    name_clean = (display_name or "").strip()
-    if not name_clean:
-        return {"registered": False, "reason": "Empty display name"}
-
-    user_id_clean = (user_id or "").strip()
-    email_clean = (email or "").strip().lower()
-
-    # Determine default role if not given
-    assigned_role = role
-    if not assigned_role:
-        name_lower = name_clean.lower()
-        if "hemil" in name_lower:
-            assigned_role = "PM"
-        elif "santosh" in name_lower:
-            assigned_role = "PM"
-        elif "dhruv" in name_lower:
-            assigned_role = "CLIENT"
-        elif "musaib" in name_lower or "musain" in name_lower:
-            assigned_role = "DEVELOPER"
-        else:
-            assigned_role = "DEVELOPER"
-
-    assigned_role = assigned_role.upper()
-
-    # Default specialty
-    if not specialty:
-        if assigned_role == "CLIENT":
-            specialty = "Client Product Owner"
-        elif assigned_role == "PM":
-            specialty = "Project Manager / Scrum Master"
-        else:
-            name_lower = name_clean.lower()
-            if "musaib" in name_lower:
-                specialty = "Frontend & UI Lead"
-            elif "santosh" in name_lower:
-                specialty = "Backend & API Lead"
-            else:
-                specialty = "Software Engineer"
-
-    if can_approve is None:
-        can_approve = assigned_role in ("PM", "CLIENT")
-
-    db = get_db()
-    cursor = db.cursor()
-
-    # Check if exists by user_id, email, or display_name
-    existing = None
-    if user_id_clean:
-        existing = cursor.execute(
-            "SELECT * FROM team_members WHERE LOWER(user_id) = LOWER(?)", (user_id_clean,)
-        ).fetchone()
-
-    if not existing and email_clean:
-        existing = cursor.execute(
-            "SELECT * FROM team_members WHERE LOWER(email) = LOWER(?)", (email_clean,)
-        ).fetchone()
-
-    if not existing:
-        existing = cursor.execute(
-            "SELECT * FROM team_members WHERE LOWER(display_name) = LOWER(?)", (name_clean.lower(),)
-        ).fetchone()
-
-    if existing:
-        # Update missing fields (fill empty email or user_id)
-        m_id = existing["id"]
-        cursor.execute(
-            """
-            UPDATE team_members
-            SET user_id = COALESCE(NULLIF(?, ''), user_id),
-                email = COALESCE(NULLIF(?, ''), email),
-                display_name = COALESCE(NULLIF(?, ''), display_name),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (user_id_clean, email_clean, name_clean, m_id),
-        )
-        return {"registered": False, "updated": True, "id": m_id, "name": name_clean}
-
-    # Insert new member
-    cursor.execute(
-        """
-        INSERT INTO team_members (user_id, display_name, email, role, specialty, can_approve, is_active)
-        VALUES (?, ?, ?, ?, ?, ?, 1)
-        """,
-        (user_id_clean, name_clean, email_clean, assigned_role, specialty, 1 if can_approve else 0),
-    )
-    new_id = cursor.lastrowid
-
-    db.execute(
-        "INSERT INTO admin_audit_log (category, action, details) VALUES (?, ?, ?)",
-        ("MEMBERS", "MEMBER_AUTO_DISCOVERED", f"Discovered and registered '{name_clean}' as {assigned_role} ({email_clean})"),
-    )
-
-    logger.info(
-        f"👥 Auto-registered new team member: {name_clean} as {assigned_role} ({email_clean})",
-        extra={"event": "NEW_MEMBER_AUTO_DISCOVERED", "member_name": name_clean, "role": assigned_role},
-    )
-
-    # Re-export Excel
-    export_members_to_excel()
-
-    return {"registered": True, "id": new_id, "name": name_clean, "role": assigned_role}
+    return save_workbook_to_all(wb)
 
 
 def sync_teams_chat_roster(chat_id: Optional[str] = None) -> Dict[str, Any]:
-    """Poll Microsoft Graph API for all members in the Teams chat/channel and sync them."""
+    """Poll Microsoft Graph API for all members in the Teams chat/channel
+    and feed them directly into Member.xlsx first!
+    """
     target_chat_id = chat_id or config.teams.chat_id
     if not target_chat_id:
         return {"success": False, "error": "No Teams chat ID configured"}
@@ -342,25 +718,20 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None) -> Dict[str, Any]:
             d_name = m.get("displayName") or ""
             email = m.get("email") or ""
 
-            # If email is empty, check userPrincipalName if available
             if not email and "@" in str(m.get("userPrincipalName", "")):
                 email = m.get("userPrincipalName")
 
-            res_reg = auto_register_member(
+            res_feed = feed_member_to_excel(
                 display_name=d_name,
                 user_id=u_id,
                 email=email,
             )
-            if res_reg.get("registered"):
+            if res_feed.get("action") == "created":
                 discovered_count += 1
-            elif res_reg.get("updated"):
+            elif res_feed.get("action") == "updated":
                 updated_count += 1
 
-        # Re-export Excel workbook
-        export_members_to_excel()
-
-        db = get_db()
-        total_now = db.execute("SELECT COUNT(*) FROM team_members").fetchone()[0]
+        all_members = get_all_members_from_excel()
 
         return {
             "success": True,
@@ -368,8 +739,8 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None) -> Dict[str, Any]:
             "found_in_chat": len(members),
             "new_registered": discovered_count,
             "updated": updated_count,
-            "total_members": total_now,
-            "excel_file": str(MEMBER_FILE_PATH),
+            "total_members": len(all_members),
+            "excel_file": str(get_primary_excel_path()),
         }
     except Exception as err:
         logger.error(f"Error syncing chat members from Teams: {err}")
@@ -377,59 +748,41 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None) -> Dict[str, Any]:
 
 
 def sync_from_onedrive_sheet(url: Optional[str] = None) -> Dict[str, Any]:
-    """Sync database from shared OneDrive Excel sheet, or initialize the sheet if empty."""
+    """Sync database from shared OneDrive Excel sheet, or download from URL."""
     target_url = url or DEFAULT_ONEDRIVE_URL
-    file_bytes = download_onedrive_workbook(target_url)
 
+    # If the local OneDrive sync folder exists on disk, read directly from it!
+    if ONEDRIVE_MEMBER_PATH.exists():
+        members = sync_db_from_excel()
+        return {
+            "success": True,
+            "source": "onedrive_local_sync",
+            "message": f"Synchronized from local OneDrive file ({len(members)} members)",
+            "excel_file": str(ONEDRIVE_MEMBER_PATH),
+            "total_members": len(members),
+        }
+
+    # Otherwise download from cloud URL
+    file_bytes = download_onedrive_workbook(target_url)
     if not file_bytes:
-        # Fallback to local Member.xlsx
-        export_members_to_excel()
+        members = sync_db_from_excel()
         return {
             "success": True,
             "source": "local_fallback",
             "message": "OneDrive sheet could not be downloaded; refreshed local Member.xlsx",
-            "excel_file": str(MEMBER_FILE_PATH),
+            "excel_file": str(LOCAL_MEMBER_PATH),
+            "total_members": len(members),
         }
 
-    # Parse the downloaded Excel
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    ws = wb.active
+    # Save downloaded bytes
+    with open(LOCAL_MEMBER_PATH, "wb") as f:
+        f.write(file_bytes)
 
-    # Check if sheet contains data rows
-    rows = list(ws.iter_rows(values_only=True))
-    non_empty_rows = [r for r in rows if any(r)]
-
-    if len(non_empty_rows) <= 1:
-        # Sheet is blank or only has title — populate it from current roster!
-        logger.info("Shared OneDrive Member.xlsx is empty. Exporting full roster into Member.xlsx...")
-        export_members_to_excel()
-        return {
-            "success": True,
-            "source": "onedrive",
-            "message": "Shared sheet was blank. Generated complete Member.xlsx roster ready for use.",
-            "excel_file": str(MEMBER_FILE_PATH),
-        }
-
-    # Parse headers and rows
-    from src.routes.admin import parse_rows_from_content, execute_members_upsert
-    members = parse_rows_from_content(file_bytes=file_bytes, filename="Member.xlsx")
-
-    if members:
-        res = execute_members_upsert(members, strategy="upsert")
-        export_members_to_excel()
-        return {
-            "success": True,
-            "source": "onedrive",
-            "imported_count": res.get("imported_count", 0),
-            "updated_count": res.get("updated_count", 0),
-            "total_members": res.get("total", 0),
-            "excel_file": str(MEMBER_FILE_PATH),
-        }
-
-    export_members_to_excel()
+    members = sync_db_from_excel()
     return {
         "success": True,
-        "source": "onedrive",
-        "message": "No new member rows detected in sheet.",
-        "excel_file": str(MEMBER_FILE_PATH),
+        "source": "onedrive_download",
+        "message": f"Downloaded and synchronized from OneDrive URL ({len(members)} members)",
+        "excel_file": str(LOCAL_MEMBER_PATH),
+        "total_members": len(members),
     }
