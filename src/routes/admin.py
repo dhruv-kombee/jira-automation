@@ -296,8 +296,17 @@ def parse_rows_from_content(
             rows_iter = list(ws.iter_rows(values_only=True))
             if not rows_iter:
                 return []
-            header = [str(c or "").strip() for c in rows_iter[0]]
-            for r in rows_iter[1:]:
+
+            # Dynamically identify header row (scans first 8 rows)
+            header_idx = 0
+            for idx, r in enumerate(rows_iter[:8]):
+                row_str = " ".join(str(c or "").lower() for c in r)
+                if any(k in row_str for k in ("name", "email", "role", "full name", "user")):
+                    header_idx = idx
+                    break
+
+            header = [str(c or "").strip() for c in rows_iter[header_idx]]
+            for r in rows_iter[header_idx + 1:]:
                 if not any(r):
                     continue
                 row_dict = {header[i]: (str(val).strip() if val is not None else "") for i, val in enumerate(r) if i < len(header)}
@@ -473,15 +482,76 @@ def download_members_template():
     )
 
 
+@router.get("/members/export-excel")
+def download_members_excel():
+    """Download the formatted Member.xlsx workbook with all team members."""
+    from src.services.member_sync_service import export_members_to_excel
+    content = export_members_to_excel()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=Member.xlsx"},
+    )
+
+
+@router.post("/members/sync-teams-roster")
+def sync_teams_roster_endpoint():
+    """Sync all members from the active Teams chat or channel into directory and Member.xlsx."""
+    from src.services.member_sync_service import sync_teams_chat_roster
+    res = sync_teams_chat_roster()
+    if not res.get("success"):
+        raise HTTPException(status_code=500, detail=res.get("error", "Failed to sync Teams chat roster"))
+    return res
+
+
+@router.post("/members/sync-onedrive")
+async def sync_onedrive_sheet_endpoint(req: Optional[MemberImportRequest] = None):
+    """Sync members with the shared OneDrive Member.xlsx sheet."""
+    from src.services.member_sync_service import sync_from_onedrive_sheet
+    url = req.url if (req and req.url) else None
+    res = sync_from_onedrive_sheet(url=url)
+    return res
+
+
+@router.get("/members/onedrive-info")
+def get_onedrive_info():
+    """Get connected OneDrive sheet details."""
+    from src.services.member_sync_service import DEFAULT_ONEDRIVE_URL, MEMBER_FILE_PATH
+    db = get_db()
+    total = db.execute("SELECT COUNT(*) FROM team_members").fetchone()[0]
+    return {
+        "success": True,
+        "sheet_url": DEFAULT_ONEDRIVE_URL,
+        "file_name": "Member.xlsx",
+        "file_exists": MEMBER_FILE_PATH.exists(),
+        "total_members": total,
+    }
+
+
 @router.post("/members/parse-sheet")
 async def parse_members_sheet(req: MemberImportRequest):
-    """Parse sheet URL or raw CSV text and return preview of rows."""
+    """Parse sheet URL (Google Sheets, OneDrive, CSV) or raw CSV text and return preview rows."""
+    u = (req.url or "").strip()
+    if u:
+        if "1drv.ms" in u or "onedrive" in u or "sharepoint" in u or u.endswith(".xlsx") or u.endswith(".xls"):
+            from src.services.member_sync_service import download_onedrive_workbook
+            file_bytes = download_onedrive_workbook(u)
+            if not file_bytes:
+                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                    dl_url = u if ("?download=1" in u or "&download=1" in u) else (f"{u}&download=1" if "?" in u else f"{u}?download=1")
+                    r = await client.get(dl_url)
+                    if r.status_code == 200:
+                        file_bytes = r.content
+            if file_bytes:
+                members = parse_rows_from_content(file_bytes=file_bytes, filename="Member.xlsx")
+                return {"success": True, "count": len(members), "preview": members}
+
     text_content = req.csv_text
-    if req.url and req.url.strip():
-        text_content = await fetch_sheet_csv_from_url(req.url.strip())
+    if u and not text_content:
+        text_content = await fetch_sheet_csv_from_url(u)
 
     if not text_content:
-        raise HTTPException(status_code=400, detail="Provide a Google Sheets URL or raw CSV text.")
+        raise HTTPException(status_code=400, detail="Provide a Google Sheets URL, OneDrive link, or raw CSV text.")
 
     members = parse_rows_from_content(text_content=text_content)
     return {"success": True, "count": len(members), "preview": members}
@@ -498,23 +568,33 @@ async def parse_members_file(file: UploadFile = File(...)):
     return {"success": True, "count": len(members), "preview": members}
 
 
-
 @router.post("/members/import-json")
 async def import_members_json(req: MemberImportRequest):
-    """Import team members from parsed list, Google Sheets URL, or raw CSV text."""
+    """Import team members from parsed list, Google Sheets URL, OneDrive link, or raw CSV text."""
     members = req.members
     if not members:
-        text_content = req.csv_text
-        if req.url and req.url.strip():
-            text_content = await fetch_sheet_csv_from_url(req.url.strip())
-        if not text_content:
-            raise HTTPException(status_code=400, detail="No members data, URL, or CSV text provided.")
-        members = parse_rows_from_content(text_content=text_content)
+        u = (req.url or "").strip()
+        if u and ("1drv.ms" in u or "onedrive" in u or "sharepoint" in u or u.endswith(".xlsx")):
+            from src.services.member_sync_service import download_onedrive_workbook
+            file_bytes = download_onedrive_workbook(u)
+            if file_bytes:
+                members = parse_rows_from_content(file_bytes=file_bytes, filename="Member.xlsx")
+
+        if not members:
+            text_content = req.csv_text
+            if u:
+                text_content = await fetch_sheet_csv_from_url(u)
+            if not text_content:
+                raise HTTPException(status_code=400, detail="No members data, URL, or CSV text provided.")
+            members = parse_rows_from_content(text_content=text_content)
 
     if not members:
         raise HTTPException(status_code=400, detail="No valid member rows found in the sheet.")
 
-    return execute_members_upsert(members, strategy=req.strategy or "upsert")
+    res = execute_members_upsert(members, strategy=req.strategy or "upsert")
+    from src.services.member_sync_service import export_members_to_excel
+    export_members_to_excel()
+    return res
 
 
 @router.post("/members/import-file")
@@ -528,7 +608,10 @@ async def import_members_file(file: UploadFile = File(...), strategy: str = Form
     if not members:
         raise HTTPException(status_code=400, detail="No valid member rows found in the uploaded file.")
 
-    return execute_members_upsert(members, strategy=strategy)
+    res = execute_members_upsert(members, strategy=strategy)
+    from src.services.member_sync_service import export_members_to_excel
+    export_members_to_excel()
+    return res
 
 
 # =========================================================================

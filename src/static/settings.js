@@ -59,6 +59,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const importErrorMessage = document.getElementById('importErrorMessage');
   const btnConfirmImport = document.getElementById('btnConfirmImport');
 
+  // DOM Elements - Teams Shared Sheet & Roster Sync
+  const btnSyncTeamsChatRoster = document.getElementById('btnSyncTeamsChatRoster');
+  const btnSyncOneDriveSheet = document.getElementById('btnSyncOneDriveSheet');
+  const btnUseTeamsOneDriveLink = document.getElementById('btnUseTeamsOneDriveLink');
+
   // DOM Elements - Channels
   const channelsTableBody = document.getElementById('channelsTableBody');
   const btnOpenAddChannelModal = document.getElementById('btnOpenAddChannelModal');
@@ -794,6 +799,72 @@ document.addEventListener('DOMContentLoaded', () => {
       } finally {
         btnConfirmImport.disabled = false;
         btnConfirmImport.textContent = origText;
+      }
+    });
+  }
+
+  // =========================================================================
+  // Teams Chat Roster & OneDrive Member.xlsx Sync Listeners
+  // =========================================================================
+  if (btnSyncTeamsChatRoster) {
+    btnSyncTeamsChatRoster.addEventListener('click', async () => {
+      const orig = btnSyncTeamsChatRoster.innerHTML;
+      btnSyncTeamsChatRoster.disabled = true;
+      btnSyncTeamsChatRoster.innerHTML = '<span>⏳ Syncing Teams...</span>';
+      try {
+        const res = await fetch('/api/admin/members/sync-teams-roster', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showToast(`Synced Teams chat! Found ${data.found_in_chat} members (${data.new_registered} new, ${data.updated} updated).`);
+          await loadMembers();
+          await loadOverview();
+        } else {
+          showToast(data.detail || data.error || 'Failed to sync Teams roster', 'error');
+        }
+      } catch (err) {
+        showToast(`Sync error: ${err.message || err}`, 'error');
+      } finally {
+        btnSyncTeamsChatRoster.disabled = false;
+        btnSyncTeamsChatRoster.innerHTML = orig;
+      }
+    });
+  }
+
+  if (btnSyncOneDriveSheet) {
+    btnSyncOneDriveSheet.addEventListener('click', async () => {
+      const orig = btnSyncOneDriveSheet.innerHTML;
+      btnSyncOneDriveSheet.disabled = true;
+      btnSyncOneDriveSheet.innerHTML = '<span>⏳ Syncing OneDrive...</span>';
+      try {
+        const res = await fetch('/api/admin/members/sync-onedrive', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showToast(`Synced with Member.xlsx! (${data.total_members || 'updated'} members)`);
+          await loadMembers();
+          await loadOverview();
+        } else {
+          showToast(data.detail || 'Could not sync OneDrive sheet', 'error');
+        }
+      } catch (err) {
+        showToast(`OneDrive sync error: ${err.message || err}`, 'error');
+      } finally {
+        btnSyncOneDriveSheet.disabled = false;
+        btnSyncOneDriveSheet.innerHTML = orig;
+      }
+    });
+  }
+
+  if (btnUseTeamsOneDriveLink) {
+    btnUseTeamsOneDriveLink.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/admin/members/onedrive-info');
+        const data = await res.json();
+        if (data.sheet_url) {
+          importSheetUrl.value = data.sheet_url;
+          if (btnFetchSheetUrl) btnFetchSheetUrl.click();
+        }
+      } catch (err) {
+        console.error('Error fetching onedrive info:', err);
       }
     });
   }

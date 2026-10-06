@@ -377,11 +377,17 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
 
         normalized = normalize_message(graph_message, team_id=team_id, channel_id=channel_id)
 
-    # Identify sender role
-    sender_role = identify_sender_role(
-        normalized["sender"].get("userId"),
-        normalized["sender"].get("displayName"),
-    )
+    # Auto-register new members into team directory and sync Member.xlsx
+    sender_id = normalized["sender"].get("userId")
+    sender_name = normalized["sender"].get("displayName")
+    if sender_name and sender_name.strip() and sender_name.lower() != "unknown":
+        try:
+            from src.services.member_sync_service import auto_register_member
+            auto_register_member(display_name=sender_name, user_id=sender_id)
+        except Exception as reg_err:
+            logger.debug(f"Auto-register check: {reg_err}")
+
+    sender_role = identify_sender_role(sender_id, sender_name)
 
     # Multimodal attachment downloading & caching
     downloaded_attachments: List[Dict[str, Any]] = []

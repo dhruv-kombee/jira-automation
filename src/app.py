@@ -51,6 +51,13 @@ async def lifespan(app: FastAPI):
     from src.services.reminder_service import start_reminder_monitor, stop_reminder_monitor
     start_reminder_monitor()
 
+    # 7. Sync Teams chat roster & maintain Member.xlsx
+    try:
+        from src.services.member_sync_service import sync_teams_chat_roster
+        sync_teams_chat_roster()
+    except Exception as roster_err:
+        logger.debug(f"Initial roster sync notice: {roster_err}")
+
     logger.info(
         f"Teams to Jira Automation Hub online at http://localhost:{config.port}",
         extra={
