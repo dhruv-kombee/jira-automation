@@ -123,7 +123,11 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
         logger.warning(f"Member.xlsx does not exist at {target}. Creating initial sheet...")
         export_members_to_excel(target)
 
-    wb = openpyxl.load_workbook(target, data_only=True)
+    try:
+        wb = openpyxl.load_workbook(target, data_only=True)
+    except (PermissionError, OSError):
+        logger.warning(f"File {target} is locked by another process (e.g. Excel). Falling back to {LOCAL_MEMBER_PATH}")
+        wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH, data_only=True)
     ws = wb.active
 
     # Find the header row (first row where a cell contains 'Full Name' or 'Name')
@@ -421,7 +425,11 @@ def feed_member_to_excel(
     if not target_path.exists():
         export_members_to_excel(target_path)
 
-    wb = openpyxl.load_workbook(target_path)
+    try:
+        wb = openpyxl.load_workbook(target_path)
+    except (PermissionError, OSError):
+        logger.warning(f"File {target_path} is locked by another process. Reading from local copy {LOCAL_MEMBER_PATH}")
+        wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH)
     ws = wb.active
 
     # Find header row and column mapping
