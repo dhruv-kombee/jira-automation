@@ -117,13 +117,22 @@ Rules:
    - POSSIBLE_ISSUE: If the user is reporting confusion, potential problem, or ambiguous request without clear reproduction.
    - GENERAL_MESSAGE: If the message is purely conversational greetings (e.g. "Good morning", "Thanks", "Can we hop on a call?") without any defect or task. For general messages, set is_ticket_request = false.
 
-2. Multimodal Screenshot & Log Analysis:
-   - If an image/screenshot is attached:
-     - Carefully inspect the UI for red error badges, toast notifications, HTTP status codes (404, 500), broken layout, or form validation errors.
-     - Transcribe error message text into the "evidence" field.
+2. Multimodal Screenshot & Multi-Format Attachment Analysis:
+   - IMAGES / SCREENSHOTS (.png, .jpg, .jpeg, .webp, .gif):
+     - Inspect the UI for red error badges, toast notifications, broken alignment, form validation errors, or DevTools consoles.
+     - Transcribe exact error message text into the "evidence" field.
      - Identify the affected module/screen (e.g. Checkout, Login, Dashboard, Billing).
-   - If log files or stack traces are attached or pasted:
-     - Extract the root exception and failing method into the "evidence" field.
+   - EXCEL SPREADSHEETS (.xlsx, .xlsm, .xls):
+     - Carefully inspect the tabular sheets, test case rows, bug lists, and column headers.
+     - Extract reported defects, steps, expected/observed behaviors, and severities into individual Jira issue items.
+   - WORD DOCUMENTS (.docx):
+     - Read specifications, bug write-ups, requirements, and tables to capture the complete problem statement.
+   - ZIP ARCHIVES (.zip):
+     - Examine the archive tree, internal error logs, configuration files, and tracebacks to uncover root causes.
+   - PDF DOCUMENTS (.pdf):
+     - Analyze all text, sections, error reports, and specification pages.
+   - LOG FILES & CODE (.log, .txt, .json, .csv, .py, .js, .sql, etc.):
+     - Extract exact exception names, stack trace lines, HTTP status codes (500, 502, 504, 404), and error snippets into the "evidence" field.
 
 3. Professional Ticket Perspective (CRITICAL ASTERISK FORBIDDEN RULE):
    - Provide a comprehensive, accurate defect or task specification from a senior QA / Scrum perspective.
@@ -230,51 +239,20 @@ def optimize_log_content_for_lite(decoded_text: str, max_chars: int = 5000) -> s
 
 
 def extract_text_from_attachment(raw_bytes: bytes, name: str, content_type: str) -> Optional[str]:
-    """Extract plain text from attachments including logs, json, csv, code, and PDFs."""
+    """Extract plain text / tabular / document content from any attachment format."""
     if not raw_bytes:
         return None
 
-    lower_name = (name or "").lower()
-    lower_type = (content_type or "").lower()
-
-    # Plain text / code / log / json / csv / etc.
-    if (
-        any(t in lower_type for t in ["text/", "json", "csv", "log", "xml", "yaml", "javascript", "sql"])
-        or lower_name.endswith((".log", ".txt", ".json", ".csv", ".xml", ".sql", ".md", ".yml", ".yaml", ".py", ".js", ".html", ".css"))
-    ):
-        try:
-            raw_text = raw_bytes.decode("utf-8", errors="replace")
-            return optimize_log_content_for_lite(raw_text)
-        except Exception:
-            try:
-                raw_text = raw_bytes.decode("latin-1", errors="replace")
-                return optimize_log_content_for_lite(raw_text)
-            except Exception:
-                return None
-
-    # PDF text stream extraction
-    if "pdf" in lower_type or lower_name.endswith(".pdf"):
-        import zlib
-        try:
-            text_chunks = []
-            for s in re.finditer(rb'stream[\r\n]+([\s\S]*?)[\r\n]+endstream', raw_bytes):
-                raw_stream = s.group(1)
-                try:
-                    decomp = zlib.decompress(raw_stream)
-                    for m in re.finditer(rb'\((.*?)\)\s*Tj', decomp):
-                        chunk = m.group(1).decode("latin-1", errors="replace").strip()
-                        if chunk:
-                            text_chunks.append(chunk)
-                except Exception:
-                    continue
-            if text_chunks:
-                extracted = " ".join(text_chunks)
-                return optimize_log_content_for_lite(extracted)
-        except Exception as pdf_err:
-            logger.debug(f"Could not extract text from PDF {name}: {pdf_err}")
+    try:
+        from src.services.attachment_parser import extract_attachment_content
+        parsed = extract_attachment_content(raw_bytes, name, content_type)
+        extracted_text = parsed.get("text", "")
+        if extracted_text and not parsed.get("is_image"):
+            return optimize_log_content_for_lite(extracted_text)
+    except Exception as exc:
+        logger.debug(f"Attachment content extraction error for {name}: {exc}")
 
     return None
-
 
 def _rule_based_fallback(
     text: str,
@@ -613,37 +591,37 @@ Message Content:
                 if not raw_bytes:
                     continue
 
-                eff_type = (content_type or "").lower().split(";")[0].strip()
-                if not eff_type or eff_type == "application/octet-stream":
-                    guessed, _ = mimetypes.guess_type(name)
-                    if guessed:
-                        eff_type = guessed.lower()
-                    elif name.lower().endswith((".log", ".txt", ".json", ".csv", ".xml", ".sql", ".md", ".yml", ".yaml")):
-                        eff_type = "text/plain"
-                    elif name.lower().endswith(".pdf"):
-                        eff_type = "application/pdf"
-                    elif name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                        eff_type = "image/png"
+                from src.services.attachment_parser import extract_attachment_content
+                parsed = extract_attachment_content(raw_bytes, name, content_type)
+                fmt = parsed.get("format")
 
-                if eff_type.startswith("image/"):
+                if fmt == "image":
                     try:
-                        opt_bytes, opt_mime = optimize_image_for_lite_model(raw_bytes, eff_type)
+                        opt_bytes, opt_mime = optimize_image_for_lite_model(raw_bytes, parsed.get("mime_type", "image/png"))
                         content_parts.append(
                             types.Part.from_bytes(data=opt_bytes, mime_type=opt_mime)
                         )
                     except Exception as img_err:
-                        logger.warning(f"Could not convert attachment '{name}' to image part: {img_err}")
-                elif eff_type == "application/pdf":
+                        logger.warning(f"Could not convert image attachment '{name}': {img_err}")
+                elif fmt == "pdf":
+                    # 1. Native multimodal PDF part for Gemini document vision
                     try:
                         content_parts.append(
                             types.Part.from_bytes(data=raw_bytes, mime_type="application/pdf")
                         )
                     except Exception as pdf_err:
-                        logger.warning(f"Could not convert PDF attachment '{name}': {pdf_err}")
+                        logger.warning(f"Could not convert PDF attachment '{name}' to multimodal part: {pdf_err}")
+                    # 2. Extracted text stream for grounded inspection
+                    pdf_text = parsed.get("text", "")
+                    if pdf_text:
+                        summary_str = parsed.get("summary", "Document")
+                        content_parts.append(f"\n--- Attached Document: {name} ({summary_str}) ---\n{pdf_text}\n--- End of Document ---\n")
                 else:
-                    txt = extract_text_from_attachment(raw_bytes, name, eff_type)
+                    # Word, Excel, ZIP, Text, Logs, Code, Configs
+                    txt = parsed.get("text", "")
                     if txt:
-                        content_parts.append(f"\n--- Attached File: {name} ({eff_type}) ---\n{txt}\n--- End of File ---\n")
+                        summary_str = parsed.get("summary", "File")
+                        content_parts.append(f"\n--- Attached File: {name} ({summary_str}) ---\n{txt}\n--- End of File ---\n")
 
             def _call_gemini():
                 return client.models.generate_content(
