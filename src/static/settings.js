@@ -60,6 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnConfirmImport = document.getElementById('btnConfirmImport');
 
   // DOM Elements - Teams Shared Sheet & Roster Sync
+  const btnCopyForExcel = document.getElementById('btnCopyForExcel');
   const btnSyncTeamsChatRoster = document.getElementById('btnSyncTeamsChatRoster');
   const btnSyncOneDriveSheet = document.getElementById('btnSyncOneDriveSheet');
   const btnUseTeamsOneDriveLink = document.getElementById('btnUseTeamsOneDriveLink');
@@ -806,6 +807,31 @@ document.addEventListener('DOMContentLoaded', () => {
   // =========================================================================
   // Teams Chat Roster & OneDrive Member.xlsx Sync Listeners
   // =========================================================================
+  if (btnCopyForExcel) {
+    btnCopyForExcel.addEventListener('click', () => {
+      if (!membersList.length) {
+        showToast('No members to copy', 'error');
+        return;
+      }
+      const headers = ['Full Name', 'Email Address', 'Assigned Role', 'Specialty / Focus Area', 'Teams Graph User ID', 'Can Approve (1/0)', 'Jira Project'];
+      const rows = membersList.map(m => [
+        m.display_name || '',
+        m.email || '',
+        (m.role || 'DEVELOPER').toUpperCase(),
+        m.specialty || 'General',
+        m.user_id || '',
+        m.can_approve ? '1' : '0',
+        'SCRUM'
+      ]);
+      const tsv = [headers.join('\t'), ...rows.map(r => r.join('\t'))].join('\n');
+      navigator.clipboard.writeText(tsv).then(() => {
+        showToast('📋 Copied table for Excel! Click cell A1 in your Excel Online tab and press Ctrl+V to paste.', 'success');
+      }).catch(err => {
+        showToast(`Could not copy to clipboard: ${err}`, 'error');
+      });
+    });
+  }
+
   if (btnSyncTeamsChatRoster) {
     btnSyncTeamsChatRoster.addEventListener('click', async () => {
       const orig = btnSyncTeamsChatRoster.innerHTML;
