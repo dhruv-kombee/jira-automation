@@ -12,7 +12,7 @@ def test_role_identification_with_display_name_fallback():
 
     # 2. By Name
     assert identify_sender_role(user_id=None, display_name="Dhruv dobariya") == Roles.CLIENT
-    assert identify_sender_role(user_id="unknown-guid", display_name="Santosh Yadav") == Roles.PM
+    assert identify_sender_role(user_id="unknown-guid", display_name="Santosh Yadav") == Roles.DEVELOPER
     assert identify_sender_role(user_id=None, display_name="Musaib Khan") == Roles.DEVELOPER
     assert identify_sender_role(user_id=None, display_name="Musain") == Roles.DEVELOPER
     assert identify_sender_role(user_id=None, display_name="Someone Else") == Roles.UNKNOWN

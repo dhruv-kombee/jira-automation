@@ -187,6 +187,13 @@ def create_team_member(req: MemberCreateRequest):
     )
 
     member = get_member_by_id_or_name(user_id=req.user_id, display_name=req.display_name)
+    if member:
+        row = db.execute(
+            "SELECT id FROM team_members WHERE (user_id = ? AND user_id != '') OR display_name = ? ORDER BY id DESC LIMIT 1",
+            (req.user_id or "", req.display_name),
+        ).fetchone()
+        if row:
+            member["id"] = row["id"]
     return {"success": True, "member": member, "feed_result": feed_res}
 
 

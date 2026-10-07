@@ -51,8 +51,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   await fetchStatus();
   await fetchMessages();
 
-  // Periodic status poll as background sync (30s)
-  setInterval(fetchStatus, 30000);
+  // Periodic status & messages poll as background sync (15s)
+  setInterval(() => {
+    fetchStatus();
+    fetchMessages();
+  }, 15000);
 });
 
 // Setup Events
@@ -726,14 +729,19 @@ function createMessageCard(msg, role) {
       </div>
     `;
   } else if (msg.confirmation_status === 'AWAITING_FINAL_CONFIRMATION' || (!msg.jira_issue_key && msg.ai_ticket)) {
-    const reminderBadge = msg.reminder_sent_at ? `<span class="badge-reminder-sent" title="15m SLA follow-up sent to PM">⏰ 15m Escalated</span>` : '';
+    let reminderBadge = '';
+    if (msg.reminder_email_status === 'SENT') {
+      reminderBadge = `<span class="badge-reminder-sent" title="15m SLA: Teams follow-up + Outlook email escalation sent to PM">⏰ 15m Email Escalated</span>`;
+    } else if (msg.reminder_sent_at) {
+      reminderBadge = `<span class="badge-reminder-sent" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);" title="10m SLA: Teams follow-up sent to PM (5m reply window before email)">⏰ 10m Teams Follow-Up</span>`;
+    }
     statusHtml = `
       <div class="pending-triage-strip">
         <span class="pending-triage-label">📋 Awaiting PM Confirmation</span>
         ${reminderBadge}
         <button class="btn-triage-approve btn-approve-card" data-id="${escapeHtml(msg.message_id)}">⚡ Approve in Jira</button>
         <button class="btn-triage-decline btn-decline-card" data-id="${escapeHtml(msg.message_id)}">❌ Decline</button>
-        <button class="btn-triage-reminder btn-reminder-card" data-id="${escapeHtml(msg.message_id)}" title="Trigger 15m PM follow-up reminder now (Teams & Outlook)">⏰ Follow-up PM</button>
+        <button class="btn-triage-reminder btn-reminder-card" data-id="${escapeHtml(msg.message_id)}" title="Trigger PM SLA follow-up / email escalation now">⏰ Follow-up PM</button>
       </div>
     `;
   } else if (msg.confirmation_status === 'DECLINED') {
@@ -1067,7 +1075,10 @@ function initWebSocket() {
 
         // PM SLA Follow-up Reminder Sent
         if (payload.type === 'PM_REMINDER_SENT') {
-          showToast(`⏰ 15m SLA escalation sent to PM (${payload.pmName}) via Teams & Outlook!`, 'info');
+          const actionText = payload.stage === 'EMAIL_ESCALATION'
+            ? `15m SLA email escalation sent to PM (${payload.pmName})!`
+            : `10m SLA follow-up sent to PM (${payload.pmName}) via Teams!`;
+          showToast(`⏰ ${actionText}`, 'info');
           fetchMessages();
           return;
         }

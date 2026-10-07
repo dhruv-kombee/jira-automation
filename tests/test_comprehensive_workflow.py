@@ -75,7 +75,7 @@ def _make_reaction(user_id, display_name, reaction_type):
     return {"userId": user_id, "displayName": display_name, "reactionType": reaction_type}
 
 
-PM_REACTION = lambda rtype: _make_reaction("pm-1", "Santosh Yadav", rtype)
+PM_REACTION = lambda rtype: _make_reaction("pm-1", "Hemil Ghori", rtype)
 CLIENT_REACTION = lambda rtype: _make_reaction("client-1", "Dhruv dobariya", rtype)
 DEV_REACTION = lambda rtype: _make_reaction("dev-1", "Musaib Khan", rtype)
 UNKNOWN_REACTION = lambda rtype: _make_reaction("unknown-99", "Random User", rtype)
@@ -296,7 +296,7 @@ class TestRoleIdentification:
         assert identify_sender_role(display_name="Dhruv dobariya") == Roles.CLIENT
 
     def test_identify_pm_by_name(self):
-        assert identify_sender_role(display_name="Santosh Yadav") == Roles.PM
+        assert identify_sender_role(display_name="Hemil Ghori") == Roles.PM
 
     def test_identify_developer_by_name(self):
         assert identify_sender_role(display_name="Musaib Khan") == Roles.DEVELOPER
@@ -1111,7 +1111,7 @@ class TestGranularIssueActions:
         _store_msg("msg-dash-gran", "Multi issue text")
         client = TestClient(app)
         with patch("src.services.message_service.execute_jira_ticket_creation", AsyncMock(return_value={"success": True, "key": "KEY-1", "url": "http://x"})):
-            r1 = client.get("/api/jira/confirm-issue/msg-dash-gran/0")
+            r1 = client.get("/api/jira/confirm-issue/msg-dash-gran/0?auto=1")
             assert r1.status_code == 200
             assert "KEY-1" in r1.text or "Approved" in r1.text
 
@@ -1194,7 +1194,7 @@ class TestThreadGroupingAndDuplicateDetection:
             extractor_mode="Gemini 3.5 Flash-Lite",
         )
         card_json = json.dumps(card)
-        assert "Potential Duplicate" in card_json
+        assert "Potential duplicate" in card_json or "Potential Duplicate" in card_json
         assert "JIRA-77" in card_json
         assert "Gemini 3.5 Flash-Lite" in card_json
         assert "Approve" in card_json

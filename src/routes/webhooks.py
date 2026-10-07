@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, BackgroundTasks, Request, Query, status
 from fastapi.responses import PlainTextResponse, JSONResponse
+from src.config import config
 from src.logger import logger
 from src.services.message_service import process_teams_message
 
@@ -11,7 +12,7 @@ import collections
 import time
 
 # Rolling window for cross-batch notification deduplication
-_RECENT_RESOURCES = collections.OrderedDict()  # resource -> timestamp
+_RECENT_RESOURCES = collections.OrderedDict()  # dedup_key -> timestamp
 _MAX_RECENT_RESOURCES = 500
 _RESOURCE_DEDUP_WINDOW = 4.0  # seconds
 
@@ -50,12 +51,16 @@ async def handle_notifications_background(notifications: List[Dict[str, Any]]):
 
             # 3. Deduplicate rapid duplicate notifications (both intra-batch and cross-retry)
             resource = notification.get("resource")
+            change_type = (notification.get("changeType") or "").lower().strip()
             if resource:
-                last_seen = _RECENT_RESOURCES.get(resource)
-                if last_seen and (now - last_seen) < _RESOURCE_DEDUP_WINDOW:
-                    logger.debug(f"Ignoring duplicate notification for {resource} within {_RESOURCE_DEDUP_WINDOW}s window")
+                dedup_key = f"{resource}:{change_type}"
+                curr_time = time.time()
+                last_seen = _RECENT_RESOURCES.get(dedup_key)
+                window = 1.5 if change_type != "created" else _RESOURCE_DEDUP_WINDOW
+                if last_seen and (curr_time - last_seen) < window:
+                    logger.debug(f"Ignoring duplicate notification for {dedup_key} within {window}s window")
                     continue
-                _RECENT_RESOURCES[resource] = now
+                _RECENT_RESOURCES[dedup_key] = curr_time
                 if len(_RECENT_RESOURCES) > _MAX_RECENT_RESOURCES:
                     _RECENT_RESOURCES.popitem(last=False)
 

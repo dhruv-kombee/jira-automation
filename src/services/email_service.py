@@ -120,7 +120,7 @@ def build_pm_followup_email_html(
                     </tr>
                     <tr>
                         <td style="padding: 3px 0; color: #64748b;"><strong>Elapsed Idle Time:</strong></td>
-                        <td style="padding: 3px 0; color: #dc2626; font-weight: 700;">{elapsed_minutes} minutes (No PM Reaction)</td>
+                        <td style="padding: 3px 0; color: #dc2626; font-weight: 700;">{elapsed_minutes} minutes (No PM Reaction or Reply)</td>
                     </tr>
                     <tr>
                         <td style="padding: 3px 0; color: #64748b;"><strong>Target Jira Project:</strong></td>
@@ -159,7 +159,7 @@ def build_pm_followup_email_html(
         <!-- Footer -->
         <div style="background-color: #f8fafc; border-top: 1px solid #e2e8f0; padding: 16px 28px; text-align: center; font-size: 11px; color: #94a3b8;">
             <p style="margin: 0 0 4px 0;">This is an automated notification from <strong>Jira Automation Hub</strong>.</p>
-            <p style="margin: 0;">Dispatched because no PM reaction was detected within {config.pm_reminder_timeout_minutes} minutes of client message arrival.</p>
+            <p style="margin: 0;">Dispatched because no PM reaction or reply was detected within {config.pm_email_timeout_minutes} minutes of client message arrival (5 minutes after Teams follow-up).</p>
         </div>
 
     </div>

@@ -115,7 +115,9 @@ class AppConfig:
         self.webhook_public_url = os.getenv('WEBHOOK_PUBLIC_URL')
         self.log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
         self.database_path = os.getenv('DATABASE_PATH', './data/messages.db')
-        self.pm_reminder_timeout_minutes = int(os.getenv('PM_REMINDER_TIMEOUT_MINUTES', '15'))
+        self.pm_followup_timeout_minutes = int(os.getenv('PM_FOLLOWUP_TIMEOUT_MINUTES', '10'))
+        self.pm_email_timeout_minutes = int(os.getenv('PM_EMAIL_TIMEOUT_MINUTES', '15'))
+        self.pm_reminder_timeout_minutes = int(os.getenv('PM_REMINDER_TIMEOUT_MINUTES', str(self.pm_followup_timeout_minutes)))
 
 
 config = AppConfig()

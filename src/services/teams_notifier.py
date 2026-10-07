@@ -272,6 +272,15 @@ def build_pending_approval_card(
             "wrap": True,
         })
 
+    if extractor_mode:
+        body_elements.append({
+            "type": "TextBlock",
+            "text": f"🤖 Extractor: {extractor_mode}",
+            "size": "Small",
+            "isSubtle": True,
+            "wrap": True,
+        })
+
     import urllib.parse
     import re
     from src.services.member_sync_service import get_all_members_from_excel

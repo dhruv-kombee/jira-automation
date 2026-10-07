@@ -367,6 +367,74 @@ def print_message_summary(normalized: Dict[str, Any], sender_role: str) -> None:
     logger.info(summary)
 
 
+async def _schedule_deferred_reaction_check(
+    chat_id: Optional[str] = None,
+    team_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    parent_message_id: Optional[str] = None,
+    reply_message_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+    delay: float = 6.0,
+):
+    """Safety net: Wait and query Graph again in case replication lag exceeded initial retries."""
+    try:
+        await asyncio.sleep(delay)
+        if chat_id and message_id:
+            refreshed = await get_chat_message(chat_id, message_id)
+            normalized = normalize_message(refreshed, chat_id=chat_id)
+        elif team_id and channel_id and reply_message_id:
+            refreshed = await get_channel_message_reply(team_id, channel_id, parent_message_id, reply_message_id)
+            normalized = normalize_message(refreshed, team_id=team_id, channel_id=channel_id)
+        elif team_id and channel_id and message_id:
+            refreshed = await get_channel_message(team_id, channel_id, message_id)
+            normalized = normalize_message(refreshed, team_id=team_id, channel_id=channel_id)
+        else:
+            return
+
+        reactions = normalized.get("reactions") or []
+        if not reactions:
+            return
+
+        logger.info(
+            f"🔄 Deferred reaction check discovered {len(reactions)} reaction(s) on message {message_id}",
+            extra={"event": "DEFERRED_REACTION_DISCOVERED", "messageId": message_id, "reactionsCount": len(reactions)},
+        )
+
+        sender_id = normalized["sender"].get("userId")
+        sender_name = normalized["sender"].get("displayName")
+        sender_role = identify_sender_role(sender_id, sender_name)
+
+        result = store_message(normalized)
+        from src.services.sender_service import (
+            is_pm_approval,
+            is_pm_confirmation_approval,
+            is_pm_disapproval,
+        )
+        if is_pm_approval(reactions) or is_pm_confirmation_approval(reactions) or is_pm_disapproval(reactions):
+            from src.database import get_db
+            db = get_db()
+            row = db.execute(
+                "SELECT confirmation_status, jira_issue_key FROM messages WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            if row and not row["jira_issue_key"]:
+                if not row["confirmation_status"] or row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION":
+                    await check_and_auto_create_jira_ticket(normalized, sender_role)
+
+        if result.get("updated") and result.get("reactions_changed"):
+            from src.services.broadcaster import broadcast_message
+            await broadcast_message({
+                "type": "MESSAGE_UPDATED",
+                "message": normalized,
+                "senderRole": sender_role,
+                "stored": False,
+                "duplicate": True,
+                "updated": True,
+            })
+    except Exception as err:
+        logger.debug(f"Deferred reaction check notice: {err}")
+
+
 async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     """Process a single Graph change notification for a Teams message (chat or channel)."""
     resource = notification.get("resource")
@@ -400,6 +468,27 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
 
         try:
             graph_message = await get_chat_message(chat_id, message_id)
+            # Graph replication lag: if update notification arrived but reactions array is empty,
+            # retry with backoff and schedule a deferred safety-net check
+            change_type = (notification.get("changeType") or "").lower()
+            if change_type != "created" and not graph_message.get("reactions"):
+                for delay in (1.5, 2.5, 3.5):
+                    await asyncio.sleep(delay)
+                    try:
+                        refreshed = await get_chat_message(chat_id, message_id)
+                        if refreshed.get("reactions"):
+                            graph_message = refreshed
+                            break
+                    except Exception:
+                        pass
+                if not graph_message.get("reactions"):
+                    asyncio.create_task(
+                        _schedule_deferred_reaction_check(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            delay=6.0,
+                        )
+                    )
         except Exception as err:
             logger.error(
                 "Failed to retrieve Teams chat message",
@@ -447,6 +536,33 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
                 )
             else:
                 graph_message = await get_channel_message(team_id, channel_id, message_id)
+
+            change_type = (notification.get("changeType") or "").lower()
+            if change_type != "created" and not graph_message.get("reactions"):
+                for delay in (1.5, 2.5, 3.5):
+                    await asyncio.sleep(delay)
+                    try:
+                        refreshed = (
+                            await get_channel_message_reply(team_id, channel_id, parent_message_id, reply_message_id)
+                            if reply_message_id
+                            else await get_channel_message(team_id, channel_id, message_id)
+                        )
+                        if refreshed.get("reactions"):
+                            graph_message = refreshed
+                            break
+                    except Exception:
+                        pass
+                if not graph_message.get("reactions"):
+                    asyncio.create_task(
+                        _schedule_deferred_reaction_check(
+                            team_id=team_id,
+                            channel_id=channel_id,
+                            parent_message_id=parent_message_id,
+                            reply_message_id=reply_message_id,
+                            message_id=message_id,
+                            delay=6.0,
+                        )
+                    )
         except Exception as err:
             logger.error(
                 "Failed to retrieve Teams channel message",
@@ -555,10 +671,37 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     # Persist in SQLite
     result = store_message(normalized)
 
-    # Closed-loop: Trigger PM triage & approval check when reactions changed or on update events
+    # Closed-loop: Trigger PM triage & approval check
     change_type = (notification.get("changeType") or "").lower()
     triage_res = None
+
+    reactions = normalized.get("reactions") or []
+    from src.services.sender_service import (
+        is_pm_approval,
+        is_pm_confirmation_approval,
+        is_pm_disapproval,
+    )
+    has_approval_rx = (
+        is_pm_approval(reactions)
+        or is_pm_confirmation_approval(reactions)
+        or is_pm_disapproval(reactions)
+    )
+
+    should_triage = False
     if change_type != "created" and result.get("reactions_changed", False):
+        should_triage = True
+    elif has_approval_rx:
+        from src.database import get_db
+        db = get_db()
+        row = db.execute(
+            "SELECT confirmation_status, jira_issue_key FROM messages WHERE message_id = ?",
+            (normalized.get("messageId"),),
+        ).fetchone()
+        if row and not row["jira_issue_key"]:
+            if not row["confirmation_status"] or row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION":
+                should_triage = True
+
+    if should_triage:
         triage_res = await check_and_auto_create_jira_ticket(normalized, sender_role)
         if triage_res:
             if triage_res.get("key"):
@@ -607,6 +750,14 @@ async def execute_jira_ticket_creation(
         row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
         if not row:
             return {"success": False, "error": f"Message {message_id} not found in database"}
+
+        if issue_idx is None and row["jira_issue_key"]:
+            return {
+                "success": True,
+                "key": row["jira_issue_key"],
+                "url": row["jira_issue_url"] or "#",
+                "already_existed": True,
+            }
 
         ai_ticket = None
         if row["ai_ticket"]:
@@ -803,7 +954,7 @@ async def execute_jira_ticket_creation(
 
             return {
                 "success": True,
-                "key": created_keys[0] if len(created_keys) == 1 else primary_key,
+                "key": primary_key,
                 "url": created_urls[0] if created_urls else primary_url,
                 "tickets": created_results,
             }
@@ -1270,7 +1421,11 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
         # AI Ticket Extraction for issue/bug requests (only if not already cached)
         # During background backfill sync, use fast rule-based extraction so we never exceed Gemini 15 RPM limits
         msg_text = (normalized.get("message") or {}).get("text", "")
-        if not existing_ai and any(tag in msg_text.lower() for tag in ["#issue", "#bug", "#task", "#ticket", "bug", "issue"]):
+        has_issue_kw = any(tag in msg_text.lower() for tag in [
+            "#issue", "#bug", "#task", "#ticket", "bug", "issue", "error", "fail", "failed",
+            "broken", "crash", "not working", "404", "500", "down", "urgent", "fix", "exception", "timeout"
+        ])
+        if not existing_ai and (has_issue_kw or sender_role == "CLIENT"):
             try:
                 from src.services.ai_service import _rule_based_fallback
                 ai_ticket = _rule_based_fallback(
@@ -1285,8 +1440,33 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
 
         result = store_message(normalized)
 
-        # Do NOT auto-create Jira tickets during background sync.
-        # Auto-creation is strictly reserved for live incoming PM reaction events.
+        # Closed-loop: If sync retrieves an untriaged message that already has a PM ticket
+        # approval reaction (🎟️ / 🎫), trigger Step 1 triage so the pending confirmation card
+        # Closed-loop: If sync retrieves an untriaged or pending message that has a PM
+        # reaction (🎟️ / 🎫 / 👍 / ❌), trigger triage or confirmation so actions are never missed during sync.
+        rx_list = normalized.get("reactions") or []
+        from src.services.sender_service import (
+            is_pm_approval,
+            is_pm_confirmation_approval,
+            is_pm_disapproval,
+        )
+        if is_pm_approval(rx_list) or is_pm_confirmation_approval(rx_list) or is_pm_disapproval(rx_list):
+            from src.database import get_db
+            db = get_db()
+            m_row = db.execute(
+                "SELECT confirmation_status, jira_issue_key FROM messages WHERE message_id = ?",
+                (msg_id,),
+            ).fetchone()
+            if m_row and not m_row["jira_issue_key"]:
+                if not m_row["confirmation_status"] or m_row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION":
+                    logger.info(
+                        f"Sync detected untriaged/pending message {msg_id} with PM reaction; triggering triage/action",
+                        extra={"event": "SYNC_TRIAGE_TRIGGER", "messageId": msg_id},
+                    )
+                    try:
+                        await check_and_auto_create_jira_ticket(normalized, sender_role)
+                    except Exception as t_err:
+                        logger.debug(f"Sync triage trigger error: {t_err}")
 
         if result.get("stored"):
             new_count += 1

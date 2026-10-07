@@ -41,17 +41,17 @@ def test_reaction_identification():
 
 def test_pm_reaction_authorization():
     # PM approval with ticket emoji
-    pm_reactions = [{"userId": "pm-1", "displayName": "Santosh Yadav", "reactionType": "🎟️"}]
+    pm_reactions = [{"userId": "pm-1", "displayName": "Hemil Ghori", "reactionType": "🎟️"}]
     assert is_pm_approval(pm_reactions) is True
     assert is_pm_disapproval(pm_reactions) is False
 
     # PM disapproval with cross emoji
-    pm_disapprove = [{"userId": "pm-1", "displayName": "Santosh Yadav", "reactionType": "❌"}]
+    pm_disapprove = [{"userId": "pm-1", "displayName": "Hemil Ghori", "reactionType": "❌"}]
     assert is_pm_disapproval(pm_disapprove) is True
     assert is_pm_approval(pm_disapprove) is False
 
     # PM Step 2 approval with default quick reaction 👍
-    pm_thumbs_up = [{"userId": "pm-1", "displayName": "Santosh Yadav", "reactionType": "like"}]
+    pm_thumbs_up = [{"userId": "pm-1", "displayName": "Hemil Ghori", "reactionType": "like"}]
     assert is_pm_confirmation_approval(pm_thumbs_up) is True
     assert is_pm_approval(pm_thumbs_up) is False  # Step 1 strictly requires ticket emoji
 
@@ -72,7 +72,7 @@ async def test_two_step_triage_flow_approval(tmp_path):
         "chatId": "chat-123",
         "sender": {"userId": "client-1", "displayName": "Dhruv dobariya"},
         "message": {"text": "Navbar search bar produces 404 error when clicking enter", "createdAt": "2026-10-05T12:00:00Z"},
-        "reactions": [{"userId": "pm-1", "displayName": "Santosh Yadav", "reactionType": "🎟️"}],
+        "reactions": [{"userId": "pm-1", "displayName": "Hemil Ghori", "reactionType": "🎟️"}],
     }
     store_message(normalized_msg)
 
@@ -145,7 +145,7 @@ async def test_two_step_triage_flow_disapproval(tmp_path):
         "chatId": "chat-123",
         "sender": {"userId": "client-1", "displayName": "Dhruv dobariya"},
         "message": {"text": "Please check if database is running slow", "createdAt": "2026-10-05T12:00:00Z"},
-        "reactions": [{"userId": "pm-1", "displayName": "Santosh Yadav", "reactionType": "🎟️"}],
+        "reactions": [{"userId": "pm-1", "displayName": "Hemil Ghori", "reactionType": "🎟️"}],
     }
     store_message(normalized_msg)
 
@@ -167,7 +167,7 @@ async def test_two_step_triage_flow_disapproval(tmp_path):
         await check_and_auto_create_jira_ticket(normalized_msg, "CLIENT")
 
     # Step 2: PM declines via ❌ reaction
-    normalized_msg["reactions"] = [{"userId": "pm-1", "displayName": "Santosh Yadav", "reactionType": "❌"}]
+    normalized_msg["reactions"] = [{"userId": "pm-1", "displayName": "Hemil Ghori", "reactionType": "❌"}]
 
     with patch("src.config.JiraConfig.is_configured", new_callable=PropertyMock, return_value=True), \
          patch("src.services.jira_service.create_jira_issue", AsyncMock()) as mock_create_jira, \

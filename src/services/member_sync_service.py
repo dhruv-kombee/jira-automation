@@ -317,12 +317,17 @@ def get_member_by_id_or_name(user_id: Optional[str] = None, display_name: Option
         for m in members:
             if (m.get("display_name") or "").strip().lower() == name_clean:
                 return m
-        # First name / partial match
+        # First name / partial match / fuzzy match
+        import difflib
         first_clean = name_clean.split()[0] if name_clean else ""
         for m in members:
             m_name = (m.get("display_name") or "").strip().lower()
             m_first = m_name.split()[0] if m_name else ""
             if first_clean and m_first and (first_clean == m_first or first_clean in m_name or name_clean in m_name):
+                return m
+            if first_clean and m_first and difflib.SequenceMatcher(None, first_clean, m_first).ratio() >= 0.7:
+                return m
+            if name_clean and m_name and difflib.SequenceMatcher(None, name_clean, m_name).ratio() >= 0.7:
                 return m
 
     return None
