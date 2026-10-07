@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, HTMLResponse
 
 from src.config import config
@@ -581,6 +581,7 @@ def render_assignee_dropdown_html(
     suggested_assignee: str,
     members: List[Dict[str, str]],
     approver: str,
+    issue_idx: Optional[int] = None,
 ) -> HTMLResponse:
     """Render a dedicated, responsive Assignee Selection & Approval modal dialog."""
     options_html = []
@@ -601,12 +602,16 @@ def render_assignee_dropdown_html(
 
     options_joined = "\n          ".join(options_html)
 
+    action_url = f"/api/jira/confirm-issue/{message_id}/{issue_idx}" if issue_idx is not None else f"/api/jira/confirm-approval/{message_id}"
+    reject_url = f"/api/jira/decline-issue/{message_id}/{issue_idx}" if issue_idx is not None else f"/api/jira/decline-approval/{message_id}"
+    issue_label = f"Issue #{issue_idx + 1}" if issue_idx is not None else "Jira Ticket"
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Approve Jira Ticket — Select Assignee</title>
+  <title>Approve {issue_label} — Select Assignee</title>
   <style>
     * {{ box-sizing: border-box; }}
     body {{
@@ -738,8 +743,8 @@ def render_assignee_dropdown_html(
 </head>
 <body>
   <div class="card">
-    <div class="badge">📋 Issue Approval Required</div>
-    <h1>Confirm Jira Ticket Creation</h1>
+    <div class="badge">📋 {issue_label} Approval Required</div>
+    <h1>Confirm {issue_label} Creation</h1>
     <p class="subtext">Select the developer who should be assigned to this ticket before creating it in Jira.</p>
 
     <div class="facts-box">
@@ -757,7 +762,7 @@ def render_assignee_dropdown_html(
       </div>
     </div>
 
-    <form method="POST" action="/api/jira/confirm-approval/{message_id}">
+    <form method="POST" action="{action_url}">
       <div class="form-group">
         <label for="assigneeSelect">👤 Assignee Dropdown:</label>
         <select name="assignee" id="assigneeSelect">
@@ -766,12 +771,12 @@ def render_assignee_dropdown_html(
       </div>
 
       <button type="submit" class="btn-approve">
-        🚀 Confirm & Create Jira Ticket
+        🚀 Confirm & Create {issue_label}
       </button>
     </form>
 
     <div style="text-align: center;">
-      <a href="/api/jira/decline-approval/{message_id}" class="btn-reject">❌ Reject Ticket Creation</a>
+      <a href="{reject_url}" class="btn-reject">❌ Reject {issue_label} Creation</a>
     </div>
 
     <div class="footer-note">Microsoft Teams &bull; Jira Cloud Automation &bull; Closed-Loop Sync</div>
@@ -781,13 +786,17 @@ def render_assignee_dropdown_html(
     return HTMLResponse(content=html_content, status_code=200)
 
 
-@router.get("/api/jira/confirm-approval/{message_id}", response_class=HTMLResponse)
+@router.api_route("/api/jira/confirm-approval/{message_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def confirm_approval_get(
     message_id: str,
+    request: Request,
     assignee: Optional[str] = None,
     auto: Optional[str] = None,
 ):
     """PM Approval endpoint with interactive Assignee Dropdown and 1-Click execution."""
+    if request.method == "HEAD":
+        return Response(status_code=200)
+
     from src.services.message_service import execute_jira_ticket_creation
     from src.services.member_sync_service import get_active_pm_from_excel, get_all_members_from_excel
     from src.database import get_db
@@ -819,6 +828,7 @@ async def confirm_approval_get(
             heading="Approved by PM",
             message=f"Ticket {key} has been created and assigned to {target_dev}. Confirmation posted to Teams.",
             details={"Jira Ticket": key, "Status": "Created & Active", "Assignee": target_dev, "Approved By": approver},
+            actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
         )
 
     # Otherwise: Render interactive Assignee Dropdown modal page
@@ -839,6 +849,7 @@ async def confirm_approval_get(
             heading="Active in Jira",
             message=f"Ticket {row['jira_issue_key']} has already been created for this issue.",
             details={"Jira Ticket": row["jira_issue_key"], "Status": "Active"},
+            actions=[{"label": f"Open {row['jira_issue_key']} in Jira ↗", "url": row["jira_issue_url"] or "#"}],
         )
 
     ai_ticket = {}
@@ -931,6 +942,7 @@ async def confirm_approval_post(
 
     if "text/html" in request.headers.get("accept", "") or "form" in content_type:
         key = res.get("key", "Created")
+        url = res.get("url", "#")
         target_dev = assignee or "Assigned Developer"
         return render_confirmation_html(
             title="Jira Ticket Created Successfully",
@@ -938,13 +950,17 @@ async def confirm_approval_post(
             heading="Approved by PM",
             message=f"Ticket {key} has been created and assigned to {target_dev}. Confirmation posted to Teams.",
             details={"Jira Ticket": key, "Status": "Created & Active", "Assignee": target_dev, "Approved By": approver},
+            actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
         )
     return res
 
 
-@router.get("/api/jira/decline-approval/{message_id}", response_class=HTMLResponse)
-async def decline_approval_get(message_id: str):
+@router.api_route("/api/jira/decline-approval/{message_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def decline_approval_get(message_id: str, request: Request):
     """1-Click PM Decline/Reject endpoint for Teams card action links (GET)."""
+    if request.method == "HEAD":
+        return Response(status_code=200)
+
     from src.services.message_service import execute_jira_ticket_decline
     from src.services.member_sync_service import get_active_pm_from_excel
     pm_info = get_active_pm_from_excel()
@@ -981,22 +997,31 @@ async def decline_approval_post(message_id: str):
     return res
 
 
-@router.get("/api/jira/confirm-issue/{message_id}", response_class=HTMLResponse)
-async def confirm_issue_all_get(message_id: str):
-    """1-Click PM Approval for all issues / main issue in a message (GET)."""
-    return await confirm_approval_get(message_id)
+@router.api_route("/api/jira/confirm-issue/{message_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def confirm_issue_all_get(
+    message_id: str,
+    request: Request,
+    assignee: Optional[str] = None,
+    auto: Optional[str] = None,
+):
+    """1-Click PM Approval for all issues in a message (GET)."""
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    return await confirm_approval_get(message_id, request, assignee=assignee, auto=auto)
 
 
 @router.post("/api/jira/confirm-issue/{message_id}")
-async def confirm_issue_all_post(message_id: str):
-    """Programmatic PM Approval for all issues / main issue in a message (POST)."""
-    return await confirm_approval_post(message_id)
+async def confirm_issue_all_post(message_id: str, request: Request):
+    """Programmatic PM Approval for all issues in a message (POST)."""
+    return await confirm_approval_post(message_id, request)
 
 
-@router.get("/api/jira/decline-issue/{message_id}", response_class=HTMLResponse)
-async def decline_issue_all_get(message_id: str):
+@router.api_route("/api/jira/decline-issue/{message_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def decline_issue_all_get(message_id: str, request: Request):
     """1-Click PM Decline for all issues in a message (GET)."""
-    return await decline_approval_get(message_id)
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    return await decline_approval_get(message_id, request)
 
 
 @router.post("/api/jira/decline-issue/{message_id}")
@@ -1005,58 +1030,210 @@ async def decline_issue_all_post(message_id: str):
     return await decline_approval_post(message_id)
 
 
-@router.get("/api/jira/confirm-issue/{message_id}/{issue_idx}", response_class=HTMLResponse)
+@router.api_route("/api/jira/confirm-issue/{message_id}/{issue_idx}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def confirm_issue_get(
     message_id: str,
     issue_idx: int,
+    request: Request,
     assignee: Optional[str] = None,
+    auto: Optional[str] = None,
 ):
-    """1-Click PM Approval for a specific single issue in a multi-issue triage card (GET)."""
+    """1-Click PM Approval or Assignee Dropdown for a specific single issue (GET)."""
+    if request.method == "HEAD":
+        return Response(status_code=200)
+
     from src.services.message_service import execute_jira_ticket_creation
-    from src.services.member_sync_service import get_active_pm_from_excel
+    from src.services.member_sync_service import get_active_pm_from_excel, get_all_members_from_excel
+    from src.database import get_db
+    import json
+    import re
+
     pm_info = get_active_pm_from_excel()
     approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
-    res = await execute_jira_ticket_creation(
-        message_id, approver_name=approver, issue_idx=issue_idx, assignee_override=assignee
-    )
-    if not res.get("success"):
-        return render_confirmation_html(
-            title="Issue Creation Failed",
-            status_type="error",
-            heading="Action Required",
-            message=res.get("error", "Failed to create Jira issue"),
+    # If auto=1, execute ticket creation immediately with chosen or suggested assignee
+    if auto in ("1", "true", "yes"):
+        res = await execute_jira_ticket_creation(
+            message_id, approver_name=approver, issue_idx=issue_idx, assignee_override=assignee
         )
-    key = res.get("key", "Created")
-    url = res.get("url", "#")
-    already = res.get("already_existed", False)
-    return render_confirmation_html(
-        title=f"Issue #{issue_idx + 1} {'Already Created' if already else 'Created'} in Jira",
-        status_type="success",
-        heading="Ticket Active in Jira" if already else f"Issue #{issue_idx + 1} Approved & Created",
-        message=f"Ticket {key} {'is already active in Jira' if already else f'was successfully created in Jira for Issue #{issue_idx + 1}'}.",
-        details={"Jira Ticket": key, "Status": "Active in Jira", "Approved By": approver},
-        actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
+        if not res.get("success"):
+            return render_confirmation_html(
+                title="Issue Creation Failed",
+                status_type="error",
+                heading="Action Required",
+                message=res.get("error", f"Failed to create Issue #{issue_idx + 1}"),
+            )
+        key = res.get("key", "Created")
+        url = res.get("url", "#")
+        already = res.get("already_existed", False)
+        target_dev = assignee or "Assigned Developer"
+        return render_confirmation_html(
+            title=f"Issue #{issue_idx + 1} {'Already Active' if already else 'Created'} in Jira",
+            status_type="success",
+            heading="Ticket Active in Jira" if already else f"Issue #{issue_idx + 1} Approved & Created",
+            message=f"Ticket {key} {'is already active in Jira' if already else f'was successfully created in Jira for Issue #{issue_idx + 1} and assigned to {target_dev}'}.",
+            details={"Jira Ticket": key, "Status": "Active in Jira", "Assignee": target_dev, "Approved By": approver},
+            actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
+        )
+
+    # Otherwise: Render interactive Assignee Dropdown modal page for this specific issue
+    db = get_db()
+    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+    if not row:
+        return render_confirmation_html(
+            title="Message Not Found",
+            status_type="error",
+            heading="Error",
+            message=f"Message ID '{message_id}' was not found in the database.",
+        )
+
+    ai_ticket = {}
+    if row["ai_ticket"]:
+        try:
+            ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
+        except Exception:
+            ai_ticket = {}
+
+    issues = ai_ticket.get("issues", [])
+    if not issues or not isinstance(issues, list):
+        issues = [ai_ticket]
+
+    if not (0 <= issue_idx < len(issues)):
+        return render_confirmation_html(
+            title="Invalid Issue",
+            status_type="error",
+            heading="Error",
+            message=f"Issue #{issue_idx + 1} was not found in this message.",
+        )
+
+    target_issue = issues[issue_idx]
+    if target_issue.get("status") == "APPROVED" or target_issue.get("jira_key"):
+        active_key = target_issue.get("jira_key") or row["jira_issue_key"]
+        return render_confirmation_html(
+            title=f"Issue #{issue_idx + 1} Already Created",
+            status_type="success",
+            heading=f"Issue #{issue_idx + 1} Active in Jira",
+            message=f"Ticket {active_key} has already been created for Issue #{issue_idx + 1}.",
+            details={"Jira Ticket": active_key, "Status": "Active"},
+            actions=[{"label": f"Open {active_key} in Jira ↗", "url": target_issue.get("jira_url") or row["jira_issue_url"] or "#"}],
+        )
+
+    if target_issue.get("status") == "DECLINED":
+        return render_confirmation_html(
+            title=f"Issue #{issue_idx + 1} Declined",
+            status_type="declined",
+            heading=f"Issue #{issue_idx + 1} Declined",
+            message=f"Issue #{issue_idx + 1} was previously declined by PM and cannot be created.",
+            details={"Status": "Declined", "Declined By": target_issue.get("declined_by", "PM")},
+        )
+
+    summary = target_issue.get("summary") or f"Issue #{issue_idx + 1}"
+    project_key = config.jira.project_key or "SCRUM"
+    suggested_assignee = assignee or target_issue.get("suggested_assignee") or "Santosh Yadav"
+
+    try:
+        raw_members = get_all_members_from_excel()
+    except Exception:
+        raw_members = []
+
+    assignable_list = []
+    seen = set()
+    for m in raw_members:
+        r = (m.get("role") or "").upper()
+        if r != "CLIENT":
+            c_name = re.sub(r"\s+", " ", m.get("display_name", "")).strip()
+            if c_name and c_name not in seen:
+                seen.add(c_name)
+                assignable_list.append({
+                    "name": c_name,
+                    "specialty": m.get("specialty") or r,
+                    "role": r,
+                })
+
+    if not assignable_list:
+        assignable_list = [
+            {"name": "Santosh Yadav", "specialty": "Backend & API Lead", "role": "DEVELOPER"},
+            {"name": "Musaib Khan", "specialty": "Frontend & UI Lead", "role": "DEVELOPER"},
+            {"name": "Nishi Sharma", "specialty": "AI Developer", "role": "DEVELOPER"},
+            {"name": "Hemil Ghori", "specialty": "Project Manager / Scrum Master", "role": "PM"},
+        ]
+
+    return render_assignee_dropdown_html(
+        message_id=message_id,
+        summary=summary,
+        project_key=project_key,
+        suggested_assignee=suggested_assignee,
+        members=assignable_list,
+        approver=approver,
+        issue_idx=issue_idx,
     )
 
 
 @router.post("/api/jira/confirm-issue/{message_id}/{issue_idx}")
-async def confirm_issue_post(message_id: str, issue_idx: int):
+async def confirm_issue_post(
+    message_id: str,
+    issue_idx: int,
+    request: Request,
+):
     """Programmatic / Dashboard PM Approval for a specific single issue (POST)."""
     from src.services.message_service import execute_jira_ticket_creation
     from src.services.member_sync_service import get_active_pm_from_excel
     pm_info = get_active_pm_from_excel()
     approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
-    res = await execute_jira_ticket_creation(message_id, approver_name=approver, issue_idx=issue_idx)
+    assignee = None
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            assignee = body.get("assignee")
+        except Exception:
+            pass
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            assignee = form.get("assignee")
+        except Exception:
+            pass
+
+    res = await execute_jira_ticket_creation(
+        message_id, approver_name=approver, issue_idx=issue_idx, assignee_override=assignee
+    )
     if not res.get("success"):
+        if "text/html" in request.headers.get("accept", "") or "form" in content_type:
+            return render_confirmation_html(
+                title="Action Failed",
+                status_type="error",
+                heading="Error",
+                message=res.get("error", f"Failed to create Issue #{issue_idx + 1}"),
+            )
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to create Jira issue"))
+
+    if "text/html" in request.headers.get("accept", "") or "form" in content_type:
+        key = res.get("key", "Created")
+        url = res.get("url", "#")
+        target_dev = assignee or "Assigned Developer"
+        return render_confirmation_html(
+            title=f"Issue #{issue_idx + 1} Created Successfully",
+            status_type="success",
+            heading=f"Issue #{issue_idx + 1} Approved by PM",
+            message=f"Ticket {key} has been created in Jira and assigned to {target_dev}. Confirmation posted to Teams.",
+            details={"Jira Ticket": key, "Status": "Created & Active", "Assignee": target_dev, "Approved By": approver},
+            actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
+        )
     return res
 
 
-@router.get("/api/jira/decline-issue/{message_id}/{issue_idx}", response_class=HTMLResponse)
-async def decline_issue_get(message_id: str, issue_idx: int):
+@router.api_route("/api/jira/decline-issue/{message_id}/{issue_idx}", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def decline_issue_get(
+    message_id: str,
+    issue_idx: int,
+    request: Request,
+):
     """1-Click PM Decline for a specific single issue in a multi-issue triage card (GET)."""
+    if request.method == "HEAD":
+        return Response(status_code=200)
+
     from src.services.message_service import execute_jira_ticket_decline
     from src.services.member_sync_service import get_active_pm_from_excel
     pm_info = get_active_pm_from_excel()
@@ -1067,13 +1244,13 @@ async def decline_issue_get(message_id: str, issue_idx: int):
         return render_confirmation_html(
             title="Action Failed",
             status_type="error",
-            heading="Error",
+            heading="Cannot Reject",
             message=res.get("error", "Failed to reject issue"),
         )
     return render_confirmation_html(
         title=f"Issue #{issue_idx + 1} Rejected",
         status_type="declined",
-        heading="Issue Rejected by PM",
+        heading=f"Issue #{issue_idx + 1} Rejected by PM",
         message=f"Issue #{issue_idx + 1} was rejected. No Jira ticket was created for this issue. You can close this window now.",
         details={"Status": f"Issue #{issue_idx + 1} Rejected", "Rejected By": approver},
     )

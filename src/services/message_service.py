@@ -1,6 +1,8 @@
+import asyncio
 import html
 import json
 import re
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from src.config import config
 from src.graph_client import (
@@ -18,6 +20,7 @@ from src.services.sender_service import identify_sender_role
 
 # In-memory cache for downloaded attachments per message_id (for Jira upload upon PM approval)
 _message_attachment_cache: Dict[str, List[Dict[str, Any]]] = {}
+_message_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def strip_html(html_str: str) -> str:
@@ -590,176 +593,343 @@ async def execute_jira_ticket_creation(
     issue_idx: Optional[int] = None,
     assignee_override: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute Jira issue creation after PM final confirmation.
+    """Execute Jira issue creation after PM final confirmation with strict concurrency locking."""
+    async with _message_locks[message_id]:
+        if not approver_name:
+            from src.services.member_sync_service import get_active_pm_from_excel
+            pm_info = get_active_pm_from_excel()
+            approver_name = f"PM {pm_info.get('name', 'Project Manager')}"
+        from src.database import get_db
+        from src.services.jira_service import create_jira_issue, upload_jira_attachment
+        from src.services.teams_notifier import send_ticket_created_notification, get_current_timestamp_str
 
-    Creates Jira ticket(s), uploads attachments, sends created Adaptive Card to Teams,
-    and updates SQLite database.
-    """
-    if not approver_name:
-        from src.services.member_sync_service import get_active_pm_from_excel
-        pm_info = get_active_pm_from_excel()
-        approver_name = f"PM {pm_info.get('name', 'Project Manager')}"
-    from src.database import get_db
-    from src.services.jira_service import create_jira_issue, upload_jira_attachment
-    from src.services.teams_notifier import send_ticket_created_notification
+        db = get_db()
+        row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+        if not row:
+            return {"success": False, "error": f"Message {message_id} not found in database"}
 
-    db = get_db()
-    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
-    if not row:
-        return {"success": False, "error": f"Message {message_id} not found in database"}
+        ai_ticket = None
+        if row["ai_ticket"]:
+            try:
+                ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
+            except Exception:
+                ai_ticket = None
 
-    ai_ticket = None
-    if row["ai_ticket"]:
-        try:
-            ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
-        except Exception:
-            ai_ticket = None
-
-    if not ai_ticket or not ai_ticket.get("summary"):
-        from src.services.ai_service import extract_jira_ticket
-        sender_role = identify_sender_role(row["sender_user_id"], row["sender_display_name"])
-        cached_atts = _message_attachment_cache.get(message_id) or []
-        ai_ticket = await extract_jira_ticket(
-            row["message_text"] or "",
-            sender_name=row["sender_display_name"],
-            sender_role=sender_role,
-            attachments=cached_atts,
-        )
-
-    # Determine issues to create
-    issues = ai_ticket.get("issues")
-    if not issues or not isinstance(issues, list):
-        issues = [{
-            "summary": ai_ticket.get("summary", "Teams Issue Report"),
-            "description": ai_ticket.get("description", ""),
-            "issue_type": ai_ticket.get("issue_type", config.jira.default_issue_type),
-            "priority": ai_ticket.get("priority", "Medium"),
-            "affected_module": ai_ticket.get("affected_module", "General"),
-            "suggested_assignee": ai_ticket.get("suggested_assignee") or "Unassigned",
-            "observed_behavior": ai_ticket.get("observed_behavior") or ai_ticket.get("evidence"),
-            "evidence": ai_ticket.get("evidence") or [],
-        }]
-
-    if issue_idx is not None:
-        if not (0 <= issue_idx < len(issues)):
-            return {"success": False, "error": f"Issue index {issue_idx} out of range"}
-        target_issue = issues[issue_idx]
-        if target_issue.get("jira_key"):
-            return {
-                "success": True,
-                "key": target_issue["jira_key"],
-                "url": target_issue.get("jira_url", row["jira_issue_url"] or "#"),
-                "already_existed": True,
-            }
-        issues_to_process = [(issue_idx, target_issue)]
-    else:
-        pending_issues = [(idx, item) for idx, item in enumerate(issues) if not item.get("jira_key")]
-        if not pending_issues and row["jira_issue_key"]:
-            return {
-                "success": True,
-                "key": row["jira_issue_key"],
-                "url": row["jira_issue_url"],
-                "already_existed": True,
-            }
-        issues_to_process = pending_issues if pending_issues else list(enumerate(issues))
-
-    reporter = row["sender_display_name"] or "Client"
-    created_keys = []
-    created_urls = []
-    created_results = []
-
-    for idx, item in issues_to_process:
-        item_summary = item.get("summary") or ai_ticket.get("summary", "Teams Issue Report")
-        item_desc = item.get("description") or ai_ticket.get("description", "")
-        item_type = item.get("issue_type") or ai_ticket.get("issue_type", config.jira.default_issue_type)
-        item_priority = item.get("priority") or ai_ticket.get("priority", "Medium")
-        item_assignee = (
-            assignee_override
-            or item.get("suggested_assignee")
-            or ai_ticket.get("suggested_assignee")
-            or "Unassigned"
-        )
-        item_module = item.get("affected_module") or ai_ticket.get("affected_module")
-        item_evidence = item.get("evidence") or ai_ticket.get("evidence")
-
-        ticket_data = dict(item)
-        ticket_data.setdefault("reporter_name", reporter)
-        ticket_data.setdefault("reporter_role", identify_sender_role(row["sender_user_id"], row["sender_display_name"]))
-        ticket_data.setdefault("raw_message", row["message_text"] or "")
-
-        res = await create_jira_issue(
-            summary=item_summary,
-            description=item_desc,
-            issue_type=item_type,
-            priority=item_priority,
-            labels=ticket_data.get("labels", ["teams-automation", "pm-approved"]),
-            message_id=message_id,
-            assignee_name=item_assignee,
-            ticket_data=ticket_data,
-        )
-
-        if res.get("success"):
-            k = res.get("key")
-            u = res.get("url")
-            item["jira_key"] = k
-            item["jira_url"] = u
-            created_keys.append(k)
-            created_urls.append(u)
-            created_results.append(res)
-
-            logger.info(
-                f"🎉 Created Jira ticket {k} ({item_summary}) upon PM confirmation",
-                extra={"event": "PM_CONFIRMATION_JIRA_CREATED", "issueKey": k, "messageId": message_id},
+        if not ai_ticket or not ai_ticket.get("summary"):
+            from src.services.ai_service import extract_jira_ticket
+            sender_role = identify_sender_role(row["sender_user_id"], row["sender_display_name"])
+            cached_atts = _message_attachment_cache.get(message_id) or []
+            ai_ticket = await extract_jira_ticket(
+                row["message_text"] or "",
+                sender_name=row["sender_display_name"],
+                sender_role=sender_role,
+                attachments=cached_atts,
             )
 
-            # Upload cached attachments
-            if message_id in _message_attachment_cache:
-                for att in _message_attachment_cache[message_id]:
-                    try:
-                        await upload_jira_attachment(
-                            issue_key=k,
-                            filename=att.get("name", "attachment"),
-                            file_bytes=att.get("bytes", b""),
-                            content_type=att.get("content_type", "application/octet-stream"),
-                        )
-                    except Exception as up_err:
-                        logger.warning(f"Could not upload attachment to Jira {k}: {up_err}")
+        # Determine issues to create
+        issues = ai_ticket.get("issues")
+        if not issues or not isinstance(issues, list):
+            issues = [{
+                "summary": ai_ticket.get("summary", "Teams Issue Report"),
+                "description": ai_ticket.get("description", ""),
+                "issue_type": ai_ticket.get("issue_type", config.jira.default_issue_type),
+                "priority": ai_ticket.get("priority", "Medium"),
+                "affected_module": ai_ticket.get("affected_module", "General"),
+                "suggested_assignee": ai_ticket.get("suggested_assignee") or "Unassigned",
+                "observed_behavior": ai_ticket.get("observed_behavior") or ai_ticket.get("evidence"),
+                "evidence": ai_ticket.get("evidence") or [],
+            }]
 
-            # Send Jira ticket created card to Teams
-            await send_ticket_created_notification(
-                ticket_key=k,
-                ticket_url=u,
-                summary=res.get("summary") or item_summary,
+        # Normalize issue state
+        for iss in issues:
+            if "status" not in iss:
+                iss["status"] = "APPROVED" if iss.get("jira_key") else "PENDING"
+
+        if issue_idx is not None:
+            if not (0 <= issue_idx < len(issues)):
+                return {"success": False, "error": f"Issue index {issue_idx} out of range"}
+            target_issue = issues[issue_idx]
+            if target_issue.get("status") == "APPROVED" or target_issue.get("jira_key"):
+                return {
+                    "success": True,
+                    "key": target_issue.get("jira_key", row["jira_issue_key"]),
+                    "url": target_issue.get("jira_url", row["jira_issue_url"] or "#"),
+                    "already_existed": True,
+                }
+            if target_issue.get("status") == "DECLINED":
+                return {
+                    "success": False,
+                    "error": f"Cannot approve Issue #{issue_idx + 1}: This issue was already declined by PM.",
+                }
+            issues_to_process = [(issue_idx, target_issue)]
+        else:
+            # "Approve All": Only process PENDING issues; skip already approved or declined issues
+            pending_issues = [
+                (idx, item) for idx, item in enumerate(issues)
+                if item.get("status", "PENDING") == "PENDING" and not item.get("jira_key")
+            ]
+            if not pending_issues:
+                if row["jira_issue_key"]:
+                    return {
+                        "success": True,
+                        "key": row["jira_issue_key"],
+                        "url": row["jira_issue_url"],
+                        "already_existed": True,
+                    }
+                return {
+                    "success": False,
+                    "error": "No pending issues to approve (all issues have already been declined or resolved).",
+                }
+            issues_to_process = pending_issues
+
+        reporter = row["sender_display_name"] or "Client"
+        created_keys = []
+        created_urls = []
+        created_results = []
+
+        for idx, item in issues_to_process:
+            item_summary = item.get("summary") or ai_ticket.get("summary", "Teams Issue Report")
+            item_desc = item.get("description") or ai_ticket.get("description", "")
+            item_type = item.get("issue_type") or ai_ticket.get("issue_type", config.jira.default_issue_type)
+            item_priority = item.get("priority") or ai_ticket.get("priority", "Medium")
+            item_assignee = (
+                assignee_override
+                or item.get("suggested_assignee")
+                or ai_ticket.get("suggested_assignee")
+                or "Unassigned"
+            )
+            item_module = item.get("affected_module") or ai_ticket.get("affected_module")
+            item_evidence = item.get("evidence") or ai_ticket.get("evidence")
+
+            ticket_data = dict(item)
+            ticket_data.setdefault("reporter_name", reporter)
+            ticket_data.setdefault("reporter_role", identify_sender_role(row["sender_user_id"], row["sender_display_name"]))
+            ticket_data.setdefault("raw_message", row["message_text"] or "")
+
+            res = await create_jira_issue(
+                summary=item_summary,
+                description=item_desc,
                 issue_type=item_type,
                 priority=item_priority,
-                assignee=item_assignee,
-                reporter=reporter,
-                approval_note=f"Approved & confirmed by {approver_name} via Teams",
-                chat_id=row["chat_id"],
-                team_id=row["team_id"],
-                channel_id=row["channel_id"],
-                parent_message_id=message_id,
-                module=item_module,
-                evidence=item_evidence,
+                labels=ticket_data.get("labels", ["teams-automation", "pm-approved"]),
+                message_id=message_id,
+                assignee_name=item_assignee,
+                ticket_data=ticket_data,
             )
 
-    if created_keys:
-        # Preserve any previously created keys from granular per-issue approvals
-        prev_keys = [k.strip() for k in (row["jira_issue_key"] or "").split(",") if k.strip()]
-        for k in created_keys:
-            if k not in prev_keys:
-                prev_keys.append(k)
-        primary_key = ", ".join(prev_keys)
-        primary_url = created_urls[0] if created_urls else (row["jira_issue_url"] or "")
+            if res.get("success"):
+                k = res.get("key")
+                u = res.get("url")
+                item["status"] = "APPROVED"
+                item["jira_key"] = k
+                item["jira_url"] = u
+                item["assigned_to"] = item_assignee
+                item["approved_by"] = approver_name
+                item["approved_at"] = get_current_timestamp_str()
+                created_keys.append(k)
+                created_urls.append(u)
+                created_results.append(res)
 
-        # Check if all issues in this message have been approved
-        ai_ticket["issues"] = issues
-        all_done = all(bool(iss.get("jira_key")) for iss in issues)
-        conf_status = "APPROVED" if all_done else "PARTIALLY_APPROVED"
+                logger.info(
+                    f"🎉 Created Jira ticket {k} ({item_summary}) upon PM confirmation",
+                    extra={"event": "PM_CONFIRMATION_JIRA_CREATED", "issueKey": k, "messageId": message_id},
+                )
+
+                # Upload cached attachments
+                if message_id in _message_attachment_cache:
+                    for att in _message_attachment_cache[message_id]:
+                        try:
+                            await upload_jira_attachment(
+                                issue_key=k,
+                                filename=att.get("name", "attachment"),
+                                file_bytes=att.get("bytes", b""),
+                                content_type=att.get("content_type", "application/octet-stream"),
+                            )
+                        except Exception as up_err:
+                            logger.warning(f"Could not upload attachment to Jira {k}: {up_err}")
+
+                # Send Jira ticket created card to Teams
+                await send_ticket_created_notification(
+                    ticket_key=k,
+                    ticket_url=u,
+                    summary=res.get("summary") or item_summary,
+                    issue_type=item_type,
+                    priority=item_priority,
+                    assignee=item_assignee,
+                    reporter=reporter,
+                    approval_note=f"Approved & confirmed by {approver_name} via Teams",
+                    chat_id=row["chat_id"],
+                    team_id=row["team_id"],
+                    channel_id=row["channel_id"],
+                    parent_message_id=message_id,
+                    module=item_module,
+                    evidence=item_evidence,
+                )
+
+        if created_keys:
+            prev_keys = [k.strip() for k in (row["jira_issue_key"] or "").split(",") if k.strip()]
+            for k in created_keys:
+                if k not in prev_keys:
+                    prev_keys.append(k)
+            primary_key = ", ".join(prev_keys)
+            primary_url = created_urls[0] if created_urls else (row["jira_issue_url"] or "")
+
+            ai_ticket["issues"] = issues
+            all_approved = all(iss.get("status") == "APPROVED" for iss in issues)
+            any_pending = any(iss.get("status", "PENDING") == "PENDING" for iss in issues)
+            conf_status = "APPROVED" if all_approved else ("PARTIALLY_APPROVED" if any_pending else "RESOLVED")
+
+            db.execute(
+                "UPDATE messages SET confirmation_status = ?, jira_issue_key = ?, jira_issue_url = ?, ai_ticket = ? WHERE message_id = ?",
+                (conf_status, primary_key, primary_url, json.dumps(ai_ticket), message_id),
+            )
+
+            try:
+                from src.services.broadcaster import broadcast_message
+                await broadcast_message({
+                    "type": "MESSAGE_UPDATED",
+                    "message": {
+                        "messageId": message_id,
+                        "jira_issue_key": primary_key,
+                        "jira_issue_url": primary_url,
+                        "confirmation_status": conf_status,
+                    },
+                    "stored": False,
+                    "duplicate": True,
+                    "updated": True,
+                })
+            except Exception:
+                pass
+
+            return {
+                "success": True,
+                "key": created_keys[0] if len(created_keys) == 1 else primary_key,
+                "url": created_urls[0] if created_urls else primary_url,
+                "tickets": created_results,
+            }
+
+        return {"success": False, "error": "Failed to create Jira issues"}
+
+
+async def execute_jira_ticket_decline(
+    message_id: str,
+    approver_name: Optional[str] = None,
+    reason: Optional[str] = None,
+    issue_idx: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Execute Jira ticket decline with strict state verification and concurrency locking."""
+    async with _message_locks[message_id]:
+        if not approver_name:
+            from src.services.member_sync_service import get_active_pm_from_excel
+            pm_info = get_active_pm_from_excel()
+            approver_name = f"PM {pm_info.get('name', 'Project Manager')}"
+        from src.database import get_db
+        from src.services.teams_notifier import send_ticket_declined_notification, get_current_timestamp_str
+
+        db = get_db()
+        row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+        if not row:
+            return {"success": False, "error": f"Message {message_id} not found in database"}
+
+        ai_ticket = None
+        if row["ai_ticket"]:
+            try:
+                ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
+            except Exception:
+                ai_ticket = None
+
+        raw_issues = (ai_ticket.get("issues") if ai_ticket else None) or ([ai_ticket] if ai_ticket else [{"summary": row["message_text"] or "Issue Report"}])
+        reporter = row["sender_display_name"] or "Client"
+
+        # Normalize issue state
+        for iss in raw_issues:
+            if "status" not in iss:
+                iss["status"] = "APPROVED" if iss.get("jira_key") else "PENDING"
+
+        issues_to_decline = []
+        if issue_idx is not None:
+            if not (0 <= issue_idx < len(raw_issues)):
+                return {"success": False, "error": f"Issue index {issue_idx} out of range"}
+            target = raw_issues[issue_idx]
+            # CRITICAL CONCURRENCY CHECK: If already approved and in Jira, reject decline request!
+            if target.get("status") == "APPROVED" or target.get("jira_key"):
+                active_key = target.get("jira_key") or "Active"
+                return {
+                    "success": False,
+                    "error": f"Cannot reject Issue #{issue_idx + 1}: Ticket {active_key} is already active in Jira! Tickets already created in Jira cannot be declined.",
+                }
+            if target.get("status") == "DECLINED":
+                return {
+                    "success": True,
+                    "already_declined": True,
+                    "message": f"Issue #{issue_idx + 1} was already declined.",
+                }
+            target["status"] = "DECLINED"
+            target["declined_by"] = approver_name
+            target["declined_at"] = get_current_timestamp_str()
+            target["decline_reason"] = reason or "Declined by PM"
+            issues_to_decline = [target]
+            declined_label = f"Issue #{issue_idx + 1} ({target.get('summary', 'Issue')})"
+        else:
+            # "Reject All": Reject all PENDING issues. NEVER touch approved Jira tickets!
+            for idx, item in enumerate(raw_issues):
+                if item.get("status") != "APPROVED" and not item.get("jira_key"):
+                    if item.get("status") != "DECLINED":
+                        item["status"] = "DECLINED"
+                        item["declined_by"] = approver_name
+                        item["declined_at"] = get_current_timestamp_str()
+                        item["decline_reason"] = reason or "Declined all by PM"
+                        issues_to_decline.append(item)
+            if not issues_to_decline:
+                if any(iss.get("status") == "APPROVED" or iss.get("jira_key") for iss in raw_issues):
+                    return {
+                        "success": False,
+                        "error": f"Cannot reject: All issues have already been approved and active in Jira ({row['jira_issue_key']})!",
+                    }
+                return {
+                    "success": True,
+                    "already_declined": True,
+                    "message": "All unapproved issues have already been declined.",
+                }
+            declined_label = f"{len(issues_to_decline)} issue(s)"
+
+        # Calculate overall status
+        all_declined = all(iss.get("status") == "DECLINED" for iss in raw_issues)
+        any_approved = any(iss.get("status") == "APPROVED" or iss.get("jira_key") for iss in raw_issues)
+        any_pending = any(iss.get("status", "PENDING") == "PENDING" for iss in raw_issues)
+
+        if all_declined:
+            new_status = "DECLINED"
+        elif any_approved and not any_pending:
+            new_status = "RESOLVED"
+        elif any_approved:
+            new_status = "PARTIALLY_APPROVED"
+        else:
+            new_status = "PARTIALLY_DECLINED"
+
+        if ai_ticket:
+            ai_ticket["issues"] = raw_issues
 
         db.execute(
-            "UPDATE messages SET confirmation_status = ?, jira_issue_key = ?, jira_issue_url = ?, ai_ticket = ? WHERE message_id = ?",
-            (conf_status, primary_key, primary_url, json.dumps(ai_ticket), message_id),
+            "UPDATE messages SET confirmation_status = ?, ai_ticket = ? WHERE message_id = ?",
+            (new_status, json.dumps(ai_ticket) if ai_ticket else None, message_id),
+        )
+
+        logger.info(
+            f"❌ Ticket creation declined for {declined_label} by {approver_name} for message {message_id}",
+            extra={"event": "PM_DISAPPROVAL_TICKET_DECLINED", "messageId": message_id, "approver": approver_name, "issueIdx": issue_idx},
+        )
+
+        # Post decline notification to Teams
+        notify_res = await send_ticket_declined_notification(
+            message_id=message_id,
+            issues=issues_to_decline,
+            reporter=reporter,
+            approver=approver_name,
+            reason=reason or (f"Rejected by PM: {declined_label}" if issue_idx is not None else None),
+            chat_id=row["chat_id"],
+            team_id=row["team_id"],
+            channel_id=row["channel_id"],
         )
 
         try:
@@ -768,9 +938,7 @@ async def execute_jira_ticket_creation(
                 "type": "MESSAGE_UPDATED",
                 "message": {
                     "messageId": message_id,
-                    "jira_issue_key": primary_key,
-                    "jira_issue_url": primary_url,
-                    "confirmation_status": conf_status,
+                    "confirmation_status": new_status,
                 },
                 "stored": False,
                 "duplicate": True,
@@ -781,103 +949,11 @@ async def execute_jira_ticket_creation(
 
         return {
             "success": True,
-            "key": created_keys[0] if len(created_keys) == 1 else primary_key,
-            "url": created_urls[0] if created_urls else primary_url,
-            "tickets": created_results,
+            "status": new_status,
+            "approver": approver_name,
+            "declined_label": declined_label,
+            "notification": notify_res,
         }
-
-    return {"success": False, "error": "Failed to create Jira issues"}
-
-
-async def execute_jira_ticket_decline(
-    message_id: str,
-    approver_name: Optional[str] = None,
-    reason: Optional[str] = None,
-    issue_idx: Optional[int] = None,
-) -> Dict[str, Any]:
-    """Execute Jira ticket decline after PM disapproval.
-
-    Sends declined Adaptive Card to Teams, marks message as DECLINED in SQLite,
-    and ensures zero Jira tickets are created.
-    """
-    if not approver_name:
-        from src.services.member_sync_service import get_active_pm_from_excel
-        pm_info = get_active_pm_from_excel()
-        approver_name = f"PM {pm_info.get('name', 'Project Manager')}"
-    from src.database import get_db
-    from src.services.teams_notifier import send_ticket_declined_notification
-
-    db = get_db()
-    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
-    if not row:
-        return {"success": False, "error": f"Message {message_id} not found in database"}
-
-    ai_ticket = None
-    if row["ai_ticket"]:
-        try:
-            ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
-        except Exception:
-            ai_ticket = None
-
-    raw_issues = (ai_ticket.get("issues") if ai_ticket else None) or ([ai_ticket] if ai_ticket else [{"summary": row["message_text"] or "Issue Report"}])
-    reporter = row["sender_display_name"] or "Client"
-
-    if issue_idx is not None:
-        if 0 <= issue_idx < len(raw_issues):
-            issues_to_decline = [raw_issues[issue_idx]]
-            declined_label = f"Issue #{issue_idx + 1} ({raw_issues[issue_idx].get('summary', 'Issue')})"
-        else:
-            return {"success": False, "error": f"Issue index {issue_idx} out of range"}
-    else:
-        issues_to_decline = raw_issues
-        declined_label = f"All {len(raw_issues)} issue(s)"
-
-    # Only mark confirmation_status as 'DECLINED' if not already partially approved
-    new_status = "DECLINED" if not row["jira_issue_key"] else row["confirmation_status"]
-    db.execute(
-        "UPDATE messages SET confirmation_status = ? WHERE message_id = ?",
-        (new_status, message_id),
-    )
-
-    logger.info(
-        f"❌ Ticket creation declined for {declined_label} by {approver_name} for message {message_id}",
-        extra={"event": "PM_DISAPPROVAL_TICKET_DECLINED", "messageId": message_id, "approver": approver_name, "issueIdx": issue_idx},
-    )
-
-    # Post decline notification to Teams
-    notify_res = await send_ticket_declined_notification(
-        message_id=message_id,
-        issues=issues_to_decline,
-        reporter=reporter,
-        approver=approver_name,
-        reason=reason or (f"Rejected by PM: {declined_label}" if issue_idx is not None else None),
-        chat_id=row["chat_id"],
-        team_id=row["team_id"],
-        channel_id=row["channel_id"],
-    )
-
-    try:
-        from src.services.broadcaster import broadcast_message
-        await broadcast_message({
-            "type": "MESSAGE_UPDATED",
-            "message": {
-                "messageId": message_id,
-                "confirmation_status": new_status,
-            },
-            "stored": False,
-            "duplicate": True,
-            "updated": True,
-        })
-    except Exception:
-        pass
-
-    return {
-        "success": True,
-        "status": new_status,
-        "approver": approver_name,
-        "declined_label": declined_label,
-        "notification": notify_res,
-    }
 
 
 async def check_and_auto_create_jira_ticket(
