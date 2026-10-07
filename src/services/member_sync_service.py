@@ -220,6 +220,7 @@ def sync_db_from_excel() -> List[Dict[str, Any]]:
     db = get_db()
     cursor = db.cursor()
 
+    active_ids = []
     for m in members:
         name = m["display_name"]
         email = m["email"]
@@ -259,6 +260,7 @@ def sync_db_from_excel() -> List[Dict[str, Any]]:
                 """,
                 (name, email, user_id, role, specialty, can_approve, is_active, existing["id"]),
             )
+            active_ids.append(existing["id"])
         else:
             cursor.execute(
                 """
@@ -267,6 +269,12 @@ def sync_db_from_excel() -> List[Dict[str, Any]]:
                 """,
                 (user_id, name, email, role, specialty, can_approve, is_active),
             )
+            active_ids.append(cursor.lastrowid)
+
+    # Clean up any removed members from SQLite table so it strictly mirrors Member.xlsx
+    if active_ids:
+        placeholders = ",".join("?" * len(active_ids))
+        cursor.execute(f"DELETE FROM team_members WHERE id NOT IN ({placeholders})", active_ids)
 
     logger.info(f"Synchronized database cache from Member.xlsx ({len(members)} members)")
     return members
