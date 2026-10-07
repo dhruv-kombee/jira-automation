@@ -92,6 +92,10 @@ def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
             with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
                 f.write(xlsx_bytes)
             logger.info(f"Saved Member.xlsx to OneDrive sync folder: {ONEDRIVE_MEMBER_PATH}")
+        except PermissionError:
+            logger.warning(
+                f"Notice: Member.xlsx is currently open in Microsoft Excel desktop. Changes saved to local cache; please close Excel or click Save to update OneDrive file: {ONEDRIVE_MEMBER_PATH}"
+            )
         except Exception as err:
             logger.warning(f"Could not write to OneDrive path {ONEDRIVE_MEMBER_PATH}: {err}")
 
@@ -522,19 +526,28 @@ def feed_member_to_excel(
     if existing_row_idx:
         # Update missing fields in existing Excel row
         row_idx = existing_row_idx
+        changed = False
         if user_id_clean and not ws.cell(row=row_idx, column=col_map["user_id"]).value:
             ws.cell(row=row_idx, column=col_map["user_id"]).value = user_id_clean
+            changed = True
         if email_clean and not ws.cell(row=row_idx, column=col_map["email"]).value:
             ws.cell(row=row_idx, column=col_map["email"]).value = email_clean
+            changed = True
         if specialty and (not ws.cell(row=row_idx, column=col_map["specialty"]).value or ws.cell(row=row_idx, column=col_map["specialty"]).value == "Software Engineer"):
             ws.cell(row=row_idx, column=col_map["specialty"]).value = specialty
+            changed = True
         if role and ws.cell(row=row_idx, column=col_map["role"]).value != assigned_role:
             ws.cell(row=row_idx, column=col_map["role"]).value = assigned_role
-        ws.cell(row=row_idx, column=col_map["updated"]).value = now_str
-        save_workbook_to_all(wb)
-        sync_db_from_excel()
-        logger.info(f"Updated member row in Member.xlsx: {name_clean}")
-        return {"success": True, "action": "updated", "name": name_clean, "role": assigned_role}
+            changed = True
+
+        if changed:
+            ws.cell(row=row_idx, column=col_map["updated"]).value = now_str
+            save_workbook_to_all(wb)
+            sync_db_from_excel()
+            logger.info(f"Updated member row in Member.xlsx: {name_clean}")
+            return {"success": True, "action": "updated", "name": name_clean, "role": assigned_role}
+
+        return {"success": True, "action": "unchanged", "name": name_clean, "role": assigned_role}
 
     # Append new row to Member.xlsx
     new_row_idx = max_row + 1
@@ -616,6 +629,85 @@ def auto_register_member(
         specialty=specialty,
         can_approve=can_approve,
     )
+
+
+def remove_member_from_excel(
+    user_id: Optional[str] = None,
+    display_name: Optional[str] = None,
+) -> bool:
+    """Remove a member row from Member.xlsx when they leave Teams or are deleted."""
+    name_clean = (display_name or "").strip().lower()
+    u_id_clean = (user_id or "").strip().lower()
+    if not name_clean and not u_id_clean:
+        return False
+
+    target_path = get_primary_excel_path()
+    if not target_path.exists() and target_path != LOCAL_MEMBER_PATH and LOCAL_MEMBER_PATH.exists():
+        target_path = LOCAL_MEMBER_PATH
+    if not target_path.exists():
+        return False
+
+    try:
+        wb = openpyxl.load_workbook(target_path)
+    except (PermissionError, OSError):
+        logger.warning(f"File {target_path} is locked by another process. Reading from local copy {LOCAL_MEMBER_PATH}")
+        if not LOCAL_MEMBER_PATH.exists():
+            return False
+        wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH)
+
+    ws = wb.active
+
+    header_row_idx = 4
+    col_map = {"name": 1, "user_id": 5}
+    for r in range(1, min(10, (ws.max_row or 1) + 1)):
+        row_vals = [str(ws.cell(row=r, column=c).value or "").lower() for c in range(1, 12)]
+        if any("full name" in v or "name" in v for v in row_vals):
+            header_row_idx = r
+            for c_idx, val in enumerate(row_vals, start=1):
+                if "name" in val:
+                    col_map["name"] = c_idx
+                elif "id" in val or "graph" in val:
+                    col_map["user_id"] = c_idx
+            break
+
+    target_row_idx = None
+    max_row = ws.max_row or header_row_idx
+    name_norm = re.sub(r"\s+", " ", name_clean) if name_clean else ""
+
+    for r_idx in range(header_row_idx + 1, max_row + 1):
+        raw_cell_name = str(ws.cell(row=r_idx, column=col_map["name"]).value or "").strip()
+        cell_name = re.sub(r"\s+", " ", raw_cell_name).lower()
+        cell_uid = str(ws.cell(row=r_idx, column=col_map["user_id"]).value or "").strip().lower()
+
+        if u_id_clean and cell_uid and cell_uid == u_id_clean:
+            target_row_idx = r_idx
+            break
+        if name_norm and cell_name and (cell_name == name_norm or name_norm in cell_name or cell_name in name_norm):
+            target_row_idx = r_idx
+            break
+
+    removed = False
+    if target_row_idx:
+        removed_name = ws.cell(row=target_row_idx, column=col_map["name"]).value
+        ws.delete_rows(target_row_idx)
+        save_workbook_to_all(wb)
+        sync_db_from_excel()
+        logger.info(f"🗑️ Removed departed member from Member.xlsx: {removed_name}")
+        removed = True
+
+    # Always ensure removal from SQLite database even if Excel file was locked or missing row
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        if u_id_clean:
+            cursor.execute("DELETE FROM team_members WHERE LOWER(user_id) = ?", (u_id_clean,))
+        if name_norm:
+            cursor.execute("DELETE FROM team_members WHERE LOWER(display_name) = ? OR LOWER(display_name) LIKE ?", (name_norm, f"%{name_norm}%"))
+        db.commit()
+    except Exception as db_err:
+        logger.debug(f"SQLite cleanup error for departed member: {db_err}")
+
+    return removed
 
 
 def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
@@ -830,6 +922,37 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str]
         elif res_feed.get("action") == "updated":
             updated_count += 1
 
+    # Auto-prune departed members from Member.xlsx:
+    # If all_roster_members was fetched from Graph, remove any Excel member who is no longer in Teams chat
+    removed_count = 0
+    if all_roster_members:
+        roster_uids = {
+            str(m.get("userId") or m.get("id") or "").strip().lower()
+            for m in all_roster_members
+            if (m.get("userId") or m.get("id"))
+        }
+        roster_names = {
+            re.sub(r"\s+", " ", str(m.get("displayName") or "")).strip().lower()
+            for m in all_roster_members
+            if m.get("displayName")
+        }
+
+        current_excel_members = read_members_from_excel()
+        for em in current_excel_members:
+            em_uid = (em.get("user_id") or "").strip().lower()
+            em_name = re.sub(r"\s+", " ", (em.get("display_name") or "")).strip().lower()
+
+            in_roster = False
+            if em_uid and em_uid in roster_uids:
+                in_roster = True
+            elif em_name and em_name in roster_names:
+                in_roster = True
+
+            if not in_roster:
+                logger.info(f"🗑️ Detected departed member '{em.get('display_name')}' (no longer in Teams chat roster); removing from Member.xlsx")
+                if remove_member_from_excel(user_id=em.get("user_id"), display_name=em.get("display_name")):
+                    removed_count += 1
+
     all_members = get_all_members_from_excel()
 
     return {
@@ -838,6 +961,7 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str]
         "found_in_chat": len(all_roster_members),
         "new_registered": discovered_count,
         "updated": updated_count,
+        "removed": removed_count,
         "total_members": len(all_members),
         "excel_file": str(get_primary_excel_path()),
     }

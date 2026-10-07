@@ -1360,6 +1360,7 @@ async def create_jira_from_message(message_id: str):
             team_id=msg.get("team_id"),
             channel_id=msg.get("channel_id"),
             parent_message_id=message_id,
+            status=res.get("status") or "To Do",
         )
     except Exception as notify_err:
         logger.warning(f"Could not send Teams confirmation for manual ticket: {notify_err}")

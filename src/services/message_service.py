@@ -576,11 +576,28 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
 
         normalized = normalize_message(graph_message, team_id=team_id, channel_id=channel_id)
 
-    # Process System Event Details (e.g. member added to chat or channel)
+    # Process System Event Details (e.g. member added or removed from chat or channel)
     event_detail = graph_message.get("eventDetail") if graph_message else None
     if event_detail:
-        event_type = str(event_detail.get("@odata.type") or "")
-        if "membersAdded" in event_type or event_detail.get("members"):
+        event_type = str(event_detail.get("@odata.type") or "").lower()
+        if "membersdeleted" in event_type or "membersremoved" in event_type:
+            deleted_members = event_detail.get("members") or []
+            for dm in deleted_members:
+                dm_id = dm.get("id") or dm.get("userId")
+                dm_name = dm.get("displayName") or ""
+                if dm_id or dm_name:
+                    try:
+                        from src.services.member_sync_service import remove_member_from_excel
+                        remove_member_from_excel(user_id=dm_id, display_name=dm_name)
+                        logger.info(f"🗑️ Member removed from Teams processed via eventDetail: {dm_name or dm_id}")
+                    except Exception as rm_err:
+                        logger.debug(f"EventDetail member removal error: {rm_err}")
+            try:
+                from src.services.member_sync_service import sync_teams_chat_roster
+                sync_teams_chat_roster()
+            except Exception:
+                pass
+        elif "membersadded" in event_type or (event_detail.get("members") and "delete" not in event_type and "remove" not in event_type):
             added_members = event_detail.get("members") or []
             for am in added_members:
                 am_id = am.get("id") or am.get("userId")
@@ -915,6 +932,7 @@ async def execute_jira_ticket_creation(
                     parent_message_id=message_id,
                     module=item_module,
                     evidence=item_evidence,
+                    status=res.get("status") or item.get("jira_status") or "To Do",
                 )
 
         if created_keys:

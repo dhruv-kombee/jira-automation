@@ -26,9 +26,10 @@ def build_adaptive_card_payload(
     approval_note: Optional[str] = None,
     module: Optional[str] = None,
     evidence: Optional[list] = None,
+    status: str = "To Do",
 ) -> Dict[str, Any]:
     """Build a minimal, compact Teams Adaptive Card payload sent after reaction/approval.
-    Strictly contains: Topic Details, Scrum Link, and Assignee.
+    Strictly contains: Topic Details, Scrum Link, Assignee, and Status.
     """
     clean_summary = summary.replace("\n", " ").strip()
     scrum_link_md = f"[{ticket_key}]({ticket_url})" if ticket_url else ticket_key
@@ -37,13 +38,15 @@ def build_adaptive_card_payload(
         f"🎟️ Ticket Created: {ticket_key}\n"
         f"Topic Details: {clean_summary}\n"
         f"Scrum Link: {ticket_url or ticket_key}\n"
-        f"Assignee: {assignee}"
+        f"Assignee: {assignee}\n"
+        f"Status: {status or 'To Do'}"
     )
 
     facts = [
         {"title": "Topic Details:", "value": clean_summary},
         {"title": "Scrum Link:", "value": scrum_link_md},
         {"title": "Assignee:", "value": assignee or "Unassigned"},
+        {"title": "Status:", "value": status or "To Do"},
     ]
 
     card_content: Dict[str, Any] = {
@@ -106,15 +109,17 @@ def build_html_message(
     approval_note: Optional[str] = None,
     module: Optional[str] = None,
     evidence: Optional[list] = None,
+    status: str = "To Do",
 ) -> str:
-    """Build formatted HTML confirmation message with only topic details, scrum link, and assignee."""
+    """Build formatted HTML confirmation message with topic details, scrum link, assignee, and status."""
     clean_summary = summary.replace("\n", " ").strip()
     scrum_link = f"<a href='{ticket_url}'><b>{ticket_key}</b></a>" if ticket_url else f"<b>{ticket_key}</b>"
     return (
         f"🎟️ <b>Ticket Created</b><br/>"
         f"📌 <b>Topic Details</b>: {clean_summary}<br/>"
         f"🔗 <b>Scrum Link</b>: {scrum_link}<br/>"
-        f"👤 <b>Assignee</b>: {assignee or 'Unassigned'}"
+        f"👤 <b>Assignee</b>: {assignee or 'Unassigned'}<br/>"
+        f"📋 <b>Status</b>: {status or 'To Do'}"
     )
 
 
@@ -134,6 +139,7 @@ async def send_ticket_created_notification(
     parent_message_id: Optional[str] = None,
     module: Optional[str] = None,
     evidence: Optional[list] = None,
+    status: str = "To Do",
 ) -> Dict[str, Any]:
     """Send Jira ticket confirmation to Teams via Workflow Webhook (Option A) or Graph API."""
     timestamp = created_at or get_current_timestamp_str()
@@ -157,6 +163,7 @@ async def send_ticket_created_notification(
             approval_note=approval_note,
             module=module,
             evidence=evidence,
+            status=status,
         )
 
         try:
@@ -192,6 +199,7 @@ async def send_ticket_created_notification(
         approval_note=approval_note,
         module=module,
         evidence=evidence,
+        status=status,
     )
 
     effective_chat_id = chat_id or config.teams.chat_id

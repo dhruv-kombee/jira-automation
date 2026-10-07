@@ -10,12 +10,14 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def setup_test_db(tmp_path):
-    """Use a temporary database for each test to keep isolation clean."""
+def setup_test_db(tmp_path, monkeypatch):
+    """Use a temporary database and temporary Member.xlsx for each test to keep isolation clean."""
     test_db = tmp_path / "test_admin.db"
     init_database(str(test_db))
+    test_excel = tmp_path / "Member.xlsx"
+    monkeypatch.setattr("src.services.member_sync_service.ONEDRIVE_MEMBER_PATH", test_excel)
+    monkeypatch.setattr("src.services.member_sync_service.LOCAL_MEMBER_PATH", test_excel)
     yield
-    # Cleanup
 
 
 def test_serve_settings_page():
