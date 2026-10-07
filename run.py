@@ -32,15 +32,29 @@ if str(project_root) not in sys.path:
 from src.config import config
 
 
-def open_browser_delayed(url: str, delay: float = 1.5):
-    """Wait for server startup then launch browser."""
+def open_browser_delayed(url: str, port: int = 3000, timeout: float = 25.0):
+    """Wait for server to actively listen on the port before launching browser."""
     def _open():
-        time.sleep(delay)
-        print(f"\n[+] Opening dashboard in browser: {url}\n")
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+        import socket
+        start = time.time()
+        connected = False
+        while time.time() - start < timeout:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                    connected = True
+                    break
+            except (ConnectionRefusedError, OSError):
+                time.sleep(0.4)
+
+        if connected:
+            time.sleep(0.3)
+            print(f"\n[+] Server is live! Opening dashboard in browser: {url}\n")
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        else:
+            print(f"\n[!] Server startup timed out waiting on port {port}. Please open {url} manually.\n")
 
     t = threading.Thread(target=_open, daemon=True)
     t.start()
@@ -58,8 +72,8 @@ def main():
     print(f"  * Real-time Stream:  WebSocket + Graph Webhook")
     print("=" * 60)
 
-    # Schedule browser opening
-    open_browser_delayed(dashboard_url, delay=1.8)
+    # Schedule browser opening once server is online
+    open_browser_delayed(dashboard_url, port=port)
 
     # Launch server
     uvicorn.run(

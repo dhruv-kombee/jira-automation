@@ -39,9 +39,10 @@ data/
 logs/
 *.log
 
-# OS files
+# OS / Cloud Sync files
 .DS_Store
 Thumbs.db
+*-DESKTOP-*
 
 # IDE
 .vscode/
