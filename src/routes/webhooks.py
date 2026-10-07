@@ -7,12 +7,25 @@ from src.services.message_service import process_teams_message
 router = APIRouter(prefix="/webhooks/teams")
 
 
+import collections
+import time
+
+# Rolling window for cross-batch notification deduplication
+_RECENT_RESOURCES = collections.OrderedDict()  # resource -> timestamp
+_MAX_RECENT_RESOURCES = 500
+_RESOURCE_DEDUP_WINDOW = 4.0  # seconds
+
+
 async def handle_notifications_background(notifications: List[Dict[str, Any]]):
     """Process incoming Graph notifications in the background."""
-    seen_resources = set()
+    now = time.time()
+    # Prune old cache entries
+    while _RECENT_RESOURCES and (now - next(iter(_RECENT_RESOURCES.values()))) > 60.0:
+        _RECENT_RESOURCES.popitem(last=False)
+
     for notification in notifications:
         try:
-            # Skip lifecycle events (e.g., subscriptionRemoved, missed)
+            # 1. Skip lifecycle events (e.g., subscriptionRemoved, missed)
             lifecycle_event = notification.get("lifecycleEvent")
             if lifecycle_event:
                 logger.info(
@@ -25,15 +38,28 @@ async def handle_notifications_background(notifications: List[Dict[str, Any]]):
                 )
                 continue
 
-            # Deduplicate multiple identical notifications for the same resource within the batch
+            # 2. Tenant boundary security validation
+            tenant_id = notification.get("tenantId")
+            if tenant_id and config.microsoft.tenant_id:
+                if tenant_id.lower().strip() != config.microsoft.tenant_id.lower().strip():
+                    logger.warning(
+                        f"Untrusted tenant notification rejected: {tenant_id}",
+                        extra={"event": "UNTRUSTED_TENANT", "tenantId": tenant_id},
+                    )
+                    continue
+
+            # 3. Deduplicate rapid duplicate notifications (both intra-batch and cross-retry)
             resource = notification.get("resource")
             if resource:
-                if resource in seen_resources:
-                    logger.debug(f"Ignoring duplicate notification for {resource} in same batch")
+                last_seen = _RECENT_RESOURCES.get(resource)
+                if last_seen and (now - last_seen) < _RESOURCE_DEDUP_WINDOW:
+                    logger.debug(f"Ignoring duplicate notification for {resource} within {_RESOURCE_DEDUP_WINDOW}s window")
                     continue
-                seen_resources.add(resource)
+                _RECENT_RESOURCES[resource] = now
+                if len(_RECENT_RESOURCES) > _MAX_RECENT_RESOURCES:
+                    _RECENT_RESOURCES.popitem(last=False)
 
-            # Log clientState if present
+            # 4. Log clientState
             if notification.get("clientState"):
                 logger.debug(
                     "Client state present in notification",

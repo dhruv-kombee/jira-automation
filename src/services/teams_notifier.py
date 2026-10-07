@@ -361,13 +361,100 @@ def build_pending_approval_card(
         "url": f"{app_base}/api/jira/confirm-approval/{message_id}",
     })
 
-    actions = [
-        {
-            "type": "Action.OpenUrl",
-            "title": confirm_label,
-            "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(primary_assignee)}&auto=1",
-        },
-        {
+    if issue_count > 1:
+        for i, iss in enumerate(issues):
+            iss_title = (iss.get("summary") or f"Issue #{i+1}").replace("\n", " ").strip()
+            if len(iss_title) > 25:
+                iss_title = iss_title[:22] + "..."
+            reassign_subcard_actions.append({
+                "type": "Action.OpenUrl",
+                "title": f"❌ Reject #{i+1} Only",
+                "url": f"{app_base}/api/jira/decline-issue/{message_id}/{i}",
+            })
+
+    if issue_count == 1:
+        actions = [
+            {
+                "type": "Action.OpenUrl",
+                "title": confirm_label,
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(primary_assignee)}&auto=1",
+            },
+            {
+                "type": "Action.ShowCard",
+                "title": "👥 Select Assignee ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Select Developer to Assign:",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": reassign_subcard_actions,
+                },
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": reject_label,
+                "url": f"{app_base}/api/jira/decline-approval/{message_id}",
+            },
+        ]
+    else:
+        # Multi-issue card buttons:
+        # 1. ✅ Approve All (N)
+        # 2. Individual issue buttons: Approve #1 (Hemil), Approve #2 (Musaib), etc.
+        # 3. 👥 Select Assignee ▾
+        # 4. ❌ Reject All (N)
+        actions = [
+            {
+                "type": "Action.OpenUrl",
+                "title": confirm_label,
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(primary_assignee)}&auto=1",
+            }
+        ]
+
+        # Teams supports up to 6 action buttons in root actions
+        direct_limit = 3 if issue_count > 3 else len(issues)
+        overflow_issue_actions = []
+
+        for i, iss in enumerate(issues):
+            iss_assignee = (iss.get("suggested_assignee") or "Unassigned").strip()
+            short_dev = iss_assignee.split()[0] if iss_assignee != "Unassigned" else f"Dev {i+1}"
+            btn_title = f"Approve #{i+1} ({short_dev})"
+            btn_url = f"{app_base}/api/jira/confirm-issue/{message_id}/{i}"
+            act = {
+                "type": "Action.OpenUrl",
+                "title": btn_title,
+                "url": btn_url,
+            }
+            if i < direct_limit:
+                actions.append(act)
+            else:
+                overflow_issue_actions.append(act)
+
+        if overflow_issue_actions:
+            actions.append({
+                "type": "Action.ShowCard",
+                "title": "📋 More Issues ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Approve Specific Issue:",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": overflow_issue_actions,
+                },
+            })
+
+        actions.append({
             "type": "Action.ShowCard",
             "title": "👥 Select Assignee ▾",
             "card": {
@@ -375,7 +462,7 @@ def build_pending_approval_card(
                 "body": [
                     {
                         "type": "TextBlock",
-                        "text": "Select Developer to Assign:",
+                        "text": "Select Developer to Assign / More Actions:",
                         "weight": "Bolder",
                         "size": "Small",
                         "wrap": True,
@@ -383,13 +470,13 @@ def build_pending_approval_card(
                 ],
                 "actions": reassign_subcard_actions,
             },
-        },
-        {
+        })
+
+        actions.append({
             "type": "Action.OpenUrl",
             "title": reject_label,
             "url": f"{app_base}/api/jira/decline-approval/{message_id}",
-        },
-    ]
+        })
 
     plain_text = (
         f"📋 Issue Approval Required ({issue_count} Issue{'s' if issue_count > 1 else ''})\n"

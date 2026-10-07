@@ -584,15 +584,26 @@ async def create_jira_issue(
         v3_payload["fields"]["assignee"] = {"accountId": resolved_account_id}
 
     async with httpx.AsyncClient(timeout=20.0) as client:
-        try:
-            res = await client.post(
-                f"{base_url}/rest/api/3/issue",
-                json=v3_payload,
-                auth=auth,
-                headers=headers,
-            )
-        except Exception as net_err:
-            return {"success": False, "error": f"Network error calling Jira: {net_err}"}
+        res = None
+        for attempt in range(3):
+            try:
+                res = await client.post(
+                    f"{base_url}/rest/api/3/issue",
+                    json=v3_payload,
+                    auth=auth,
+                    headers=headers,
+                )
+                if res.status_code in (429, 502, 503, 504) and attempt < 2:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                break
+            except (httpx.TimeoutException, httpx.NetworkError) as net_err:
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                return {"success": False, "error": f"Network error calling Jira (after retries): {net_err}"}
+            except Exception as net_err:
+                return {"success": False, "error": f"Network error calling Jira: {net_err}"}
 
         # If issue type rejected (e.g. project is SCRUM with Task, not Bug), retry with default_issue_type
         if res.status_code == 400 and ("issuetype" in res.text.lower() or "valid issue type" in res.text.lower()):

@@ -563,21 +563,67 @@ async def download_hosted_content(content_url: str) -> Optional[tuple[bytes, str
 async def download_attachment_bytes(content_url: str) -> Optional[tuple[bytes, str]]:
     """Download attachment file bytes (logs, images, PDFs) from Graph or content URL.
 
-    Handles SharePoint, OneDrive, and Teams CDN redirect fallbacks.
+    Handles SharePoint, OneDrive (1drv.ms), and Teams CDN redirect fallbacks.
     Returns (bytes, content_type) tuple or None if failed.
     """
+    import base64
     import mimetypes
+
     token = get_access_token()
     headers = {
         "Authorization": f"Bearer {token}",
     }
+
+    url_lower = content_url.lower()
+    is_onedrive_share = "1drv.ms" in url_lower or "onedrive.live.com" in url_lower
+    is_sharepoint = "sharepoint.com" in url_lower
+
+    # 1. OneDrive sharing link (1drv.ms): append download=1 to directly stream file bytes
+    if is_onedrive_share:
+        sep = "&" if "?" in content_url else "?"
+        dl_url = f"{content_url}{sep}download=1" if "download=" not in content_url else content_url
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                res = await client.get(dl_url)
+                # Ensure we got actual file content, not an interactive HTML viewer
+                if res.status_code == 200:
+                    c_type = res.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+                    if not (c_type.startswith("text/html") and len(res.content) > 100_000):
+                        logger.info(f"Downloaded OneDrive file ({len(res.content)} bytes, {c_type})")
+                        return (res.content, c_type)
+        except Exception as e:
+            logger.debug(f"OneDrive direct stream fetch notice ({e}), proceeding with fallback")
+
+    # 2. SharePoint sharing link: try Microsoft Graph /shares endpoint with token
+    if is_sharepoint:
+        try:
+            b64 = base64.urlsafe_b64encode(content_url.encode("utf-8")).decode("utf-8").rstrip("=")
+            share_url = f"{GRAPH_BASE_URL}/shares/u!{b64}/driveItem/content"
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                res = await client.get(share_url, headers=headers)
+                if res.status_code == 200:
+                    c_type = res.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+                    logger.info(f"Downloaded SharePoint file via Graph shares API ({len(res.content)} bytes, {c_type})")
+                    return (res.content, c_type)
+        except Exception as sp_err:
+            logger.debug(f"SharePoint Graph shares API notice ({sp_err}), trying direct fetch")
+
+    # 3. Standard download flow with auth header & public fallback
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             # First try with auth header (Graph endpoint)
             res = await client.get(content_url, headers=headers)
             if res.status_code in (400, 401, 403):
-                # If SharePoint/OneDrive public link or SAS blob URL, retry without Graph Bearer auth
+                # If public link or SAS blob URL, retry without Graph Bearer auth
                 res = await client.get(content_url)
+
+            # If response returned HTML viewer page for a file link, retry with download=1
+            if res.status_code == 200 and res.headers.get("content-type", "").startswith("text/html"):
+                sep = "&" if "?" in content_url else "?"
+                dl_url = f"{content_url}{sep}download=1" if "download=" not in content_url else content_url
+                res_dl = await client.get(dl_url)
+                if res_dl.status_code == 200 and not res_dl.headers.get("content-type", "").startswith("text/html"):
+                    res = res_dl
 
             if res.status_code == 200:
                 content_type = res.headers.get("content-type", "application/octet-stream").split(";")[0].strip()

@@ -177,6 +177,79 @@ def parse_resource_path(resource: str, resource_data: Optional[Dict[str, Any]] =
     return None
 
 
+def extract_linked_attachments(raw_body: str) -> List[Dict[str, Any]]:
+    """Extract file attachment links embedded in HTML body or text (e.g. OneDrive, SharePoint, cloud files)."""
+    if not raw_body:
+        return []
+    import html
+    import re
+
+    linked = []
+    seen_urls = set()
+
+    FILE_EXTENSIONS = (
+        ".log", ".txt", ".csv", ".json", ".xml", ".sql", ".md",
+        ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".zip", ".tar", ".gz",
+        ".py", ".js", ".ts", ".html", ".css", ".sh", ".bat"
+    )
+
+    # 1. Parse HTML <a> tags via regex: <a ... href="..." ...>anchor_text</a>
+    a_pattern = re.compile(r'<a\s+[^>]*?href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.DOTALL | re.IGNORECASE)
+    for match in a_pattern.finditer(raw_body):
+        href = html.unescape(match.group(1).strip())
+        raw_text = re.sub(r'<[^>]+>', '', match.group(2))
+        link_text = html.unescape(raw_text).strip()
+
+        if not href or href in seen_urls:
+            continue
+
+        href_lower = href.lower()
+        text_lower = link_text.lower()
+
+        is_cloud = any(domain in href_lower for domain in ("1drv.ms", "onedrive.live.com", "sharepoint.com", "dropbox.com", "drive.google.com"))
+        has_file_ext = any(ext in text_lower or ext in href_lower.split("?")[0] for ext in FILE_EXTENSIONS)
+
+        if is_cloud or has_file_ext:
+            seen_urls.add(href)
+            filename = None
+            if any(text_lower.endswith(ext) for ext in FILE_EXTENSIONS):
+                filename = link_text
+            else:
+                path_part = href.split("?")[0].rstrip("/").split("/")[-1]
+                if any(path_part.lower().endswith(ext) for ext in FILE_EXTENSIONS):
+                    filename = path_part
+                elif link_text and len(link_text) < 80 and not link_text.startswith("http"):
+                    filename = link_text
+                else:
+                    filename = "linked_log.log" if "log" in href_lower else "shared_attachment"
+
+            linked.append({
+                "id": f"link_{abs(hash(href))}",
+                "contentType": "reference",
+                "name": filename,
+                "contentUrl": href,
+                "isLinked": True,
+            })
+
+    # 2. Match plain-text URLs in body (strip HTML tags first to avoid matching inside attributes like title="...")
+    clean_plain = re.sub(r'<[^>]+>', ' ', raw_body)
+    url_pattern = re.compile(r'https?://(?:1drv\.ms|onedrive\.live\.com|[a-zA-Z0-9-]+\.sharepoint\.com)/[^\s<>"]+')
+    for match in url_pattern.finditer(clean_plain):
+        url_str = html.unescape(match.group(0).rstrip(".,;)>]"))
+        if url_str not in seen_urls and url_str.lower() not in {u.lower() for u in seen_urls}:
+            seen_urls.add(url_str)
+            linked.append({
+                "id": f"link_{abs(hash(url_str))}",
+                "contentType": "reference",
+                "name": "onedrive_shared_file.log" if ".log" in url_str.lower() else "shared_document",
+                "contentUrl": url_str,
+                "isLinked": True,
+            })
+
+    return linked
+
+
 def normalize_message(
     graph_msg: Dict[str, Any],
     team_id: Optional[str] = None,
@@ -204,6 +277,13 @@ def normalize_message(
         }
         for att in attachments_raw
     ]
+
+    # Incorporate linked file attachments (e.g. OneDrive / SharePoint links shared in Teams chat)
+    existing_urls = {att.get("contentUrl") for att in attachments if att.get("contentUrl")}
+    for l_att in extract_linked_attachments(raw_body):
+        if l_att["contentUrl"] not in existing_urls:
+            attachments.append(l_att)
+            existing_urls.add(l_att["contentUrl"])
 
     reactions_raw = graph_msg.get("reactions") or []
     reactions = []
@@ -528,10 +608,6 @@ async def execute_jira_ticket_creation(
     if not row:
         return {"success": False, "error": f"Message {message_id} not found in database"}
 
-    # If ticket already exists and this is an 'approve all' request, return existing
-    if row["jira_issue_key"] and issue_idx is None:
-        return {"success": True, "key": row["jira_issue_key"], "url": row["jira_issue_url"], "already_existed": True}
-
     ai_ticket = None
     if row["ai_ticket"]:
         try:
@@ -565,12 +641,27 @@ async def execute_jira_ticket_creation(
         }]
 
     if issue_idx is not None:
-        if 0 <= issue_idx < len(issues):
-            issues_to_process = [(issue_idx, issues[issue_idx])]
-        else:
+        if not (0 <= issue_idx < len(issues)):
             return {"success": False, "error": f"Issue index {issue_idx} out of range"}
+        target_issue = issues[issue_idx]
+        if target_issue.get("jira_key"):
+            return {
+                "success": True,
+                "key": target_issue["jira_key"],
+                "url": target_issue.get("jira_url", row["jira_issue_url"] or "#"),
+                "already_existed": True,
+            }
+        issues_to_process = [(issue_idx, target_issue)]
     else:
-        issues_to_process = list(enumerate(issues))
+        pending_issues = [(idx, item) for idx, item in enumerate(issues) if not item.get("jira_key")]
+        if not pending_issues and row["jira_issue_key"]:
+            return {
+                "success": True,
+                "key": row["jira_issue_key"],
+                "url": row["jira_issue_url"],
+                "already_existed": True,
+            }
+        issues_to_process = pending_issues if pending_issues else list(enumerate(issues))
 
     reporter = row["sender_display_name"] or "Client"
     created_keys = []
@@ -610,6 +701,8 @@ async def execute_jira_ticket_creation(
         if res.get("success"):
             k = res.get("key")
             u = res.get("url")
+            item["jira_key"] = k
+            item["jira_url"] = u
             created_keys.append(k)
             created_urls.append(u)
             created_results.append(res)
@@ -658,9 +751,15 @@ async def execute_jira_ticket_creation(
                 prev_keys.append(k)
         primary_key = ", ".join(prev_keys)
         primary_url = created_urls[0] if created_urls else (row["jira_issue_url"] or "")
+
+        # Check if all issues in this message have been approved
+        ai_ticket["issues"] = issues
+        all_done = all(bool(iss.get("jira_key")) for iss in issues)
+        conf_status = "APPROVED" if all_done else "PARTIALLY_APPROVED"
+
         db.execute(
-            "UPDATE messages SET confirmation_status = 'APPROVED', jira_issue_key = ?, jira_issue_url = ? WHERE message_id = ?",
-            (primary_key, primary_url, message_id),
+            "UPDATE messages SET confirmation_status = ?, jira_issue_key = ?, jira_issue_url = ?, ai_ticket = ? WHERE message_id = ?",
+            (conf_status, primary_key, primary_url, json.dumps(ai_ticket), message_id),
         )
 
         try:
@@ -671,7 +770,7 @@ async def execute_jira_ticket_creation(
                     "messageId": message_id,
                     "jira_issue_key": primary_key,
                     "jira_issue_url": primary_url,
-                    "confirmation_status": "APPROVED",
+                    "confirmation_status": conf_status,
                 },
                 "stored": False,
                 "duplicate": True,
@@ -682,8 +781,8 @@ async def execute_jira_ticket_creation(
 
         return {
             "success": True,
-            "key": primary_key,
-            "url": primary_url,
+            "key": created_keys[0] if len(created_keys) == 1 else primary_key,
+            "url": created_urls[0] if created_urls else primary_url,
             "tickets": created_results,
         }
 

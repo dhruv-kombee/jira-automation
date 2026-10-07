@@ -103,9 +103,9 @@ def is_user_authorized_approver(
         can_approve = bool(member.get("can_approve"))
         if role == "PM":
             return True
+        if role == "CLIENT":
+            return bool(allow_self and can_approve)
         if can_approve:
-            return True
-        if allow_self and role == "CLIENT":
             return True
 
     # Check fallback configured GUIDs

@@ -1006,14 +1006,20 @@ async def decline_issue_all_post(message_id: str):
 
 
 @router.get("/api/jira/confirm-issue/{message_id}/{issue_idx}", response_class=HTMLResponse)
-async def confirm_issue_get(message_id: str, issue_idx: int):
+async def confirm_issue_get(
+    message_id: str,
+    issue_idx: int,
+    assignee: Optional[str] = None,
+):
     """1-Click PM Approval for a specific single issue in a multi-issue triage card (GET)."""
     from src.services.message_service import execute_jira_ticket_creation
     from src.services.member_sync_service import get_active_pm_from_excel
     pm_info = get_active_pm_from_excel()
     approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
-    res = await execute_jira_ticket_creation(message_id, approver_name=approver, issue_idx=issue_idx)
+    res = await execute_jira_ticket_creation(
+        message_id, approver_name=approver, issue_idx=issue_idx, assignee_override=assignee
+    )
     if not res.get("success"):
         return render_confirmation_html(
             title="Issue Creation Failed",
@@ -1023,11 +1029,12 @@ async def confirm_issue_get(message_id: str, issue_idx: int):
         )
     key = res.get("key", "Created")
     url = res.get("url", "#")
+    already = res.get("already_existed", False)
     return render_confirmation_html(
-        title=f"Issue #{issue_idx + 1} Created in Jira",
+        title=f"Issue #{issue_idx + 1} {'Already Created' if already else 'Created'} in Jira",
         status_type="success",
-        heading="Issue Approved & Created",
-        message=f"Issue #{issue_idx + 1} was successfully created in Jira.",
+        heading="Ticket Active in Jira" if already else f"Issue #{issue_idx + 1} Approved & Created",
+        message=f"Ticket {key} {'is already active in Jira' if already else f'was successfully created in Jira for Issue #{issue_idx + 1}'}.",
         details={"Jira Ticket": key, "Status": "Active in Jira", "Approved By": approver},
         actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
     )
