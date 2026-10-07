@@ -373,41 +373,59 @@ Details & Investigation:
 """
 
     # Check if message contains multiple numbered or bulleted sub-issues
-    numbered_items = re.findall(r'(?:^|\n)\s*(?:[0-9]+[.)]|[-*•])\s+([^\n]+(?:\n(?!\s*(?:[0-9]+[.)]|[-*•]|\Z))[^\n]+)*)', clean_text)
+    # Matches: '1. ...', 'Issue 1: ...', 'Issue #1: ...', 'Bug 1: ...', '1: ...', '- ...', '• ...'
+    multi_issue_pattern = r'(?:^|\n)\s*(?:(?:issue|bug|defect|task|item|point)?\s*#?[0-9]+[\.:\)-]|[-*•])\s+([^\n]+(?:\n(?!\s*(?:(?:issue|bug|defect|task|item|point)?\s*#?[0-9]+[\.:\)-]|[-*•]|\Z))[^\n]+)*)'
+    normalized_clean = clean_text.replace('\u00a0', ' ').replace('\r\n', '\n')
+    numbered_items = re.findall(multi_issue_pattern, normalized_clean, re.IGNORECASE)
     if is_ticket and len(numbered_items) > 1:
         issues = []
         for idx, item_str in enumerate(numbered_items):
             item_clean = item_str.strip()
             item_lower = item_clean.lower()
-            sub_type = "Bug" if any(w in item_lower for w in ["bug", "error", "broken", "failed", "crash", "500", "404", "exception", "timeout"]) else "Task"
+            sub_type = "Bug" if any(w in item_lower for w in ["bug", "error", "broken", "failed", "crash", "500", "404", "exception", "timeout", "freeze"]) else "Task"
             sub_priority = "High" if any(w in item_lower for w in ["whole page", "entire", "urgent", "blocking", "critical", "crash", "down", "500"]) else "Medium"
             sub_module = "General"
             sub_assignee = None
             sub_assignee_rationale = None
+            module_tag = "General"
 
-            if any(k in item_lower for k in ["ui", "css", "button", "frontend", "screen", "page", "display", "mobile", "navbar", "menu"]):
+            if re.search(r'\b(?:ai|ml|llm|prompt|gemini|gpt|model|summariz\w*|nlp)\b', item_lower):
+                sub_module = "AI/ML"
+                sub_assignee = "Nishi Sharma"
+                sub_assignee_rationale = "AI Developer"
+                module_tag = "AI Service"
+            elif any(k in item_lower for k in ["api", "server", "backend", "500", "404", "auth", "login", "password", "reset", "email", "token", "jwt", "endpoint", "database", "sql"]):
+                sub_module = "Backend/API"
+                sub_assignee = "Santosh Yadav"
+                sub_assignee_rationale = "Backend & API Lead"
+                module_tag = "Authentication" if any(w in item_lower for w in ["auth", "login", "password", "reset", "email"]) else "Backend"
+            elif any(k in item_lower for k in ["ui", "css", "button", "frontend", "screen", "page", "display", "mobile", "navbar", "menu", "modal", "upload", "picture", "avatar"]):
                 sub_module = "Frontend/UI"
                 sub_assignee = "Musaib Khan"
-                sub_assignee_rationale = "Frontend module specialist"
-            elif any(k in item_lower for k in ["api", "server", "backend", "500", "endpoint", "database", "sql"]):
-                sub_module = "Backend/API"
-                sub_assignee = "Hemil Ghori"
-                sub_assignee_rationale = "Backend module specialist"
+                sub_assignee_rationale = "Frontend & UI Lead"
+                module_tag = "User Profile" if any(w in item_lower for w in ["upload", "picture", "avatar", "profile"]) else "Frontend"
 
             if "musaib" in item_lower or "musain" in item_lower:
                 sub_assignee = "Musaib Khan"
+                sub_assignee_rationale = "Directly mentioned in message"
+            elif "santosh" in item_lower:
+                sub_assignee = "Santosh Yadav"
+                sub_assignee_rationale = "Directly mentioned in message"
+            elif "nishi" in item_lower:
+                sub_assignee = "Nishi Sharma"
                 sub_assignee_rationale = "Directly mentioned in message"
             elif "hemil" in item_lower:
                 sub_assignee = "Hemil Ghori"
                 sub_assignee_rationale = "Directly mentioned in message"
 
-            sub_first_line = [l.strip() for l in item_clean.splitlines() if l.strip()][0]
-            if len(sub_first_line) > 65:
-                sub_first_line = sub_first_line[:62] + "..."
-            sub_summary = f"[{sub_type}] {sub_first_line}"
+            raw_first_line = [l.strip() for l in item_clean.splitlines() if l.strip()][0]
+            clean_first_line = re.sub(r'^(?:(?:issue|bug|defect|task|item|point)?\s*#?[0-9]+[\.:\)-]|[-*•])\s*', '', raw_first_line, flags=re.IGNORECASE).strip()
+            if len(clean_first_line) > 65:
+                clean_first_line = clean_first_line[:62] + "..."
+            sub_summary = f"[{module_tag}] {clean_first_line}"
 
             sub_evidence = []
-            for word in ["500", "404", "timeout", "exception", "error"]:
+            for word in ["500", "404", "timeout", "exception", "error", "freeze", "5mb"]:
                 if word in item_lower:
                     sub_evidence.append(f"Keyword match: '{word}'")
 
@@ -419,7 +437,7 @@ Details & Investigation:
                 "affected_module": sub_module,
                 "observed_behavior": item_clean,
                 "expected_behavior": "System operates normally without error",
-                "steps_to_reproduce": [f"Navigate to {sub_module}", f"Trigger: {sub_first_line}"],
+                "steps_to_reproduce": [f"Navigate to {sub_module}", f"Trigger: {clean_first_line}"],
                 "evidence": sub_evidence,
                 "acceptance_criteria": [f"Defect resolved in {sub_module}"],
                 "description": f"Sub-issue #{idx + 1} reported by {sender_name or 'Client'}:\n\n> {item_clean}",
