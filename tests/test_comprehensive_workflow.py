@@ -1195,6 +1195,6 @@ class TestThreadGroupingAndDuplicateDetection:
         )
         card_json = json.dumps(card)
         assert "Potential duplicate" in card_json or "Potential Duplicate" in card_json
-        assert "JIRA-77" in card_json
-        assert "Gemini 3.5 Flash-Lite" in card_json
+        assert "Ticket Confirmation" in card_json
+        assert "Gemini 3.5 Flash-Lite" not in card_json
         assert "Approve" in card_json

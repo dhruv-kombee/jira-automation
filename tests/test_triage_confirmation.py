@@ -56,7 +56,7 @@ def test_pm_reaction_authorization():
     assert is_pm_approval(pm_thumbs_up) is False  # Step 1 strictly requires ticket emoji
 
     # Non-authorized user reaction with ticket emoji should NOT approve if allow_self is False
-    dev_reactions = [{"userId": "dev-1", "displayName": "Musaib Khan", "reactionType": "🎟️"}]
+    dev_reactions = [{"userId": "dev-1", "displayName": "Santosh Yadav", "reactionType": "🎟️"}]
     assert is_pm_approval(dev_reactions, allow_client=False) is False
 
 
