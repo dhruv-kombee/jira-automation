@@ -418,7 +418,7 @@ async def _schedule_deferred_reaction_check(
                 (message_id,),
             ).fetchone()
             if row and not row["jira_issue_key"]:
-                if not row["confirmation_status"] or row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION":
+                if not row["confirmation_status"]:
                     await check_and_auto_create_jira_ticket(normalized, sender_role)
 
         if result.get("updated") and result.get("reactions_changed"):
@@ -705,18 +705,22 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     should_triage = False
-    if change_type != "created" and result.get("reactions_changed", False):
-        should_triage = True
-    elif has_approval_rx:
-        from src.database import get_db
-        db = get_db()
-        row = db.execute(
-            "SELECT confirmation_status, jira_issue_key FROM messages WHERE message_id = ?",
-            (normalized.get("messageId"),),
-        ).fetchone()
-        if row and not row["jira_issue_key"]:
-            if not row["confirmation_status"] or row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION":
+    from src.database import get_db
+    db = get_db()
+    row = db.execute(
+        "SELECT confirmation_status, jira_issue_key FROM messages WHERE message_id = ?",
+        (normalized.get("messageId"),),
+    ).fetchone()
+
+    if row and not row["jira_issue_key"]:
+        if not row["confirmation_status"]:
+            if (change_type != "created" and result.get("reactions_changed", False)) or has_approval_rx:
                 should_triage = True
+        elif row["confirmation_status"] == "DECLINED" and has_approval_rx:
+            should_triage = True
+    elif not row:
+        if (change_type != "created" and result.get("reactions_changed", False)) or has_approval_rx:
+            should_triage = True
 
     if should_triage:
         triage_res = await check_and_auto_create_jira_ticket(normalized, sender_role)
@@ -923,6 +927,7 @@ async def execute_jira_ticket_creation(
                     summary=res.get("summary") or item_summary,
                     issue_type=item_type,
                     priority=item_priority,
+                    created_at=get_current_timestamp_str(),
                     assignee=item_assignee,
                     reporter=reporter,
                     approval_note=f"Approved & confirmed by {approver_name} via Teams",
@@ -1096,6 +1101,7 @@ async def execute_jira_ticket_decline(
             reporter=reporter,
             approver=approver_name,
             reason=reason or (f"Rejected by PM: {declined_label}" if issue_idx is not None else None),
+            created_at=get_current_timestamp_str(),
             chat_id=row["chat_id"],
             team_id=row["team_id"],
             channel_id=row["channel_id"],
@@ -1350,6 +1356,7 @@ async def check_and_auto_create_jira_ticket(
         issues=issues,
         reporter=reporter_name,
         raw_message=raw_text,
+        created_at=normalized_message.get("createdAt") or (row["created_at"] if row else None),
         chat_id=normalized_message.get("chatId") or row["chat_id"],
         team_id=normalized_message.get("teamId") or row["team_id"],
         channel_id=normalized_message.get("channelId") or row["channel_id"],
@@ -1476,9 +1483,9 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
                 (msg_id,),
             ).fetchone()
             if m_row and not m_row["jira_issue_key"]:
-                if not m_row["confirmation_status"] or m_row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION":
+                if not m_row["confirmation_status"]:
                     logger.info(
-                        f"Sync detected untriaged/pending message {msg_id} with PM reaction; triggering triage/action",
+                        f"Sync detected untriaged message {msg_id} with PM reaction; triggering triage",
                         extra={"event": "SYNC_TRIAGE_TRIGGER", "messageId": msg_id},
                     )
                     try:

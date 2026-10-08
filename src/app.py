@@ -51,10 +51,11 @@ async def lifespan(app: FastAPI):
     from src.services.reminder_service import start_reminder_monitor, stop_reminder_monitor
     start_reminder_monitor()
 
-    # 7. Initial Teams roster check & sync with Member.xlsx
+    # 7. Initial Teams roster check & sync with Member.xlsx and start monitor
     try:
-        from src.services.member_sync_service import sync_teams_chat_roster
+        from src.services.member_sync_service import sync_teams_chat_roster, start_roster_monitor, stop_roster_monitor
         sync_teams_chat_roster()
+        start_roster_monitor()
     except Exception as roster_err:
         logger.debug(f"Initial roster sync notice: {roster_err}")
 
@@ -73,6 +74,11 @@ async def lifespan(app: FastAPI):
     # Shutdown
     stop_auto_renew()
     stop_reminder_monitor()
+    try:
+        from src.services.member_sync_service import stop_roster_monitor
+        stop_roster_monitor()
+    except Exception:
+        pass
     from src.tunnel import stop_tunnel
     stop_tunnel()
     close_database()

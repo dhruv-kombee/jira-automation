@@ -14,6 +14,24 @@ def get_current_timestamp_str() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def format_card_timestamp(ts: Optional[str] = None) -> str:
+    """Format timestamp into a user-friendly local date and time string."""
+    if not ts:
+        return get_current_timestamp_str()
+    # If already formatted with space, colon, and AM/PM
+    if " " in ts and ":" in ts and ("AM" in ts or "PM" in ts):
+        return ts
+    try:
+        clean_ts = str(ts).strip()
+        if clean_ts.endswith("Z"):
+            clean_ts = clean_ts[:-1] + "+00:00"
+        dt = datetime.fromisoformat(clean_ts)
+        local_dt = dt.astimezone() if dt.tzinfo else dt
+        return local_dt.strftime("%Y-%m-%d %I:%M:%S %p %Z").strip()
+    except Exception:
+        return str(ts) or get_current_timestamp_str()
+
+
 def build_adaptive_card_payload(
     ticket_key: str,
     ticket_url: str,
@@ -49,6 +67,8 @@ def build_adaptive_card_payload(
         {"title": "Status:", "value": status or "To Do"},
     ]
 
+    display_timestamp = format_card_timestamp(created_at)
+
     card_content: Dict[str, Any] = {
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "type": "AdaptiveCard",
@@ -65,7 +85,15 @@ def build_adaptive_card_payload(
                         "size": "Medium",
                         "color": "Good",
                         "wrap": True,
-                    }
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": display_timestamp,
+                        "size": "Small",
+                        "spacing": "None",
+                        "isSubtle": True,
+                        "wrap": True,
+                    },
                 ],
             },
             {
@@ -252,6 +280,8 @@ def build_pending_approval_card(
     issue_count = len(issues)
     project_key = config.jira.project_key or "SCRUM"
 
+    display_timestamp = format_card_timestamp(created_at)
+    header_text = f"Ticket Confirmation ({issue_count} Issues)" if issue_count > 1 else "Ticket Confirmation"
     body_elements: List[Dict[str, Any]] = [
         {
             "type": "Container",
@@ -259,10 +289,18 @@ def build_pending_approval_card(
             "items": [
                 {
                     "type": "TextBlock",
-                    "text": f"📋 Issue Approval Required ({issue_count} Issues)" if issue_count > 1 else "📋 Issue Approval Required",
+                    "text": header_text,
                     "weight": "Bolder",
                     "size": "Medium",
                     "color": "Warning",
+                    "wrap": True,
+                },
+                {
+                    "type": "TextBlock",
+                    "text": display_timestamp,
+                    "size": "Small",
+                    "spacing": "None",
+                    "isSubtle": True,
                     "wrap": True,
                 },
             ],
@@ -280,20 +318,11 @@ def build_pending_approval_card(
             "wrap": True,
         })
 
-    if extractor_mode:
-        body_elements.append({
-            "type": "TextBlock",
-            "text": f"🤖 Extractor: {extractor_mode}",
-            "size": "Small",
-            "isSubtle": True,
-            "wrap": True,
-        })
-
     import urllib.parse
     import re
     from src.services.member_sync_service import get_all_members_from_excel
 
-    # Dynamically retrieve team members from Member.xlsx for assignee options
+    # Dynamically retrieve team members from Member.xlsx for assignee options (for multi-issue)
     try:
         raw_members = get_all_members_from_excel()
     except Exception:
@@ -324,40 +353,25 @@ def build_pending_approval_card(
 
     facts: List[Dict[str, str]] = []
     plain_summary_lines = []
-    primary_assignee = "Unassigned"
 
     for i, iss in enumerate(issues):
         iss_summary = (iss.get("summary") or "Issue Report").replace("\n", " ").strip()
-        iss_assignee = (iss.get("suggested_assignee") or "Unassigned").strip()
-        if i == 0:
-            primary_assignee = iss_assignee
-
         if issue_count > 1:
-            facts.append({"title": f"Topic #{i+1}:", "value": iss_summary})
-            facts.append({"title": f"Assignee #{i+1}:", "value": iss_assignee})
-            plain_summary_lines.append(f"• Issue #{i+1}: {iss_summary} (Assignee: {iss_assignee})")
+            facts.append({"title": f"Topic Details #{i+1}:", "value": iss_summary})
+            plain_summary_lines.append(f"• Issue #{i+1}: {iss_summary}")
         else:
             facts.append({"title": "Topic Details:", "value": iss_summary})
-            facts.append({"title": "Scrum Project:", "value": project_key})
-            facts.append({"title": "Assignee:", "value": iss_assignee})
-            plain_summary_lines.append(f"• Topic: {iss_summary}\n• Scrum Project: {project_key}\n• Assignee: {iss_assignee}")
+            plain_summary_lines.append(f"• Topic: {iss_summary}")
 
-    if issue_count > 1:
-        facts.append({"title": "Scrum Project:", "value": project_key})
+    facts.append({"title": "Project:", "value": project_key})
+    facts.append({"title": "Reporter Name:", "value": reporter or "Client"})
+    plain_summary_lines.append(f"• Project: {project_key}")
+    plain_summary_lines.append(f"• Reporter: {reporter or 'Client'}")
 
     body_elements.append({
         "type": "FactSet",
         "facts": facts,
     })
-
-    body_elements.append({
-        "type": "TextBlock",
-        "text": "React 👍 to Approve or select assignee below:",
-        "isSubtle": True,
-        "wrap": True,
-    })
-
-    short_assignee = primary_assignee.split()[0] if primary_assignee != "Unassigned" else "Suggested"
 
     if issue_count == 1:
         iss1 = issues[0]
@@ -576,10 +590,58 @@ def build_pending_approval_card(
         iss1 = issues[0]
         dev1 = (iss1.get("suggested_assignee") or "Unassigned").strip()
         dev1_short = dev1.split()[0] if dev1 != "Unassigned" else "Dev 1"
+        summary1 = (iss1.get("summary") or "Issue #1").replace("\n", " ").strip()
+        if len(summary1) > 40:
+            summary1 = summary1[:37] + "..."
+
+        issue1_subactions = [
+            {
+                "type": "Action.OpenUrl",
+                "title": f"⚡ Approve ({dev1_short})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?auto=1&assignee={urllib.parse.quote_plus(dev1)}",
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "🌐 Assignee Dropdown (Web)",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0",
+            },
+        ]
+        for m in assignable_choices:
+            m_name = m["name"]
+            short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
+            issue1_subactions.append({
+                "type": "Action.OpenUrl",
+                "title": f"Assign {m_name} ({short_role})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?auto=1&assignee={urllib.parse.quote_plus(m_name)}",
+            })
 
         iss2 = issues[1]
         dev2 = (iss2.get("suggested_assignee") or "Unassigned").strip()
         dev2_short = dev2.split()[0] if dev2 != "Unassigned" else "Dev 2"
+        summary2 = (iss2.get("summary") or "Issue #2").replace("\n", " ").strip()
+        if len(summary2) > 40:
+            summary2 = summary2[:37] + "..."
+
+        issue2_subactions = [
+            {
+                "type": "Action.OpenUrl",
+                "title": f"⚡ Approve ({dev2_short})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?auto=1&assignee={urllib.parse.quote_plus(dev2)}",
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "🌐 Assignee Dropdown (Web)",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1",
+            },
+        ]
+        for m in assignable_choices:
+            m_name = m["name"]
+            short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
+            issue2_subactions.append({
+                "type": "Action.OpenUrl",
+                "title": f"Assign {m_name} ({short_role})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?auto=1&assignee={urllib.parse.quote_plus(m_name)}",
+            })
 
         more_issue_actions = []
         for i in range(2, len(issues)):
@@ -593,33 +655,27 @@ def build_pending_approval_card(
             })
             more_issue_actions.append({
                 "type": "Action.OpenUrl",
-                "title": f"🌐 Dropdown #{i+1}",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/{i}",
-            })
-            more_issue_actions.append({
-                "type": "Action.OpenUrl",
                 "title": f"❌ Reject #{i+1}",
                 "url": f"{app_base}/api/jira/decline-issue/{message_id}/{i}",
             })
 
-        approve_all_subactions = [
-            {
-                "type": "Action.OpenUrl",
-                "title": f"⚡ Approve All ({issue_count})",
-                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?auto=1",
-            },
-            {
-                "type": "Action.OpenUrl",
-                "title": "🌐 Assignee Dropdown for All (Web)",
-                "url": f"{app_base}/api/jira/confirm-approval/{message_id}",
-            },
-        ]
-
         actions = [
             {
-                "type": "Action.OpenUrl",
-                "title": f"Approve #1 ({dev1_short})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0",
+                "type": "Action.ShowCard",
+                "title": f"Approve #1 ({dev1_short}) ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": f"Approve Issue #1: {summary1}",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": issue1_subactions,
+                },
             },
             {
                 "type": "Action.OpenUrl",
@@ -627,9 +683,21 @@ def build_pending_approval_card(
                 "url": f"{app_base}/api/jira/decline-issue/{message_id}/0",
             },
             {
-                "type": "Action.OpenUrl",
-                "title": f"Approve #2 ({dev2_short})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1",
+                "type": "Action.ShowCard",
+                "title": f"Approve #2 ({dev2_short}) ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": f"Approve Issue #2: {summary2}",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": issue2_subactions,
+                },
             },
             {
                 "type": "Action.OpenUrl",
@@ -644,13 +712,13 @@ def build_pending_approval_card(
                     "body": [
                         {
                             "type": "TextBlock",
-                            "text": f"Remaining Issues & Bulk Approval ({issue_count} total):",
+                            "text": f"Remaining Issues ({issue_count - 2} total):",
                             "weight": "Bolder",
                             "size": "Small",
                             "wrap": True,
                         }
                     ],
-                    "actions": more_issue_actions + approve_all_subactions,
+                    "actions": more_issue_actions,
                 },
             },
             {
@@ -661,9 +729,8 @@ def build_pending_approval_card(
         ]
 
     plain_text = (
-        f"📋 Issue Approval Required ({issue_count} Issue{'s' if issue_count > 1 else ''})\n"
+        f"Ticket Confirmation ({issue_count} Issue{'s' if issue_count > 1 else ''})\n"
         + "\n".join(plain_summary_lines)
-        + "\n\nReact 👍 to Approve or select assignee"
     )
 
     return {
@@ -742,18 +809,24 @@ def build_declined_card_payload(
     reporter: str,
     approver: str,
     reason: Optional[str] = None,
+    created_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build Adaptive Card confirming PM decline / cancellation."""
+    display_timestamp = format_card_timestamp(created_at)
     issue_titles = [iss.get("summary", "Issue") for iss in issues] if issues else ["Issue Report"]
-    plain_text = f"❌ Ticket Creation Rejected by {approver}\nIssues: {', '.join(issue_titles)}\nNo Jira tickets were created."
+    clean_approver = approver[3:].strip() if approver.startswith("PM ") and approver[3:].strip() else approver
+    plain_text = (
+        f"Ticket Creation Rejected ({display_timestamp})\n"
+        f"• Rejected By: {clean_approver}\n"
+        f"• Reporter: {reporter}\n"
+        f"• Issues: {', '.join(issue_titles)}\n"
+        f"No Jira tickets were created."
+    )
 
     facts = [
-        {"title": "Rejected By:", "value": approver},
+        {"title": "Rejected By:", "value": clean_approver},
         {"title": "Reporter:", "value": reporter},
-        {"title": "Status:", "value": "Rejected / Not Created in Jira"},
     ]
-    if reason:
-        facts.append({"title": "Reason:", "value": reason})
 
     issue_items = [{"type": "TextBlock", "text": f"• {title}", "wrap": True} for title in issue_titles]
 
@@ -775,7 +848,7 @@ def build_declined_card_payload(
                             "items": [
                                 {
                                     "type": "TextBlock",
-                                    "text": "❌ Ticket Creation Rejected by PM",
+                                    "text": "Ticket Creation Rejected",
                                     "weight": "Bolder",
                                     "size": "Medium",
                                     "color": "Attention",
@@ -783,7 +856,9 @@ def build_declined_card_payload(
                                 },
                                 {
                                     "type": "TextBlock",
-                                    "text": f"{approver} rejected creating Jira ticket(s) for this message:",
+                                    "text": display_timestamp,
+                                    "size": "Small",
+                                    "spacing": "None",
                                     "isSubtle": True,
                                     "wrap": True,
                                 },
@@ -810,6 +885,7 @@ async def send_ticket_declined_notification(
     reporter: str = "Client",
     approver: Optional[str] = None,
     reason: Optional[str] = None,
+    created_at: Optional[str] = None,
     chat_id: Optional[str] = None,
     team_id: Optional[str] = None,
     channel_id: Optional[str] = None,
@@ -827,6 +903,7 @@ async def send_ticket_declined_notification(
         reporter=reporter,
         approver=approver,
         reason=reason,
+        created_at=created_at,
     )
 
     if webhook_url:
