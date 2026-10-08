@@ -1,6 +1,6 @@
 import httpx
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from src.config import config
 from src.logger import logger
 
@@ -1021,8 +1021,12 @@ async def send_pm_followup_reminder(
     chat_id: Optional[str] = None,
     team_id: Optional[str] = None,
     channel_id: Optional[str] = None,
+    target_role: str = "PM",
+    mention_users: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Send Teams follow-up card with PM mention in reply mode to client's message if possible, falling back to webhook."""
+    """Send Teams follow-up card with mention in reply mode to client's message if possible, falling back to webhook.
+    Supports single or multiple @mentions for TLs and PMs.
+    """
     webhook_url = (config.teams.webhook_url or "").strip()
     effective_chat_id = chat_id or config.teams.chat_id
     effective_team_id = team_id or config.teams.team_id
@@ -1035,23 +1039,48 @@ async def send_pm_followup_reminder(
     if len(snippet) > 90:
         snippet = snippet[:87] + "..."
 
-    # HTML content for Graph API with standard @mention tag
+    # Build mentions payload and tag string
+    mentions_payload = []
+    mention_tags = []
+    if mention_users and len(mention_users) > 0:
+        for idx, u in enumerate(mention_users):
+            u_name = u.get("name") or u.get("display_name") or target_role
+            u_id = u.get("user_id") or ""
+            mentions_payload.append({
+                "id": idx,
+                "mentionText": u_name,
+                "mentioned": {
+                    "user": {
+                        "id": u_id,
+                        "displayName": u_name,
+                    }
+                },
+            })
+            mention_tags.append(f'<at id="{idx}">{u_name}</at>')
+        tag_str = " ".join(mention_tags)
+    elif pm_name:
+        mentions_payload = [
+            {
+                "id": 0,
+                "mentionText": pm_name,
+                "mentioned": {
+                    "user": {
+                        "id": pm_user_id or "",
+                        "displayName": pm_name,
+                    }
+                },
+            }
+        ]
+        tag_str = f'<at id="0">{pm_name}</at>'
+    else:
+        tag_str = f"@{target_role}"
+        mentions_payload = None
+
+    stage_prefix = "⏰ [10m TL Review]" if target_role == "TL" else ("🚨 [20m PM Escalation]" if target_role == "PM" else "⏰ Follow-up:")
     html_msg = (
-        f"⏰ <at id=\"0\">{pm_name}</at> Please review client issue from <b>{reporter}</b>: "
+        f"{stage_prefix} {tag_str} Please review client issue from <b>{reporter}</b>: "
         f"<i>\"{snippet}\"</i> (React 🎟️ to approve, ❌ to decline)"
     )
-    mentions_payload = [
-        {
-            "id": 0,
-            "mentionText": pm_name,
-            "mentioned": {
-                "user": {
-                    "id": pm_user_id or "",
-                    "displayName": pm_name,
-                }
-            },
-        }
-    ] if pm_name else None
 
     # Step 1: Attempt direct reply mode via Microsoft Graph API
     # 1A. Teams Channel Reply (threaded reply under client message)

@@ -11,7 +11,10 @@ from src.services.member_sync_service import (
 class Roles:
     CLIENT = "CLIENT"
     PM = "PM"
+    TL = "TL"
+    HM = "HM"
     DEVELOPER = "DEVELOPER"
+    UNASSIGNED = "UNASSIGNED"
     ADMIN = "ADMIN"
     UNKNOWN = "UNKNOWN"
 
@@ -25,7 +28,7 @@ def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[s
         member = get_member_by_id_or_name(user_id=user_id, display_name=display_name)
         if member and member.get("role"):
             role = member["role"].strip().upper()
-            if role in (Roles.CLIENT, Roles.PM, Roles.DEVELOPER, Roles.ADMIN):
+            if role in (Roles.CLIENT, Roles.PM, Roles.TL, Roles.HM, Roles.DEVELOPER, Roles.UNASSIGNED, Roles.ADMIN):
                 return role
     except Exception as err:
         logger.debug(f"Error querying members from Excel: {err}")
@@ -94,18 +97,25 @@ def is_user_authorized_approver(
     display_name: Optional[str] = None,
     allow_client: Optional[bool] = None,
 ) -> bool:
-    """Check if a specific user has approval permissions based directly on Member.xlsx."""
+    """Check if a specific user has approval permissions based directly on Member.xlsx.
+    All management levels (Level 1 TL, Level 2 PM, Level 3 HM) are authorized approvers.
+    """
     allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
 
     member = get_member_by_id_or_name(user_id=user_id, display_name=display_name)
     if member:
-        role = (member.get("role") or "").upper()
+        role = (member.get("role") or "").upper().strip()
+        level = str(member.get("level") or "").upper().strip()
         can_approve = bool(member.get("can_approve"))
-        if role == "PM":
+
+        # Management tiers: Level 1 (TL), Level 2 (PM), Level 3 (HM) are all authorized
+        if role in ("PM", "TL", "HM"):
+            return True
+        if level in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3", "L1", "L2", "L3"):
             return True
         if role == "CLIENT":
             return bool(allow_self and can_approve)
-        if can_approve:
+        if can_approve and role not in ("DEVELOPER", "UNASSIGNED"):
             return True
 
     # Check fallback configured GUIDs

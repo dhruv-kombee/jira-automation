@@ -32,6 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const editMemberId = document.getElementById('editMemberId');
   const memberDisplayName = document.getElementById('memberDisplayName');
   const memberRole = document.getElementById('memberRole');
+  const memberLevel = document.getElementById('memberLevel');
   const memberSpecialty = document.getElementById('memberSpecialty');
   const memberEmail = document.getElementById('memberEmail');
   const memberUserId = document.getElementById('memberUserId');
@@ -233,13 +234,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const r = (role || '').toUpperCase();
     if (r === 'CLIENT') return 'avatar-client';
     if (r === 'PM') return 'avatar-pm';
+    if (r === 'TL') return 'avatar-pm';
+    if (r === 'HM') return 'avatar-admin';
     if (r === 'ADMIN') return 'avatar-admin';
     return 'avatar-dev';
   }
 
   function renderMembers() {
     if (!membersList.length) {
-      membersTableBody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:2rem; color:var(--text-muted);">No team members found. Click "Add Team Member" above.</td></tr>`;
+      membersTableBody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:2rem; color:var(--text-muted);">No team members found. Click "Add Team Member" above.</td></tr>`;
       return;
     }
 
@@ -247,6 +250,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const initial = (m.display_name || 'U').charAt(0).toUpperCase();
       const avatarClass = getAvatarClass(m.role);
       const roleUpper = (m.role || 'DEVELOPER').toUpperCase();
+      const levelVal = m.level || '-';
 
       return `
         <tr data-id="${m.id}">
@@ -261,10 +265,21 @@ document.addEventListener('DOMContentLoaded', () => {
           </td>
           <td>
             <select class="role-select member-role-dropdown" data-id="${m.id}" title="Change role for this user">
+              <option value="TL" ${roleUpper === 'TL' ? 'selected' : ''}>🌟 TL (Team Lead)</option>
+              <option value="PM" ${roleUpper === 'PM' ? 'selected' : ''}>👑 PM (Project Manager)</option>
+              <option value="HM" ${roleUpper === 'HM' ? 'selected' : ''}>🏛️ HM (Higher Mgmt)</option>
               <option value="CLIENT" ${roleUpper === 'CLIENT' ? 'selected' : ''}>👤 Client</option>
-              <option value="PM" ${roleUpper === 'PM' ? 'selected' : ''}>👑 PM (Approver)</option>
               <option value="DEVELOPER" ${roleUpper === 'DEVELOPER' ? 'selected' : ''}>💻 Developer</option>
+              <option value="UNASSIGNED" ${roleUpper === 'UNASSIGNED' ? 'selected' : ''}>⏳ Unassigned</option>
               <option value="ADMIN" ${roleUpper === 'ADMIN' ? 'selected' : ''}>🛡️ Admin</option>
+            </select>
+          </td>
+          <td>
+            <select class="role-select member-level-dropdown" data-id="${m.id}" title="Change hierarchy level for this user">
+              <option value="-" ${levelVal === '-' ? 'selected' : ''}>—</option>
+              <option value="Level 1" ${levelVal === 'Level 1' ? 'selected' : ''}>Level 1 (TL)</option>
+              <option value="Level 2" ${levelVal === 'Level 2' ? 'selected' : ''}>Level 2 (PM)</option>
+              <option value="Level 3" ${levelVal === 'Level 3' ? 'selected' : ''}>Level 3 (HM)</option>
             </select>
           </td>
           <td>
@@ -310,11 +325,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const member = membersList.find(m => String(m.id) === String(id));
         const name = member ? member.display_name : 'Member';
 
+        let inferredLevel = undefined;
+        if (newRole === 'TL') inferredLevel = 'Level 1';
+        else if (newRole === 'PM') inferredLevel = 'Level 2';
+        else if (newRole === 'HM') inferredLevel = 'Level 3';
+        else if (newRole === 'DEVELOPER' || newRole === 'CLIENT' || newRole === 'UNASSIGNED') inferredLevel = '-';
+
+        const updatePayload = { role: newRole };
+        if (inferredLevel !== undefined) {
+          updatePayload.level = inferredLevel;
+        }
+
         try {
           const res = await fetch(`/api/admin/members/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ role: newRole }),
+            body: JSON.stringify(updatePayload),
           });
           const data = await res.json();
           if (data.success) {
@@ -326,6 +352,34 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         } catch (err) {
           showToast(`Error updating role: ${err}`, 'error');
+        }
+      });
+    });
+
+    // Attach Event Listeners for inline level changes
+    document.querySelectorAll('.member-level-dropdown').forEach(select => {
+      select.addEventListener('change', async (e) => {
+        const id = e.target.getAttribute('data-id');
+        const newLevel = e.target.value;
+        const member = membersList.find(m => String(m.id) === String(id));
+        const name = member ? member.display_name : 'Member';
+
+        try {
+          const res = await fetch(`/api/admin/members/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ level: newLevel }),
+          });
+          const data = await res.json();
+          if (data.success) {
+            showToast(`Updated ${name}'s level to ${newLevel}`);
+            loadOverview();
+            loadMembers();
+          } else {
+            showToast(data.detail || 'Could not update level', 'error');
+          }
+        } catch (err) {
+          showToast(`Error updating level: ${err}`, 'error');
         }
       });
     });
@@ -364,12 +418,24 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Auto-suggest hierarchy level when role changes in modal
+  if (memberRole && memberLevel) {
+    memberRole.addEventListener('change', () => {
+      const r = (memberRole.value || '').toUpperCase();
+      if (r === 'TL') memberLevel.value = 'Level 1';
+      else if (r === 'PM') memberLevel.value = 'Level 2';
+      else if (r === 'HM') memberLevel.value = 'Level 3';
+      else if (r === 'DEVELOPER' || r === 'CLIENT' || r === 'UNASSIGNED') memberLevel.value = '-';
+    });
+  }
+
   // Member Modal logic
   btnOpenAddMemberModal.addEventListener('click', () => {
     editMemberId.value = '';
     modalMemberTitle.textContent = 'Add Team Member';
     memberDisplayName.value = '';
     memberRole.value = 'DEVELOPER';
+    if (memberLevel) memberLevel.value = '-';
     memberSpecialty.value = '';
     memberEmail.value = '';
     memberUserId.value = '';
@@ -384,6 +450,7 @@ document.addEventListener('DOMContentLoaded', () => {
     modalMemberTitle.textContent = `Edit Member: ${m.display_name}`;
     memberDisplayName.value = m.display_name || '';
     memberRole.value = (m.role || 'DEVELOPER').toUpperCase();
+    if (memberLevel) memberLevel.value = m.level || '-';
     memberSpecialty.value = m.specialty || '';
     memberEmail.value = m.email || '';
     memberUserId.value = m.user_id || '';
@@ -401,6 +468,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = {
       display_name: name,
       role: memberRole.value,
+      level: memberLevel ? memberLevel.value : '-',
       specialty: memberSpecialty.value.trim(),
       email: memberEmail.value.trim(),
       user_id: memberUserId.value.trim(),
@@ -564,6 +632,8 @@ document.addEventListener('DOMContentLoaded', () => {
         let roleIcon = '💻';
         if (roleUpper === 'CLIENT') { roleBadgeClass = 'badge-confirmed'; roleIcon = '👤'; }
         else if (roleUpper === 'PM') { roleBadgeClass = 'badge-reminder'; roleIcon = '👑'; }
+        else if (roleUpper === 'TL') { roleBadgeClass = 'badge-reminder'; roleIcon = '🌟'; }
+        else if (roleUpper === 'HM') { roleBadgeClass = 'badge-triage'; roleIcon = '🏛️'; }
         else if (roleUpper === 'ADMIN') { roleBadgeClass = 'badge-triage'; roleIcon = '🛡️'; }
 
         return `
@@ -574,6 +644,11 @@ document.addEventListener('DOMContentLoaded', () => {
             <td>
               <span class="badge-mini ${roleBadgeClass}" style="font-size:0.75rem;">
                 ${roleIcon} ${roleUpper}
+              </span>
+            </td>
+            <td>
+              <span class="badge-mini badge-general" style="font-size:0.75rem;">
+                ${escapeHtml(m.level || '—')}
               </span>
             </td>
             <td><span style="font-size:0.8rem; color:var(--text-muted);">${escapeHtml(m.specialty || 'General')}</span></td>
@@ -813,15 +888,18 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast('No members to copy', 'error');
         return;
       }
-      const headers = ['Full Name', 'Email Address', 'Assigned Role', 'Specialty / Focus Area', 'Teams Graph User ID', 'Can Approve (1/0)', 'Jira Project'];
+      const headers = ['Full Name', 'Email Address', 'Assigned Role', 'Level', 'Specialty / Focus Area', 'Teams Graph User ID', 'Can Approve (1/0)', 'Jira Project', 'Status', 'Last Updated'];
       const rows = membersList.map(m => [
         m.display_name || '',
         m.email || '',
         (m.role || 'DEVELOPER').toUpperCase(),
+        m.level || '-',
         m.specialty || 'General',
         m.user_id || '',
         m.can_approve ? '1' : '0',
-        'SCRUM'
+        'SCRUM',
+        m.is_active ? 'Active' : 'Inactive',
+        m.updated_at || new Date().toISOString().replace('T', ' ').substring(0, 19)
       ]);
       const tsv = [headers.join('\t'), ...rows.map(r => r.join('\t'))].join('\n');
       navigator.clipboard.writeText(tsv).then(() => {

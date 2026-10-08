@@ -191,6 +191,7 @@
             <tr>
               <th>Member Name</th>
               <th>Assigned Role</th>
+              <th>Level</th>
               <th>Specialty / Focus Area</th>
               <th>Teams Graph ID</th>
               <th>Can Approve via Reactions</th>
@@ -201,7 +202,7 @@
           <tbody id="membersTableBody">
             <!-- Populated via settings.js -->
             <tr>
-              <td colspan="7" style="text-align:center; padding:2rem; color:var(--text-muted);">Loading members...</td>
+              <td colspan="8" style="text-align:center; padding:2rem; color:var(--text-muted);">Loading members...</td>
             </tr>
           </tbody>
         </table>
@@ -523,11 +524,25 @@
         <div class="form-group">
           <label class="form-label">Assigned Role *</label>
           <select id="memberRole" class="form-select">
-            <option value="CLIENT">Client (Bug Reporter)</option>
-            <option value="PM">Project Manager (Approver / Scrum Master)</option>
+            <option value="TL">Team Lead (TL - Level 1)</option>
+            <option value="PM">Project Manager (PM - Level 2)</option>
+            <option value="HM">Higher Management (HM - Level 3)</option>
             <option value="DEVELOPER">Developer (Issue Specialist)</option>
+            <option value="CLIENT">Client (Bug Reporter)</option>
+            <option value="UNASSIGNED">Unassigned (Pending Review)</option>
             <option value="ADMIN">System Administrator</option>
           </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Hierarchy Level</label>
+          <select id="memberLevel" class="form-select">
+            <option value="-">- (None / Unassigned)</option>
+            <option value="Level 1">Level 1 (TL - Team Lead)</option>
+            <option value="Level 2">Level 2 (PM - Project Manager)</option>
+            <option value="Level 3">Level 3 (HM - Higher Management)</option>
+          </select>
+          <span class="form-helper">Determines SLA reminder escalation tiers and management permissions.</span>
         </div>
 
         <div class="form-group">
@@ -680,6 +695,7 @@
                   <th>Full Name</th>
                   <th>Email</th>
                   <th>Role</th>
+                  <th>Level</th>
                   <th>Specialty</th>
                   <th>Graph User ID</th>
                   <th>Can Approve</th>

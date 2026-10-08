@@ -19,8 +19,6 @@ def setup_test_db(tmp_path, monkeypatch):
     """Setup isolated test database for SLA reminder timeline testing."""
     test_db = tmp_path / "test_reminder.db"
     monkeypatch.setattr(config, "database_path", str(test_db))
-    monkeypatch.setattr(config, "pm_followup_timeout_minutes", 10)
-    monkeypatch.setattr(config, "pm_email_timeout_minutes", 15)
     db = init_database(str(test_db))
     yield db
 
@@ -30,6 +28,7 @@ def _insert_test_message(
     message_id: str,
     minutes_ago: float,
     reminder_sent_at: str = None,
+    reminder_count: int = 0,
     reminder_email_status: str = None,
     reactions: list = None,
     jira_key: str = None,
@@ -53,20 +52,20 @@ def _insert_test_message(
         INSERT INTO messages (
             message_id, sender_user_id, sender_display_name,
             message_text, ai_ticket, reactions, jira_issue_key,
-            created_at, received_at, reminder_sent_at, reminder_email_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, received_at, reminder_sent_at, reminder_count, reminder_email_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             message_id, "client-001", "Client User",
             text, ai_ticket_json, reactions_json, jira_key,
-            iso_ts, iso_ts, reminder_sent_at, reminder_email_status,
+            iso_ts, iso_ts, reminder_sent_at, reminder_count, reminder_email_status,
         ),
     )
 
 
 @pytest.mark.asyncio
 async def test_timeline_stage0_under_10_minutes_is_skipped():
-    """Messages less than 10 minutes old should not trigger any reminder."""
+    """Messages less than 10 minutes old should not trigger Stage 1 reminder."""
     db = get_db()
     _insert_test_message(db, "msg-under-10", minutes_ago=6.0)
     row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-under-10'").fetchone()
@@ -76,14 +75,14 @@ async def test_timeline_stage0_under_10_minutes_is_skipped():
         res = await check_and_send_message_reminder(row)
 
         assert res.get("skipped") is True
-        assert "Under follow-up threshold" in res.get("reason", "")
+        assert "Under Stage 1 TL follow-up threshold" in res.get("reason", "")
         mock_teams.assert_not_called()
         mock_email.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_timeline_stage1_at_10_minutes_sends_teams_followup_only():
-    """At 10 minutes, Stage 1 dispatches Teams follow-up card only, and DOES NOT send email."""
+async def test_timeline_stage1_at_10_minutes_sends_tl_teams_followup():
+    """At 10 minutes, Stage 1 dispatches Teams follow-up card tagging Level 1 (TL)."""
     db = get_db()
     _insert_test_message(db, "msg-stage1-10m", minutes_ago=10.5)
     row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-stage1-10m'").fetchone()
@@ -95,39 +94,40 @@ async def test_timeline_stage1_at_10_minutes_sends_teams_followup_only():
         res = await check_and_send_message_reminder(row)
 
         assert res.get("success") is True
-        assert res.get("stage") == "TEAMS_FOLLOWUP"
+        assert res.get("stage") == "TEAMS_10M_TL"
         mock_teams.assert_called_once()
         mock_email.assert_not_called()
 
-        # Verify SQLite record updated with reminder_sent_at
+        # Verify SQLite record updated with reminder_sent_at and TL_SENT
         updated = db.execute("SELECT * FROM messages WHERE message_id = 'msg-stage1-10m'").fetchone()
         assert updated["reminder_sent_at"] is not None
-        assert updated["reminder_channel_status"] == "SENT"
-        assert updated["reminder_email_status"] is None
+        assert updated["reminder_channel_status"] == "TL_SENT"
 
 
 @pytest.mark.asyncio
-async def test_timeline_waiting_5m_window_after_teams_followup():
-    """Between 10m and 15m (e.g. 2m after Teams follow-up), email is withheld during the 5m grace window."""
+async def test_timeline_waiting_between_10m_and_20m():
+    """Between 10m and 20m (after Stage 1 TL reminder sent), Stage 2 PM is withheld until 20m."""
     db = get_db()
-    followup_ts = (datetime.now(timezone.utc) - timedelta(minutes=2.0)).isoformat()
-    _insert_test_message(db, "msg-waiting-5m", minutes_ago=12.0, reminder_sent_at=followup_ts)
-    row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-waiting-5m'").fetchone()
+    followup_ts = (datetime.now(timezone.utc) - timedelta(minutes=4.0)).isoformat()
+    _insert_test_message(db, "msg-waiting-20m", minutes_ago=14.0, reminder_sent_at=followup_ts, reminder_count=1)
+    row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-waiting-20m'").fetchone()
 
-    with patch("src.services.reminder_service.send_pm_followup_email", new_callable=AsyncMock) as mock_email:
+    with patch("src.services.reminder_service.send_pm_followup_reminder", new_callable=AsyncMock) as mock_teams, \
+         patch("src.services.reminder_service.send_pm_followup_email", new_callable=AsyncMock) as mock_email:
         res = await check_and_send_message_reminder(row)
 
         assert res.get("skipped") is True
-        assert "Waiting for 5m reply window" in res.get("reason", "")
+        assert "Under Stage 2 PM escalation threshold" in res.get("reason", "")
+        mock_teams.assert_not_called()
         mock_email.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_timeline_reply_in_teams_cancels_email_escalation():
-    """If someone replies to the message in Teams during the 5m window, email escalation is cancelled."""
+async def test_timeline_reply_in_teams_cancels_escalation():
+    """If someone replies to the message in Teams, escalation is cancelled."""
     db = get_db()
     followup_ts = (datetime.now(timezone.utc) - timedelta(minutes=6.0)).isoformat()
-    _insert_test_message(db, "msg-with-reply", minutes_ago=16.0, reminder_sent_at=followup_ts)
+    _insert_test_message(db, "msg-with-reply", minutes_ago=16.0, reminder_sent_at=followup_ts, reminder_count=1)
 
     # Insert a human reply in the thread
     db.execute(
@@ -153,14 +153,14 @@ async def test_timeline_reply_in_teams_cancels_email_escalation():
 
 
 @pytest.mark.asyncio
-async def test_timeline_reaction_by_pm_cancels_email_escalation():
-    """If PM reacts (🎟️) after Stage 1, email escalation is cancelled."""
+async def test_timeline_reaction_by_management_cancels_escalation():
+    """If PM/TL reacts (🎟️), escalation is cancelled."""
     db = get_db()
     followup_ts = (datetime.now(timezone.utc) - timedelta(minutes=6.0)).isoformat()
     reactions = [{"reactionType": "🎟️", "userId": "pm-user-id", "displayName": "Project Manager"}]
     _insert_test_message(
         db, "msg-with-reaction", minutes_ago=16.0,
-        reminder_sent_at=followup_ts, reactions=reactions
+        reminder_sent_at=followup_ts, reminder_count=1, reactions=reactions
     )
     row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-with-reaction'").fetchone()
 
@@ -168,7 +168,7 @@ async def test_timeline_reaction_by_pm_cancels_email_escalation():
         res = await check_and_send_message_reminder(row, pm_override={"name": "Project Manager", "user_id": "pm-user-id", "email": "pm@example.com"})
 
         assert res.get("skipped") is True
-        assert "PM has already reacted" in res.get("reason", "")
+        assert "Management" in res.get("reason", "") or "reacted" in res.get("reason", "")
         mock_email.assert_not_called()
 
         updated = db.execute("SELECT reminder_email_status FROM messages WHERE message_id = 'msg-with-reaction'").fetchone()
@@ -176,43 +176,66 @@ async def test_timeline_reaction_by_pm_cancels_email_escalation():
 
 
 @pytest.mark.asyncio
-async def test_timeline_stage2_at_15_minutes_with_no_reply_shoots_email():
-    """At 15m (5m after Teams follow-up) without reaction or reply, Stage 2 shoots email escalation."""
+async def test_timeline_stage2_at_20_minutes_sends_pm_teams_followup():
+    """At 20m without reaction or reply, Stage 2 triggers Teams escalation tagging Level 2 (PM)."""
     db = get_db()
-    followup_ts = (datetime.now(timezone.utc) - timedelta(minutes=5.5)).isoformat()
-    _insert_test_message(db, "msg-shoot-email", minutes_ago=15.5, reminder_sent_at=followup_ts)
-    row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-shoot-email'").fetchone()
+    followup_ts = (datetime.now(timezone.utc) - timedelta(minutes=10.0)).isoformat()
+    _insert_test_message(db, "msg-stage2-20m", minutes_ago=20.5, reminder_sent_at=followup_ts, reminder_count=1)
+    row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-stage2-20m'").fetchone()
 
-    with patch("src.services.reminder_service.send_pm_followup_email", new_callable=AsyncMock) as mock_email:
-        mock_email.return_value = {"success": True, "method": "smtp", "recipients": ["pm@example.com"]}
+    with patch("src.services.reminder_service.send_pm_followup_reminder", new_callable=AsyncMock) as mock_teams, \
+         patch("src.services.reminder_service.send_pm_followup_email", new_callable=AsyncMock) as mock_email:
+        mock_teams.return_value = {"success": True, "method": "chat_quote_reply"}
 
         res = await check_and_send_message_reminder(row)
 
         assert res.get("success") is True
-        assert res.get("stage") == "EMAIL_ESCALATION"
-        mock_email.assert_called_once()
+        assert res.get("stage") == "TEAMS_20M_PM"
+        mock_teams.assert_called_once()
+        mock_email.assert_not_called()
 
-        updated = db.execute("SELECT * FROM messages WHERE message_id = 'msg-shoot-email'").fetchone()
-        assert updated["reminder_email_status"] == "SENT"
+        updated = db.execute("SELECT * FROM messages WHERE message_id = 'msg-stage2-20m'").fetchone()
+        assert int(updated["reminder_count"]) == 2
+        assert updated["reminder_channel_status"] == "PM_SENT"
+
+
+@pytest.mark.asyncio
+async def test_timeline_stage3_after_20_minutes_shoots_hm_email():
+    """After 20m and 2 Teams reminders unaddressed, Stage 3 shoots email alert strictly to Level 3 (HM)."""
+    db = get_db()
+    followup_ts = (datetime.now(timezone.utc) - timedelta(minutes=15.0)).isoformat()
+    _insert_test_message(db, "msg-shoot-hm-email", minutes_ago=22.0, reminder_sent_at=followup_ts, reminder_count=2)
+    row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-shoot-hm-email'").fetchone()
+
+    with patch("src.services.reminder_service.send_pm_followup_email", new_callable=AsyncMock) as mock_email:
+        mock_email.return_value = {"success": True, "method": "smtp", "recipients": ["hm@example.com"]}
+
+        res = await check_and_send_message_reminder(row)
+
+        assert res.get("success") is True
+        assert res.get("stage") == "EMAIL_HM"
+
+        updated = db.execute("SELECT * FROM messages WHERE message_id = 'msg-shoot-hm-email'").fetchone()
+        assert updated["reminder_email_status"] == "HM_SENT"
         assert updated["reminder_email_sent_at"] is not None
 
 
 @pytest.mark.asyncio
-async def test_timeline_both_completed_is_skipped():
-    """Once both Teams follow-up and Email escalation are sent, message is fully completed and skipped."""
+async def test_timeline_all_stages_completed_is_skipped():
+    """Once all 3 SLA stages have executed, message is fully completed and skipped."""
     db = get_db()
-    followup_ts = (datetime.now(timezone.utc) - timedelta(minutes=20.0)).isoformat()
+    followup_ts = (datetime.now(timezone.utc) - timedelta(minutes=25.0)).isoformat()
     _insert_test_message(
-        db, "msg-completed", minutes_ago=25.0,
-        reminder_sent_at=followup_ts, reminder_email_status="SENT"
+        db, "msg-all-completed", minutes_ago=26.0,
+        reminder_sent_at=followup_ts, reminder_count=2, reminder_email_status="HM_SENT"
     )
-    row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-completed'").fetchone()
+    row = db.execute("SELECT * FROM messages WHERE message_id = 'msg-all-completed'").fetchone()
 
     with patch("src.services.reminder_service.send_pm_followup_reminder", new_callable=AsyncMock) as mock_teams, \
          patch("src.services.reminder_service.send_pm_followup_email", new_callable=AsyncMock) as mock_email:
         res = await check_and_send_message_reminder(row)
 
         assert res.get("skipped") is True
-        assert "Both Teams follow-up and Email escalation already completed" in res.get("reason", "")
+        assert "All 3 SLA escalation stages have already been executed" in res.get("reason", "")
         mock_teams.assert_not_called()
         mock_email.assert_not_called()

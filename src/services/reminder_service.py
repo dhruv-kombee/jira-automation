@@ -52,7 +52,7 @@ def has_pm_reacted(
     pm_user_id: Optional[str] = None,
     pm_name: Optional[str] = None,
 ) -> bool:
-    """Check if the PM or any authorized reviewer from Member.xlsx has already added a reaction."""
+    """Check if any TL (Level 1), PM (Level 2), HM (Level 3), or authorized reviewer has added a reaction."""
     if not reactions_raw:
         return False
     try:
@@ -60,33 +60,32 @@ def has_pm_reacted(
         if not isinstance(reactions, list) or len(reactions) == 0:
             return False
 
-        pm_info = get_active_pm()
-        pm_uid = (pm_user_id or pm_info.get("user_id") or config.roles.pm or "").lower().strip()
-        pm_display = (pm_name or pm_info.get("name") or "").lower().strip()
-        client_uid = (config.roles.client or "").lower().strip()
-
         for r in reactions:
             uid = (r.get("userId") or "").lower().strip()
             dname = (r.get("displayName") or "").lower().strip()
 
-            # Direct match with active PM
-            if pm_uid and uid == pm_uid:
+            if pm_user_id and uid == pm_user_id.lower().strip():
                 return True
-            if pm_display and (pm_display in dname or dname in pm_display):
+            if pm_name and (pm_name.lower().strip() in dname or dname in pm_name.lower().strip()):
                 return True
 
-            # Check if reactor has approval rights in Member.xlsx
+            # Check if reactor is TL, PM, HM, or authorized in Member.xlsx
             member = get_member_by_id_or_name(user_id=uid, display_name=dname)
             if member:
-                if (member.get("role") or "").upper() == "PM":
+                m_role = (member.get("role") or "").upper().strip()
+                m_lvl = str(member.get("level") or "").upper().strip()
+                if m_role in ("PM", "TL", "HM") or m_lvl in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3"):
                     return True
-                if member.get("can_approve"):
+                if member.get("can_approve") and m_role not in ("DEVELOPER", "UNASSIGNED"):
                     return True
-                if config.roles.allow_self_approval and (member.get("role") or "").upper() == "CLIENT":
+                if config.roles.allow_self_approval and m_role == "CLIENT":
                     return True
 
-            if config.roles.allow_self_approval and client_uid and uid == client_uid:
+            if config.roles.allow_self_approval and config.roles.client and uid == config.roles.client.lower().strip():
                 return True
+            if config.roles.pm and uid == config.roles.pm.lower().strip():
+                return True
+
         return False
     except Exception:
         return False
@@ -130,7 +129,7 @@ def is_issue_handled_or_replied(
     if msg.get("confirmation_status") == "DECLINED":
         return True, "Ticket was declined"
     if has_pm_reacted(msg.get("reactions"), pm_user_id, pm_name):
-        return True, "PM has already reacted"
+        return True, "Management (TL/PM/HM) has already reacted"
     if has_message_reply(msg.get("message_id")):
         return True, "Message thread has received a reply"
     return False, None
@@ -159,36 +158,37 @@ def extract_issues_for_message(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return raw_issues
 
 
-async def send_stage1_teams_followup(
+async def send_stage1_teams_followup_tl(
     msg: Dict[str, Any],
-    pm_info: Dict[str, str],
     elapsed_minutes: int,
 ) -> Dict[str, Any]:
-    """Execute Stage 1 (10-minute): Dispatch compact Teams follow-up card with PM @mention."""
+    """Execute Stage 1 (10-minute): Dispatch compact Teams follow-up card tagging Level 1 (TL)."""
+    from src.services.member_sync_service import get_active_tls, get_active_pms
+    tls = get_active_tls()
+    target_users = tls if tls else get_active_pms()
+    target_role = "TL" if tls else "PM"
+
+    names = ", ".join(u.get("display_name", "") for u in target_users) or "Team Lead"
     msg_id = msg["message_id"]
-    raw_issues = extract_issues_for_message(msg)
-    reporter = msg.get("sender_display_name") or "Client"
-    raw_text = msg.get("message_text") or ""
-    chat_id = msg.get("chat_id")
-    team_id = msg.get("team_id")
-    channel_id = msg.get("channel_id")
 
     logger.info(
-        f"⏰ Triggering 10-minute PM Teams follow-up for message {msg_id} (elapsed: {elapsed_minutes}m)",
-        extra={"event": "PM_FOLLOWUP_TRIGGER", "stage": "TEAMS_10M", "messageId": msg_id, "elapsedMinutes": elapsed_minutes},
+        f"⏰ Triggering 10-minute Level 1 ({target_role}) Teams follow-up for message {msg_id} (recipients: {names})",
+        extra={"event": "TL_FOLLOWUP_TRIGGER", "stage": "TEAMS_10M_TL", "messageId": msg_id, "elapsedMinutes": elapsed_minutes},
     )
 
     teams_res = await send_pm_followup_reminder(
         message_id=msg_id,
-        pm_name=pm_info["name"],
-        pm_user_id=pm_info["user_id"],
-        reporter=reporter,
+        pm_name=names,
+        pm_user_id=target_users[0].get("user_id") if target_users else None,
+        reporter=msg.get("sender_display_name") or "Client",
         elapsed_minutes=elapsed_minutes,
-        issues=raw_issues,
-        raw_message=raw_text,
-        chat_id=chat_id,
-        team_id=team_id,
-        channel_id=channel_id,
+        issues=extract_issues_for_message(msg),
+        raw_message=msg.get("message_text") or "",
+        chat_id=msg.get("chat_id"),
+        team_id=msg.get("team_id"),
+        channel_id=msg.get("channel_id"),
+        target_role=target_role,
+        mention_users=target_users,
     )
 
     db = get_db()
@@ -199,23 +199,23 @@ async def send_stage1_teams_followup(
         """
         UPDATE messages
         SET reminder_sent_at = ?,
-            reminder_count = COALESCE(reminder_count, 0) + 1,
+            reminder_count = 1,
             reminder_channel_status = ?
         WHERE message_id = ?
         """,
-        (now_iso, t_status, msg_id),
+        (now_iso, f"TL_{t_status}", msg_id),
     )
 
     try:
         from src.services.broadcaster import broadcast_message
         await broadcast_message({
             "type": "PM_REMINDER_SENT",
-            "stage": "TEAMS_FOLLOWUP",
+            "stage": "TEAMS_10M_TL",
             "messageId": msg_id,
             "reminderSentAt": now_iso,
             "elapsedMinutes": elapsed_minutes,
-            "pmName": pm_info["name"],
-            "pmEmail": pm_info["email"],
+            "targetRole": target_role,
+            "names": names,
             "teamsStatus": t_status,
         })
     except Exception:
@@ -223,46 +223,121 @@ async def send_stage1_teams_followup(
 
     return {
         "success": True,
-        "stage": "TEAMS_FOLLOWUP",
+        "stage": "TEAMS_10M_TL",
         "message_id": msg_id,
         "elapsed_minutes": elapsed_minutes,
-        "pm": pm_info,
+        "role": target_role,
         "teams_delivery": teams_res,
     }
 
 
-async def send_stage2_email_escalation(
+async def send_stage2_teams_followup_pm(
     msg: Dict[str, Any],
-    pm_info: Dict[str, str],
     elapsed_minutes: int,
 ) -> Dict[str, Any]:
-    """Execute Stage 2 (15-minute / +5m after Teams): Shoot Outlook email alert to PM."""
+    """Execute Stage 2 (20-minute): Dispatch compact Teams follow-up card tagging Level 2 (PM)."""
+    from src.services.member_sync_service import get_active_pms
+    pms = get_active_pms()
+    names = ", ".join(u.get("display_name", "") for u in pms) or "Project Manager"
     msg_id = msg["message_id"]
-    raw_issues = extract_issues_for_message(msg)
-    reporter = msg.get("sender_display_name") or "Client"
-    raw_text = msg.get("message_text") or ""
-    created_str = msg.get("created_at") or msg.get("received_at") or datetime.now().strftime("%Y-%m-%d %H:%M")
 
     logger.info(
-        f"📧 Triggering 15-minute PM Email escalation for message {msg_id} (elapsed: {elapsed_minutes}m, no reply within 5m after follow-up)",
-        extra={"event": "PM_EMAIL_TRIGGER", "stage": "EMAIL_15M", "messageId": msg_id, "elapsedMinutes": elapsed_minutes},
+        f"🚨 Triggering 20-minute Level 2 (PM) Teams escalation for message {msg_id} (recipients: {names})",
+        extra={"event": "PM_FOLLOWUP_TRIGGER", "stage": "TEAMS_20M_PM", "messageId": msg_id, "elapsedMinutes": elapsed_minutes},
     )
 
-    email_res = await send_pm_followup_email(
-        pm_email=pm_info["email"],
-        pm_name=pm_info["name"],
-        reporter_name=reporter,
-        elapsed_minutes=elapsed_minutes,
-        issues=raw_issues,
-        raw_message=raw_text,
+    teams_res = await send_pm_followup_reminder(
         message_id=msg_id,
-        created_at_str=created_str,
-        teams_web_url=msg.get("message_url"),
+        pm_name=names,
+        pm_user_id=pms[0].get("user_id") if pms else None,
+        reporter=msg.get("sender_display_name") or "Client",
+        elapsed_minutes=elapsed_minutes,
+        issues=extract_issues_for_message(msg),
+        raw_message=msg.get("message_text") or "",
+        chat_id=msg.get("chat_id"),
+        team_id=msg.get("team_id"),
+        channel_id=msg.get("channel_id"),
+        target_role="PM",
+        mention_users=pms,
     )
 
     db = get_db()
     now_iso = datetime.now(timezone.utc).isoformat()
-    e_status = "SENT" if email_res.get("success") else "FAILED"
+    t_status = "SENT" if teams_res.get("success") else "FAILED"
+
+    db.execute(
+        """
+        UPDATE messages
+        SET reminder_count = 2,
+            reminder_channel_status = ?
+        WHERE message_id = ?
+        """,
+        (f"PM_{t_status}", msg_id),
+    )
+
+    try:
+        from src.services.broadcaster import broadcast_message
+        await broadcast_message({
+            "type": "PM_REMINDER_SENT",
+            "stage": "TEAMS_20M_PM",
+            "messageId": msg_id,
+            "reminderSentAt": now_iso,
+            "elapsedMinutes": elapsed_minutes,
+            "targetRole": "PM",
+            "names": names,
+            "teamsStatus": t_status,
+        })
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "stage": "TEAMS_20M_PM",
+        "message_id": msg_id,
+        "elapsed_minutes": elapsed_minutes,
+        "role": "PM",
+        "teams_delivery": teams_res,
+    }
+
+
+async def send_stage3_email_escalation_hm(
+    msg: Dict[str, Any],
+    elapsed_minutes: int,
+) -> Dict[str, Any]:
+    """Execute Stage 3 (>20-minute): Dispatch urgent escalation email strictly to Level 3 (HM) members."""
+    from src.services.member_sync_service import get_active_hms, get_active_pms
+    hms = get_active_hms()
+    recipients = hms if hms else get_active_pms()
+    names = ", ".join(u.get("display_name", "") for u in recipients) or "Higher Management"
+    msg_id = msg["message_id"]
+
+    logger.info(
+        f"📧 Triggering Level 3 (HM) Email alert for message {msg_id} (unaddressed after 20m; recipients: {names})",
+        extra={"event": "HM_EMAIL_TRIGGER", "stage": "EMAIL_HM", "messageId": msg_id, "elapsedMinutes": elapsed_minutes},
+    )
+
+    results = []
+    for r in recipients:
+        r_email = r.get("email")
+        if not r_email:
+            continue
+        res = await send_pm_followup_email(
+            pm_email=r_email,
+            pm_name=r.get("display_name") or "Management",
+            reporter_name=msg.get("sender_display_name") or "Client",
+            elapsed_minutes=elapsed_minutes,
+            issues=extract_issues_for_message(msg),
+            raw_message=msg.get("message_text") or "",
+            message_id=msg_id,
+            created_at_str=msg.get("created_at") or msg.get("received_at") or datetime.now().strftime("%Y-%m-%d %H:%M"),
+            teams_web_url=msg.get("message_url"),
+        )
+        results.append(res)
+
+    db = get_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    any_success = any(res.get("success") for res in results)
+    e_status = "SENT" if any_success else ("FAILED" if results else "NO_HM_EMAIL")
 
     db.execute(
         """
@@ -271,19 +346,18 @@ async def send_stage2_email_escalation(
             reminder_email_sent_at = ?
         WHERE message_id = ?
         """,
-        (e_status, now_iso, msg_id),
+        (f"HM_{e_status}", now_iso, msg_id),
     )
 
     try:
         from src.services.broadcaster import broadcast_message
         await broadcast_message({
             "type": "PM_REMINDER_SENT",
-            "stage": "EMAIL_ESCALATION",
+            "stage": "EMAIL_HM",
             "messageId": msg_id,
             "emailSentAt": now_iso,
             "elapsedMinutes": elapsed_minutes,
-            "pmName": pm_info["name"],
-            "pmEmail": pm_info["email"],
+            "recipients": names,
             "emailStatus": e_status,
         })
     except Exception:
@@ -291,11 +365,11 @@ async def send_stage2_email_escalation(
 
     return {
         "success": True,
-        "stage": "EMAIL_ESCALATION",
+        "stage": "EMAIL_HM",
         "message_id": msg_id,
         "elapsed_minutes": elapsed_minutes,
-        "pm": pm_info,
-        "email_delivery": email_res,
+        "recipients": names,
+        "results": results,
     }
 
 
@@ -304,9 +378,10 @@ async def check_and_send_message_reminder(
     force: bool = False,
     pm_override: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    """Inspect a message and execute SLA escalation along the timeline:
-    - At >= 10m: Send compact follow-up message to Teams tagging PM (@mention).
-    - At >= 15m (>= 5m after Teams follow-up): Shoot escalation email if no reaction or reply has occurred.
+    """Inspect a message and execute SLA escalation along the verified 20-minute timeline:
+    - At >= 10m: Send compact Teams follow-up card tagging Level 1 (TL).
+    - At >= 20m: Send compact Teams follow-up card tagging Level 2 (PM).
+    - After 20m unaddressed: Shoot escalation email strictly to Level 3 (HM) members.
     """
     msg = dict(msg_row)
     msg_id = msg.get("message_id")
@@ -319,7 +394,7 @@ async def check_and_send_message_reminder(
     if not force:
         handled, reason = is_issue_handled_or_replied(msg, pm_info.get("user_id"), pm_info.get("name"))
         if handled:
-            # If Stage 1 was already sent, cancel any pending Stage 2 email
+            # If reminders were started, cancel any pending email
             if msg.get("reminder_sent_at") and msg.get("reminder_email_status") is None:
                 db = get_db()
                 db.execute(
@@ -333,7 +408,7 @@ async def check_and_send_message_reminder(
     msg_dt = parse_timestamp_to_utc(ts_str)
     now_utc = datetime.now(timezone.utc)
 
-    elapsed_minutes = 15
+    elapsed_minutes = 20
     if msg_dt:
         elapsed = (now_utc - msg_dt).total_seconds() / 60.0
         elapsed_minutes = max(1, int(elapsed))
@@ -345,39 +420,41 @@ async def check_and_send_message_reminder(
                 db.execute("UPDATE messages SET reminder_email_status = 'SUPPRESSED_BACKLOG' WHERE message_id = ?", (msg_id,))
             return {"skipped": True, "reason": "Message is older than 24 hours (ancient backlog suppressed)"}
 
-    followup_threshold = config.pm_followup_timeout_minutes  # 10 minutes
-    email_threshold = config.pm_email_timeout_minutes        # 15 minutes
+    # Verified SLA timeline: 10m TL -> 20m PM -> HM Email
+    STAGE1_TL_TIMEOUT = 10
+    STAGE2_PM_TIMEOUT = 20
 
-    # STAGE 1: Has Teams follow-up been sent?
-    has_sent_followup = bool(msg.get("reminder_sent_at"))
+    try:
+        reminder_count = int(msg.get("reminder_count") or 0)
+    except (ValueError, TypeError):
+        reminder_count = 0
+    has_sent_stage1 = bool(msg.get("reminder_sent_at"))
 
-    if not has_sent_followup:
-        # Check if 10m threshold reached
-        if not force and elapsed_minutes < followup_threshold:
+    # STAGE 1: 10 minutes -> Level 1 (TL) Teams reminder
+    if not has_sent_stage1:
+        if not force and elapsed_minutes < STAGE1_TL_TIMEOUT:
             return {
                 "skipped": True,
-                "reason": f"Under follow-up threshold ({elapsed_minutes}m < {followup_threshold}m)",
+                "reason": f"Under Stage 1 TL follow-up threshold ({elapsed_minutes}m < {STAGE1_TL_TIMEOUT}m)",
             }
-        # Fire Stage 1 (Teams follow-up)
-        return await send_stage1_teams_followup(msg, pm_info, elapsed_minutes)
+        return await send_stage1_teams_followup_tl(msg, elapsed_minutes)
 
-    # STAGE 2: Has Email escalation been sent or cancelled?
-    has_sent_email = msg.get("reminder_email_status") in ("SENT", "CANCELLED", "SUPPRESSED_BACKLOG")
+    # STAGE 2: 20 minutes -> Level 2 (PM) Teams escalation
+    if reminder_count < 2:
+        if not force and elapsed_minutes < STAGE2_PM_TIMEOUT:
+            return {
+                "skipped": True,
+                "reason": f"Under Stage 2 PM escalation threshold ({elapsed_minutes}m < {STAGE2_PM_TIMEOUT}m)",
+            }
+        return await send_stage2_teams_followup_pm(msg, elapsed_minutes)
+
+    # STAGE 3: >20 minutes (both TL and PM unreplied) -> Level 3 (HM) Email alert only
+    has_sent_email = msg.get("reminder_email_status") in ("SENT", "HM_SENT", "CANCELLED", "SUPPRESSED_BACKLOG")
 
     if not has_sent_email:
-        # Calculate time since Stage 1 follow-up was dispatched
-        followup_dt = parse_timestamp_to_utc(msg.get("reminder_sent_at"))
-        since_followup_min = (now_utc - followup_dt).total_seconds() / 60.0 if followup_dt else 5.0
+        return await send_stage3_email_escalation_hm(msg, elapsed_minutes)
 
-        # Check if 15m total (and >= 5m since Teams follow-up) has elapsed
-        if not force:
-            if elapsed_minutes < email_threshold and since_followup_min < 5.0:
-                return {
-                    "skipped": True,
-                    "reason": f"Waiting for 5m reply window after Teams follow-up ({int(since_followup_min)}m < 5m, total {elapsed_minutes}m < {email_threshold}m)",
-                }
-        # Fire Stage 2 (Email escalation)
-        return await send_stage2_email_escalation(msg, pm_info, elapsed_minutes)
+    return {"skipped": True, "reason": "All 3 SLA escalation stages have already been executed"}
 
     return {"skipped": True, "reason": "Both Teams follow-up and Email escalation already completed"}
 

@@ -80,6 +80,7 @@ def init_database(db_path: Optional[str] = None) -> sqlite3.Connection:
             display_name        TEXT NOT NULL,
             email               TEXT,
             role                TEXT NOT NULL DEFAULT 'DEVELOPER',
+            level               TEXT,
             specialty           TEXT,
             can_approve         INTEGER NOT NULL DEFAULT 0,
             is_active           INTEGER NOT NULL DEFAULT 1,
@@ -126,6 +127,11 @@ def init_database(db_path: Optional[str] = None) -> sqlite3.Connection:
             _db_conn.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT;")
         except Exception:
             pass
+
+    try:
+        _db_conn.execute("ALTER TABLE team_members ADD COLUMN level TEXT;")
+    except Exception:
+        pass
 
     # Populate team_members directly from Member.xlsx (Single Source of Truth)
     try:

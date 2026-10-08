@@ -80,11 +80,16 @@ def download_onedrive_workbook(share_url: Optional[str] = None) -> Optional[byte
     return None
 
 
+_pending_excel_flushes: Optional[bytes] = None
+
+
 def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
     """Save workbook to both the live OneDrive sync path and local data folder."""
     buffer = io.BytesIO()
     wb.save(buffer)
     xlsx_bytes = buffer.getvalue()
+
+    global _pending_excel_flushes
 
     # 1. Primary OneDrive folder (instantly syncs to cloud & Teams)
     if ONEDRIVE_MEMBER_PATH.parent.exists():
@@ -92,9 +97,11 @@ def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
             with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
                 f.write(xlsx_bytes)
             logger.info(f"Saved Member.xlsx to OneDrive sync folder: {ONEDRIVE_MEMBER_PATH}")
+            _pending_excel_flushes = None
         except PermissionError:
+            _pending_excel_flushes = xlsx_bytes
             logger.warning(
-                f"Notice: Member.xlsx is currently open in Microsoft Excel desktop. Changes saved to local cache; please close Excel or click Save to update OneDrive file: {ONEDRIVE_MEMBER_PATH}"
+                f"Notice: Member.xlsx is currently open in Microsoft Excel desktop. Changes saved to local cache; queued for OneDrive sync when Excel file lock is released: {ONEDRIVE_MEMBER_PATH}"
             )
         except Exception as err:
             logger.warning(f"Could not write to OneDrive path {ONEDRIVE_MEMBER_PATH}: {err}")
@@ -117,7 +124,7 @@ def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
 
 def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, Any]]:
     """Read all members directly from Member.xlsx (The Single Source of Truth).
-    Returns list of member dicts.
+    Returns list of member dicts including role and level.
     """
     target = file_path or get_primary_excel_path()
     if not target.exists() and target != LOCAL_MEMBER_PATH and LOCAL_MEMBER_PATH.exists():
@@ -149,6 +156,8 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
                     col_map["email"] = col_idx
                 elif "role" in cell_val:
                     col_map["role"] = col_idx
+                elif "level" in cell_val or "tier" in cell_val:
+                    col_map["level"] = col_idx
                 elif "specialty" in cell_val or "focus" in cell_val:
                     col_map["specialty"] = col_idx
                 elif "id" in cell_val or "graph" in cell_val:
@@ -188,10 +197,32 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
 
         email = str(get_col("email", "")).strip().lower()
         role = str(get_col("role", "DEVELOPER")).strip().upper() or "DEVELOPER"
+        level = str(get_col("level", "")).strip()
+
+        # Infer or normalize hierarchy level
+        if not level or level in ("-", "none", "null"):
+            if role == "TL":
+                level = "Level 1"
+            elif role == "PM":
+                level = "Level 2"
+            elif role in ("HM", "HIGHER MANAGEMENT"):
+                level = "Level 3"
+            else:
+                level = "-"
+
         specialty = str(get_col("specialty", "")).strip()
         user_id = str(get_col("user_id", "")).strip()
         raw_approve = str(get_col("can_approve", "0")).strip().lower()
-        can_approve = raw_approve in ("1", "true", "yes", "y") or (role in ("PM", "CLIENT") and raw_approve not in ("0", "false", "no"))
+
+        # Approval permissions:
+        # All management levels (Level 1 TL, Level 2 PM, Level 3 HM) can approve/decline tickets
+        if role in ("PM", "TL", "HM") or level in ("Level 1", "Level 2", "Level 3"):
+            can_approve = True
+        elif role == "CLIENT":
+            can_approve = raw_approve in ("1", "true", "yes", "y") or raw_approve not in ("0", "false", "no")
+        else:
+            can_approve = raw_approve in ("1", "true", "yes", "y")
+
         project = str(get_col("project", config.jira.project_key or "SCRUM")).strip()
         status = str(get_col("status", "Active")).strip()
         is_active = status.lower() not in ("inactive", "disabled", "0", "false")
@@ -201,6 +232,7 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
             "display_name": name,
             "email": email,
             "role": role,
+            "level": level,
             "specialty": specialty,
             "user_id": user_id,
             "can_approve": can_approve,
@@ -230,6 +262,7 @@ def sync_db_from_excel() -> List[Dict[str, Any]]:
         email = m["email"]
         user_id = m["user_id"]
         role = m["role"]
+        level = m.get("level") or "-"
         specialty = m["specialty"]
         can_approve = 1 if m["can_approve"] else 0
         is_active = 1 if m["is_active"] else 0
@@ -256,24 +289,33 @@ def sync_db_from_excel() -> List[Dict[str, Any]]:
                     email = COALESCE(NULLIF(?, ''), email),
                     user_id = COALESCE(NULLIF(?, ''), user_id),
                     role = ?,
+                    level = ?,
                     specialty = ?,
                     can_approve = ?,
                     is_active = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (name, email, user_id, role, specialty, can_approve, is_active, existing["id"]),
+                (name, email, user_id, role, level, specialty, can_approve, is_active, existing["id"]),
             )
             active_ids.append(existing["id"])
         else:
             cursor.execute(
                 """
-                INSERT INTO team_members (user_id, display_name, email, role, specialty, can_approve, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO team_members (user_id, display_name, email, role, level, specialty, can_approve, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, name, email, role, specialty, can_approve, is_active),
+                (user_id, name, email, role, level, specialty, can_approve, is_active),
             )
             active_ids.append(cursor.lastrowid)
+
+    # Clean up any removed members from SQLite table so it strictly mirrors Member.xlsx
+    if active_ids:
+        placeholders = ",".join("?" * len(active_ids))
+        cursor.execute(f"DELETE FROM team_members WHERE id NOT IN ({placeholders})", active_ids)
+
+    logger.info(f"Synchronized database cache from Member.xlsx ({len(members)} members)")
+    return members
 
     # Clean up any removed members from SQLite table so it strictly mirrors Member.xlsx
     if active_ids:
@@ -337,28 +379,75 @@ def get_member_by_id_or_name(user_id: Optional[str] = None, display_name: Option
     return None
 
 
-def get_active_pm_from_excel() -> Dict[str, str]:
-    """Retrieve active Project Manager (PM) directly from Member.xlsx data.
-    Never relies on hardcoded names.
-    """
+def get_active_pms() -> List[Dict[str, Any]]:
+    """Retrieve all active Project Managers (Level 2) directly from Member.xlsx."""
     members = get_all_members_from_excel()
+    return [
+        m for m in members
+        if m.get("is_active") and (
+            (m.get("role") or "").upper() == "PM" or
+            (m.get("level") or "").upper() in ("LEVEL 2", "2", "L2")
+        )
+    ]
 
-    # 1. Look for explicit role 'PM'
-    for m in members:
-        if m.get("is_active") and (m.get("role") or "").upper() == "PM":
-            return {
-                "name": m.get("display_name") or "Project Manager",
-                "email": m.get("email") or "",
-                "user_id": m.get("user_id") or "",
-            }
+
+def get_active_tls() -> List[Dict[str, Any]]:
+    """Retrieve all active Team Leads (Level 1) directly from Member.xlsx."""
+    members = get_all_members_from_excel()
+    return [
+        m for m in members
+        if m.get("is_active") and (
+            (m.get("role") or "").upper() == "TL" or
+            (m.get("level") or "").upper() in ("LEVEL 1", "1", "L1")
+        )
+    ]
+
+
+def get_active_hms() -> List[Dict[str, Any]]:
+    """Retrieve all active Higher Management members (Level 3) directly from Member.xlsx."""
+    members = get_all_members_from_excel()
+    return [
+        m for m in members
+        if m.get("is_active") and (
+            (m.get("role") or "").upper() in ("HM", "HIGHER MANAGEMENT") or
+            (m.get("level") or "").upper() in ("LEVEL 3", "3", "L3")
+        )
+    ]
+
+
+def get_members_by_level(level: str) -> List[Dict[str, Any]]:
+    """Retrieve all active members assigned to a specific hierarchy level."""
+    clean_lvl = (level or "").strip().upper()
+    members = get_all_members_from_excel()
+    return [
+        m for m in members
+        if m.get("is_active") and (m.get("level") or "").strip().upper() == clean_lvl
+    ]
+
+
+def get_active_pm_from_excel() -> Dict[str, str]:
+    """Retrieve primary active Project Manager (PM) directly from Member.xlsx data.
+    Never relies on hardcoded names. Supports multiple PMs by returning primary/first.
+    """
+    pms = get_active_pms()
+    if pms:
+        first = pms[0]
+        return {
+            "name": first.get("display_name") or "Project Manager",
+            "email": first.get("email") or "",
+            "user_id": first.get("user_id") or "",
+            "level": first.get("level") or "Level 2",
+        }
 
     # 2. Look for approver if no PM specified
+    members = get_all_members_from_excel()
     for m in members:
         if m.get("is_active") and m.get("can_approve"):
             return {
                 "name": m.get("display_name") or "Approver",
                 "email": m.get("email") or "",
                 "user_id": m.get("user_id") or "",
+                "level": m.get("level") or "-",
             }
 
     # 3. Fallback
@@ -366,6 +455,7 @@ def get_active_pm_from_excel() -> Dict[str, str]:
         "name": "Project Manager",
         "email": "",
         "user_id": "",
+        "level": "Level 2",
     }
 
 
@@ -374,6 +464,7 @@ def feed_member_to_excel(
     user_id: Optional[str] = None,
     email: Optional[str] = None,
     role: Optional[str] = None,
+    level: Optional[str] = None,
     specialty: Optional[str] = None,
     can_approve: Optional[bool] = None,
     jira_project: Optional[str] = None,
@@ -414,11 +505,22 @@ def feed_member_to_excel(
             assigned_role = "CLIENT"
         elif "hemil" in name_lower or "pm" in spec_lower or "project manager" in spec_lower or "scrum" in spec_lower:
             assigned_role = "PM"
-        elif "santosh" in name_lower or "musaib" in name_lower or "musain" in name_lower or "nishi" in name_lower or "developer" in spec_lower or "engineer" in spec_lower:
-            assigned_role = "DEVELOPER"
         else:
-            assigned_role = "DEVELOPER"
+            # Per user specification: newly discovered chat members default to UNASSIGNED
+            assigned_role = "UNASSIGNED"
     assigned_role = assigned_role.upper()
+
+    # Determine hierarchy level
+    assigned_level = level
+    if not assigned_level or assigned_level in ("-", "none", "null"):
+        if assigned_role == "TL":
+            assigned_level = "Level 1"
+        elif assigned_role == "PM":
+            assigned_level = "Level 2"
+        elif assigned_role in ("HM", "HIGHER MANAGEMENT"):
+            assigned_level = "Level 3"
+        else:
+            assigned_level = "-"
 
     # Specialty
     if not specialty:
@@ -426,6 +528,12 @@ def feed_member_to_excel(
             specialty = "Client Product Owner"
         elif assigned_role == "PM":
             specialty = "Project Manager / Scrum Master"
+        elif assigned_role == "TL":
+            specialty = "Team Lead"
+        elif assigned_role in ("HM", "HIGHER MANAGEMENT"):
+            specialty = "Higher Management"
+        elif assigned_role == "UNASSIGNED":
+            specialty = "Pending Role Assignment"
         else:
             name_lower = name_clean.lower()
             if "musaib" in name_lower:
@@ -436,7 +544,7 @@ def feed_member_to_excel(
                 specialty = "Software Engineer"
 
     if can_approve is None:
-        can_approve = assigned_role in ("PM", "CLIENT")
+        can_approve = assigned_role in ("PM", "TL", "HM") or assigned_level in ("Level 1", "Level 2", "Level 3")
 
     target_path = get_primary_excel_path()
     if not target_path.exists():
@@ -455,14 +563,16 @@ def feed_member_to_excel(
         "name": 1,
         "email": 2,
         "role": 3,
-        "specialty": 4,
-        "user_id": 5,
-        "can_approve": 6,
-        "project": 7,
-        "status": 8,
-        "updated": 9,
+        "level": 4,
+        "specialty": 5,
+        "user_id": 6,
+        "can_approve": 7,
+        "project": 8,
+        "status": 9,
+        "updated": 10,
     }
 
+    has_level_col = False
     for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
         row_str = [str(c or "").strip().lower() for c in row]
         if any("name" in c for c in row_str):
@@ -474,6 +584,9 @@ def feed_member_to_excel(
                     col_map["email"] = c_idx
                 elif "role" in val:
                     col_map["role"] = c_idx
+                elif "level" in val or "tier" in val:
+                    col_map["level"] = c_idx
+                    has_level_col = True
                 elif "specialty" in val or "focus" in val:
                     col_map["specialty"] = c_idx
                 elif "id" in val or "graph" in val:
@@ -487,6 +600,16 @@ def feed_member_to_excel(
                 elif "updated" in val:
                     col_map["updated"] = c_idx
             break
+
+    # If sheet lacks Level column, re-export standard 10-column layout
+    if not has_level_col:
+        export_members_to_excel(target_path)
+        wb = openpyxl.load_workbook(target_path)
+        ws = wb.active
+        col_map = {
+            "name": 1, "email": 2, "role": 3, "level": 4, "specialty": 5,
+            "user_id": 6, "can_approve": 7, "project": 8, "status": 9, "updated": 10
+        }
 
     # Look for existing member row
     existing_row_idx = None
@@ -517,7 +640,10 @@ def feed_member_to_excel(
     role_colors = {
         "CLIENT": ("EFF6FF", "1D4ED8"),
         "PM": ("FEF3C7", "B45309"),
+        "TL": ("F0FDF4", "15803D"),
+        "HM": ("FDF2F8", "BE185D"),
         "DEVELOPER": ("ECFDF5", "047857"),
+        "UNASSIGNED": ("F1F5F9", "64748B"),
         "ADMIN": ("F5F3FF", "6D28D9"),
     }
 
@@ -539,15 +665,18 @@ def feed_member_to_excel(
         if role and ws.cell(row=row_idx, column=col_map["role"]).value != assigned_role:
             ws.cell(row=row_idx, column=col_map["role"]).value = assigned_role
             changed = True
+        if "level" in col_map and level and ws.cell(row=row_idx, column=col_map["level"]).value != assigned_level:
+            ws.cell(row=row_idx, column=col_map["level"]).value = assigned_level
+            changed = True
 
         if changed:
             ws.cell(row=row_idx, column=col_map["updated"]).value = now_str
             save_workbook_to_all(wb)
             sync_db_from_excel()
             logger.info(f"Updated member row in Member.xlsx: {name_clean}")
-            return {"success": True, "action": "updated", "name": name_clean, "role": assigned_role}
+            return {"success": True, "action": "updated", "name": name_clean, "role": assigned_role, "level": assigned_level}
 
-        return {"success": True, "action": "unchanged", "name": name_clean, "role": assigned_role}
+        return {"success": True, "action": "unchanged", "name": name_clean, "role": assigned_role, "level": assigned_level}
 
     # Append new row to Member.xlsx
     new_row_idx = max_row + 1
@@ -561,6 +690,8 @@ def feed_member_to_excel(
     ws.cell(row=new_row_idx, column=col_map["name"], value=name_clean)
     ws.cell(row=new_row_idx, column=col_map["email"], value=email_clean)
     ws.cell(row=new_row_idx, column=col_map["role"], value=assigned_role)
+    if "level" in col_map:
+        ws.cell(row=new_row_idx, column=col_map["level"], value=assigned_level)
     ws.cell(row=new_row_idx, column=col_map["specialty"], value=specialty)
     ws.cell(row=new_row_idx, column=col_map["user_id"], value=user_id_clean)
     ws.cell(row=new_row_idx, column=col_map["can_approve"], value="1" if can_approve else "0")
@@ -570,7 +701,8 @@ def feed_member_to_excel(
 
     # Style cells
     bg_color, fg_color = role_colors.get(assigned_role, ("F8FAFC", "334155"))
-    for col_i in range(1, 10):
+    total_cols = max(col_map.values())
+    for col_i in range(1, total_cols + 1):
         c = ws.cell(row=new_row_idx, column=col_i)
         c.font = Font(name="Segoe UI", size=9.5)
         c.border = thin_border
@@ -585,31 +717,14 @@ def feed_member_to_excel(
     # Update subtitle timestamp
     ws.cell(row=2, column=1).value = f"Single Source of Truth for Team Members, Roles & Permissions | Last Updated: {now_str}"
 
-    # Ensure in-cell dropdown data validations exist
-    try:
-        from openpyxl.worksheet.datavalidation import DataValidation
-        has_role_dv = any("C" in str(getattr(v, "sqref", "")) for v in getattr(ws.data_validations, "dataValidation", []))
-        if not has_role_dv:
-            role_dv = DataValidation(type="list", formula1='"CLIENT, PM, DEVELOPER"', allow_blank=True)
-            ws.add_data_validation(role_dv)
-            role_dv.add("C5:C500")
-            approve_dv = DataValidation(type="list", formula1='"1, 0"', allow_blank=True)
-            ws.add_data_validation(approve_dv)
-            approve_dv.add("F5:F500")
-            status_dv = DataValidation(type="list", formula1='"Active, Inactive"', allow_blank=True)
-            ws.add_data_validation(status_dv)
-            status_dv.add("H5:H500")
-    except Exception:
-        pass
-
     save_workbook_to_all(wb)
     sync_db_from_excel()
 
     logger.info(
-        f"Fed new member '{name_clean}' into Member.xlsx as {assigned_role}",
-        extra={"event": "MEMBER_FED_TO_EXCEL", "member_name": name_clean, "role": assigned_role},
+        f"Fed member '{name_clean}' into Member.xlsx as {assigned_role} ({assigned_level})",
+        extra={"event": "MEMBER_FED_TO_EXCEL", "member_name": name_clean, "role": assigned_role, "level": assigned_level},
     )
-    return {"success": True, "action": "created", "name": name_clean, "role": assigned_role}
+    return {"success": True, "action": "created", "name": name_clean, "role": assigned_role, "level": assigned_level}
 
 
 def auto_register_member(
@@ -617,6 +732,7 @@ def auto_register_member(
     user_id: Optional[str] = None,
     email: Optional[str] = None,
     role: Optional[str] = None,
+    level: Optional[str] = None,
     specialty: Optional[str] = None,
     can_approve: Optional[bool] = None,
 ) -> Dict[str, Any]:
@@ -626,6 +742,7 @@ def auto_register_member(
         user_id=user_id,
         email=email,
         role=role,
+        level=level,
         specialty=specialty,
         can_approve=can_approve,
     )
@@ -711,7 +828,7 @@ def remove_member_from_excel(
 
 
 def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
-    """Generate or refresh a clean, styled Member.xlsx workbook.
+    """Generate or refresh a clean, styled Member.xlsx workbook with 10 columns (including Level).
     Writes to both OneDrive sync folder and local project folder.
     """
     target_path = output_path or get_primary_excel_path()
@@ -719,7 +836,14 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
 
     db = get_db()
     rows = db.execute(
-        "SELECT * FROM team_members ORDER BY CASE role WHEN 'CLIENT' THEN 1 WHEN 'PM' THEN 2 WHEN 'ADMIN' THEN 3 ELSE 4 END, id ASC"
+        """SELECT * FROM team_members
+           ORDER BY CASE role
+               WHEN 'HM' THEN 1
+               WHEN 'PM' THEN 2
+               WHEN 'TL' THEN 3
+               WHEN 'CLIENT' THEN 4
+               WHEN 'DEVELOPER' THEN 5
+               ELSE 6 END, id ASC"""
     ).fetchall()
 
     wb = openpyxl.Workbook()
@@ -728,7 +852,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
     ws.views.sheetView[0].showGridLines = True
 
     # Title block
-    ws.merge_cells("A1:I1")
+    ws.merge_cells("A1:J1")
     title_cell = ws.cell(row=1, column=1)
     title_cell.value = f"JIRA AUTOMATION HUB - TEAM ROSTER & ROLES DIRECTORY (Target: {config.jira.project_key or 'SCRUM'})"
     title_cell.font = Font(name="Segoe UI", size=13, bold=True, color="FFFFFF")
@@ -737,9 +861,9 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
     ws.row_dimensions[1].height = 28
 
     # Subtitle with timestamp
-    ws.merge_cells("A2:I2")
+    ws.merge_cells("A2:J2")
     sub_cell = ws.cell(row=2, column=1)
-    sub_cell.value = f"Single Source of Truth for Team Members, Roles & Permissions | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    sub_cell.value = f"Single Source of Truth for Team Members, Roles, Hierarchy Levels & Permissions | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     sub_cell.font = Font(name="Segoe UI", size=9, italic=True, color="94A3B8")
     sub_cell.fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
     sub_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -750,6 +874,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
         "Full Name",
         "Email Address",
         "Assigned Role",
+        "Level",
         "Specialty / Focus Area",
         "Teams Graph User ID",
         "Can Approve (1/0)",
@@ -780,13 +905,23 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
     role_colors = {
         "CLIENT": ("EFF6FF", "1D4ED8"),
         "PM": ("FEF3C7", "B45309"),
+        "TL": ("F0FDF4", "15803D"),
+        "HM": ("FDF2F8", "BE185D"),
         "DEVELOPER": ("ECFDF5", "047857"),
+        "UNASSIGNED": ("F1F5F9", "64748B"),
         "ADMIN": ("F5F3FF", "6D28D9"),
     }
 
     current_row = 5
     for r in rows:
-        role = (r["role"] or "DEVELOPER").upper()
+        role = (r["role"] or "UNASSIGNED").upper()
+        level = r["level"] or (
+            "Level 1" if role == "TL" else (
+                "Level 2" if role == "PM" else (
+                    "Level 3" if role in ("HM", "HIGHER MANAGEMENT") else "-"
+                )
+            )
+        )
         bg_color, fg_color = role_colors.get(role, ("F8FAFC", "334155"))
         row_fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
 
@@ -794,6 +929,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
             r["display_name"] or "",
             r["email"] or "",
             role,
+            level,
             r["specialty"] or "General",
             r["user_id"] or "",
             "1" if r["can_approve"] else "0",
@@ -810,7 +946,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
             cell.font = Font(name="Segoe UI", size=9.5)
             cell.border = thin_border
 
-            if col_idx in (1, 2, 4):
+            if col_idx in (1, 2, 5):
                 cell.alignment = Alignment(horizontal="left", vertical="center")
             else:
                 cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -818,6 +954,8 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
             if col_idx == 3:
                 cell.fill = row_fill
                 cell.font = Font(name="Segoe UI", size=9.5, bold=True, color=fg_color)
+            elif col_idx == 4:
+                cell.font = Font(name="Segoe UI", size=9.5, bold=True)
 
         current_row += 1
 
@@ -833,29 +971,38 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
                 max_len = len(val)
         ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
 
-    # Add In-Cell Dropdown Data Validations
+    # In-Cell Dropdown Data Validations
     from openpyxl.worksheet.datavalidation import DataValidation
 
-    # 1. Assigned Role Dropdown (CLIENT, PM, DEVELOPER) for column C
-    role_dv = DataValidation(type="list", formula1='"CLIENT, PM, DEVELOPER"', allow_blank=True)
-    role_dv.error = "Please choose a valid role: CLIENT, PM, or DEVELOPER"
+    # 1. Role Dropdown (TL, Client, PM, Developer, HM, Unassigned) for Column C
+    role_dv = DataValidation(type="list", formula1='"TL, Client, PM, Developer, HM, Unassigned"', allow_blank=True)
+    role_dv.error = "Please choose a valid role: TL, Client, PM, Developer, HM, or Unassigned"
     role_dv.errorTitle = "Invalid Role"
-    role_dv.prompt = "Choose role from dropdown: CLIENT, PM, or DEVELOPER"
+    role_dv.prompt = "Choose role: TL, Client, PM, Developer, HM, or Unassigned"
     role_dv.promptTitle = "Role Selection"
     ws.add_data_validation(role_dv)
     role_dv.add("C5:C500")
 
-    # 2. Can Approve Dropdown (1, 0) for column F
+    # 2. Level Dropdown (Level 1, Level 2, Level 3, -) for Column D
+    level_dv = DataValidation(type="list", formula1='"Level 1, Level 2, Level 3, -"', allow_blank=True)
+    level_dv.error = "Please choose a valid level: Level 1, Level 2, Level 3, or -"
+    level_dv.errorTitle = "Invalid Level"
+    level_dv.prompt = "Choose hierarchy level: Level 1 (TL), Level 2 (PM), Level 3 (HM), or -"
+    level_dv.promptTitle = "Level Selection"
+    ws.add_data_validation(level_dv)
+    level_dv.add("D5:D500")
+
+    # 3. Can Approve Dropdown (1, 0) for Column G
     approve_dv = DataValidation(type="list", formula1='"1, 0"', allow_blank=True)
     approve_dv.error = "Enter 1 for approval permissions, or 0"
     approve_dv.errorTitle = "Invalid Permission"
     ws.add_data_validation(approve_dv)
-    approve_dv.add("F5:F500")
+    approve_dv.add("G5:G500")
 
-    # 3. Status Dropdown (Active, Inactive) for column H
+    # 4. Status Dropdown (Active, Inactive) for Column I
     status_dv = DataValidation(type="list", formula1='"Active, Inactive"', allow_blank=True)
     ws.add_data_validation(status_dv)
-    status_dv.add("H5:H500")
+    status_dv.add("I5:I500")
 
     return save_workbook_to_all(wb)
 
@@ -863,6 +1010,8 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
 def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str] = None) -> Dict[str, Any]:
     """Poll Microsoft Graph API for all members in the Teams chat and team/channel roster
     and feed newly arrived or updated members directly into Member.xlsx first!
+    New members default to Role: 'Unassigned', Level: '-', can_approve: False.
+    Departed members are removed immediately from Member.xlsx and database.
     """
     token = get_access_token()
     if not token:
@@ -911,19 +1060,23 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str]
         if not email and "@" in str(m.get("userPrincipalName", "")):
             email = m.get("userPrincipalName")
 
+        # Per verified requirement: newly joined members default to UNASSIGNED / '-',
+        # while existing members preserve their configured role and hierarchy level.
         res_feed = feed_member_to_excel(
             display_name=d_name,
             user_id=u_id,
             email=email,
+            role=None,
+            level=None,
+            can_approve=None,
         )
         if res_feed.get("action") == "created":
             discovered_count += 1
-            logger.info(f"✨ New member discovered and added to Member.xlsx: {d_name or u_id}")
+            logger.info(f"✨ New member discovered in Teams chat and added to Member.xlsx as Unassigned: {d_name or u_id}")
         elif res_feed.get("action") == "updated":
             updated_count += 1
 
-    # Auto-prune departed members from Member.xlsx:
-    # If all_roster_members was fetched from Graph, remove any Excel member who is no longer in Teams chat
+    # Auto-prune departed members from Member.xlsx immediately:
     removed_count = 0
     if all_roster_members:
         roster_uids = {
@@ -949,7 +1102,7 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str]
                 in_roster = True
 
             if not in_roster:
-                logger.info(f"🗑️ Detected departed member '{em.get('display_name')}' (no longer in Teams chat roster); removing from Member.xlsx")
+                logger.info(f"🗑️ Detected departed member '{em.get('display_name')}' (no longer in Teams chat roster); removing from Member.xlsx immediately")
                 if remove_member_from_excel(user_id=em.get("user_id"), display_name=em.get("display_name")):
                     removed_count += 1
 
@@ -967,13 +1120,13 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str]
     }
 
 
-# Background periodic monitor for roster auto-discovery
+# Background periodic monitor for roster auto-discovery (every 15s)
 _roster_monitor_task: Optional[asyncio.Task] = None
-ROSTER_MONITOR_INTERVAL_SECONDS = 60  # Poll Teams roster every 60 seconds
+ROSTER_MONITOR_INTERVAL_SECONDS = 15  # Rapid 15s interval for accurate join/leave tracking
 
 
 async def _roster_monitor_loop():
-    """Background loop that polls Teams roster every 60s to ensure newly added members are placed in Member.xlsx."""
+    """Background loop that polls Teams roster every 15s to ensure joins and leaves are reflected in Member.xlsx."""
     logger.info(
         f"Teams roster background monitor started (polling every {ROSTER_MONITOR_INTERVAL_SECONDS}s)",
         extra={"event": "ROSTER_MONITOR_START"},
@@ -981,7 +1134,6 @@ async def _roster_monitor_loop():
     while True:
         try:
             await asyncio.sleep(ROSTER_MONITOR_INTERVAL_SECONDS)
-            # Run sync in background executor to avoid blocking event loop
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, sync_teams_chat_roster)
         except asyncio.CancelledError:
@@ -1007,6 +1159,81 @@ def stop_roster_monitor():
     if _roster_monitor_task and not _roster_monitor_task.done():
         _roster_monitor_task.cancel()
         _roster_monitor_task = None
+
+
+# Proactive background file watcher for instant manual Excel edits
+_excel_watcher_task: Optional[asyncio.Task] = None
+EXCEL_WATCHER_INTERVAL_SECONDS = 3  # Check disk every 3 seconds for manual sheet edits
+
+
+async def _excel_file_watcher_loop():
+    """Background loop that polls Member.xlsx on disk every 3s:
+    1. Detects manual changes (role/level/member changes) in Excel desktop or Excel Online.
+    2. Instantly syncs SQLite team_members database cache.
+    3. Automatically flushes any deferred writes waiting for Excel file lock release.
+    """
+    logger.info(
+        f"Proactive Member.xlsx file watcher started (polling disk every {EXCEL_WATCHER_INTERVAL_SECONDS}s)",
+        extra={"event": "EXCEL_WATCHER_START"},
+    )
+    global _cached_mtime, _pending_excel_flushes
+
+    while True:
+        try:
+            await asyncio.sleep(EXCEL_WATCHER_INTERVAL_SECONDS)
+
+            # 1. Flush any pending writes if Excel was previously locked
+            if _pending_excel_flushes is not None and ONEDRIVE_MEMBER_PATH.parent.exists():
+                try:
+                    with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
+                        f.write(_pending_excel_flushes)
+                    logger.info(f"✅ Successfully flushed queued Member.xlsx changes to OneDrive: {ONEDRIVE_MEMBER_PATH}")
+                    _pending_excel_flushes = None
+                except PermissionError:
+                    pass  # Excel still open
+                except Exception as ex:
+                    logger.debug(f"Pending flush check: {ex}")
+
+            # 2. Check file modification time on disk
+            target = get_primary_excel_path()
+            if target.exists():
+                try:
+                    current_mtime = os.path.getmtime(target)
+                    if _cached_mtime > 0.0 and current_mtime > _cached_mtime:
+                        logger.info(
+                            f"⚡ Detected manual modification in {target.name}; synchronizing system permissions & database cache immediately",
+                            extra={"event": "MANUAL_SHEET_EDIT_DETECTED", "file": str(target)},
+                        )
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(None, sync_db_from_excel)
+                        _cached_mtime = current_mtime
+                    elif _cached_mtime == 0.0:
+                        _cached_mtime = current_mtime
+                except Exception as watch_err:
+                    logger.debug(f"Excel file watcher check notice: {watch_err}")
+        except asyncio.CancelledError:
+            break
+        except Exception as err:
+            logger.debug(f"Excel file watcher loop error: {err}")
+
+
+def start_excel_watcher():
+    """Start the proactive background Member.xlsx file watcher."""
+    global _excel_watcher_task
+    if _excel_watcher_task is None or _excel_watcher_task.done():
+        try:
+            loop = asyncio.get_running_loop()
+            _excel_watcher_task = loop.create_task(_excel_file_watcher_loop())
+        except RuntimeError:
+            pass
+
+
+def stop_excel_watcher():
+    """Stop the background Member.xlsx file watcher."""
+    global _excel_watcher_task
+    if _excel_watcher_task and not _excel_watcher_task.done():
+        _excel_watcher_task.cancel()
+        _excel_watcher_task = None
 
 
 def sync_from_onedrive_sheet(url: Optional[str] = None) -> Dict[str, Any]:

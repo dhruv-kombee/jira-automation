@@ -605,7 +605,13 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
                 if am_id:
                     try:
                         from src.services.member_sync_service import feed_member_to_excel
-                        feed_member_to_excel(display_name=am_name, user_id=am_id)
+                        feed_member_to_excel(
+                            display_name=am_name,
+                            user_id=am_id,
+                            role="UNASSIGNED",
+                            level="-",
+                            can_approve=False,
+                        )
                         logger.info(f"✨ Member added to Teams processed via eventDetail: {am_name or am_id}")
                     except Exception as ev_err:
                         logger.debug(f"EventDetail member feed error: {ev_err}")
@@ -621,7 +627,13 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     if sender_name and sender_name.strip() and sender_name.lower() != "unknown":
         try:
             from src.services.member_sync_service import feed_member_to_excel
-            feed_member_to_excel(display_name=sender_name, user_id=sender_id)
+            feed_member_to_excel(
+                display_name=sender_name,
+                user_id=sender_id,
+                role="UNASSIGNED",
+                level="-",
+                can_approve=False,
+            )
         except Exception as reg_err:
             logger.debug(f"Excel member feed check: {reg_err}")
 
@@ -1193,9 +1205,9 @@ async def check_and_auto_create_jira_ticket(
         u_id = r.get("userId") or ""
         m = get_member_by_id_or_name(user_id=u_id, display_name=d_name)
         if m:
-            m_role = (m.get("role") or "").upper()
-            if m_role == "PM":
-                approver_name = f"PM {m.get('display_name')}"
+            m_role = (m.get("role") or "").upper().strip()
+            if m_role in ("PM", "TL", "HM"):
+                approver_name = f"{m_role} {m.get('display_name')}"
                 break
             elif m.get("can_approve"):
                 approver_name = f"{m.get('display_name')} (Authorized Approver)"

@@ -25,7 +25,8 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 # Models for Admin requests
 class MemberCreateRequest(BaseModel):
     display_name: str
-    role: str = "DEVELOPER"  # CLIENT, PM, DEVELOPER, ADMIN
+    role: str = "DEVELOPER"  # CLIENT, TL, PM, HM, DEVELOPER, ADMIN, UNASSIGNED
+    level: Optional[str] = None
     email: Optional[str] = None
     user_id: Optional[str] = None
     specialty: Optional[str] = None
@@ -42,6 +43,7 @@ class MemberImportRequest(BaseModel):
 class MemberUpdateRequest(BaseModel):
     display_name: Optional[str] = None
     role: Optional[str] = None
+    level: Optional[str] = None
     email: Optional[str] = None
     user_id: Optional[str] = None
     specialty: Optional[str] = None
@@ -166,7 +168,7 @@ def list_team_members():
 
 @router.post("/members")
 def create_team_member(req: MemberCreateRequest):
-    """Add a new member with designated role and specialty directly to Member.xlsx first."""
+    """Add a new member with designated role, level, and specialty directly to Member.xlsx first."""
     if not req.display_name or not req.display_name.strip():
         raise HTTPException(status_code=400, detail="Display name is required.")
 
@@ -176,6 +178,7 @@ def create_team_member(req: MemberCreateRequest):
         user_id=req.user_id.strip() if req.user_id else "",
         email=req.email.strip() if req.email else "",
         role=req.role.upper().strip(),
+        level=req.level.strip() if req.level else None,
         specialty=req.specialty.strip() if req.specialty else "",
         can_approve=bool(req.can_approve),
     )
@@ -183,7 +186,7 @@ def create_team_member(req: MemberCreateRequest):
     db = get_db()
     db.execute(
         "INSERT INTO admin_audit_log (category, action, details) VALUES (?, ?, ?)",
-        ("MEMBERS", "MEMBER_CREATED", f"Fed member '{req.display_name}' into Member.xlsx with role '{req.role.upper()}'"),
+        ("MEMBERS", "MEMBER_CREATED", f"Fed member '{req.display_name}' into Member.xlsx with role '{req.role.upper()}', level '{req.level or '-'}'"),
     )
 
     member = get_member_by_id_or_name(user_id=req.user_id, display_name=req.display_name)
@@ -199,7 +202,7 @@ def create_team_member(req: MemberCreateRequest):
 
 @router.put("/members/{member_id}")
 def update_team_member(member_id: int, req: MemberUpdateRequest):
-    """Update role, specialty, approval permission, or active status of a member in DB and Member.xlsx."""
+    """Update role, level, specialty, approval permission, or active status of a member in DB and Member.xlsx."""
     db = get_db()
     row = db.execute("SELECT * FROM team_members WHERE id = ?", (member_id,)).fetchone()
     if not row:
@@ -208,6 +211,7 @@ def update_team_member(member_id: int, req: MemberUpdateRequest):
     current = dict(row)
     new_name = req.display_name if req.display_name is not None else current["display_name"]
     new_role = req.role.upper() if req.role is not None else current["role"]
+    new_level = req.level.strip() if req.level is not None else current.get("level", "-")
     new_email = req.email if req.email is not None else current["email"]
     new_user_id = req.user_id if req.user_id is not None else current["user_id"]
     new_specialty = req.specialty if req.specialty is not None else current["specialty"]
@@ -217,15 +221,15 @@ def update_team_member(member_id: int, req: MemberUpdateRequest):
     db.execute(
         """
         UPDATE team_members
-        SET display_name = ?, role = ?, email = ?, user_id = ?, specialty = ?, can_approve = ?, is_active = ?, updated_at = datetime('now')
+        SET display_name = ?, role = ?, level = ?, email = ?, user_id = ?, specialty = ?, can_approve = ?, is_active = ?, updated_at = datetime('now')
         WHERE id = ?
         """,
-        (new_name, new_role, new_email, new_user_id, new_specialty, new_can_approve, new_is_active, member_id),
+        (new_name, new_role, new_level, new_email, new_user_id, new_specialty, new_can_approve, new_is_active, member_id),
     )
 
     db.execute(
         "INSERT INTO admin_audit_log (category, action, details) VALUES (?, ?, ?)",
-        ("MEMBERS", "MEMBER_UPDATED", f"Updated member '{new_name}': role={new_role}, can_approve={new_can_approve}, active={new_is_active}"),
+        ("MEMBERS", "MEMBER_UPDATED", f"Updated member '{new_name}': role={new_role}, level={new_level}, can_approve={new_can_approve}, active={new_is_active}"),
     )
 
     # Re-export to Member.xlsx
@@ -423,6 +427,16 @@ def execute_members_upsert(members: List[Dict[str, Any]], strategy: str = "upser
             continue
         email = (m.get("email") or "").strip()
         role = (m.get("role") or "DEVELOPER").upper().strip()
+        level = (m.get("level") or "").strip()
+        if not level:
+            if role == "TL":
+                level = "Level 1"
+            elif role == "PM":
+                level = "Level 2"
+            elif role == "HM":
+                level = "Level 3"
+            else:
+                level = "-"
         specialty = (m.get("specialty") or "").strip()
         user_id = (m.get("user_id") or "").strip()
         can_approve = 1 if m.get("can_approve") else 0
@@ -439,21 +453,21 @@ def execute_members_upsert(members: List[Dict[str, Any]], strategy: str = "upser
                 """
                 UPDATE team_members
                 SET display_name = ?, email = COALESCE(NULLIF(?, ''), email),
-                    role = ?, specialty = COALESCE(NULLIF(?, ''), specialty),
+                    role = ?, level = COALESCE(NULLIF(?, ''), level), specialty = COALESCE(NULLIF(?, ''), specialty),
                     user_id = COALESCE(NULLIF(?, ''), user_id),
                     can_approve = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (disp_name, email, role, specialty, user_id, can_approve, m_id),
+                (disp_name, email, role, level, specialty, user_id, can_approve, m_id),
             )
             updated_count += 1
         else:
             cursor.execute(
                 """
-                INSERT INTO team_members (user_id, display_name, email, role, specialty, can_approve, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
+                INSERT INTO team_members (user_id, display_name, email, role, level, specialty, can_approve, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 """,
-                (user_id, disp_name, email, role, specialty, can_approve),
+                (user_id, disp_name, email, role, level, specialty, can_approve),
             )
             imported_count += 1
 
@@ -477,11 +491,11 @@ def execute_members_upsert(members: List[Dict[str, Any]], strategy: str = "upser
 def download_members_template():
     """Download standard CSV template for team members import."""
     csv_content = (
-        "Name,Email,Role,Specialty,Teams_User_ID,Can_Approve\n"
-        "Dhruv Dobariya,dhruv.d.kombee@gmail.com,CLIENT,Client Product Owner,35e03956-1723-469c-b561-90f03fc566ed,1\n"
-        "Hemil Ghori,hemil.ghori@kombee.com,PM,Project Manager / Scrum Master,83b10217-f4c0-4f87-97f9-d95a33ddaaa0,1\n"
-        "Santosh Yadav,santosh.yadav@kombee.com,DEVELOPER,Backend & API Lead,d7bc3c28-33d9-4973-816e-445d51556b8b,0\n"
-        "Musaib Khan,musaib.khan@kombee.com,DEVELOPER,Frontend & UI Lead,c5a63f53-cc7a-4c05-ac9a-77e6991bc974,0\n"
+        "Name,Email,Role,Level,Specialty,Teams_User_ID,Can_Approve\n"
+        "Dhruv Dobariya,dhruv.d.kombee@gmail.com,CLIENT,-,Client Product Owner,35e03956-1723-469c-b561-90f03fc566ed,1\n"
+        "Hemil Ghori,hemil.ghori@kombee.com,PM,Level 2,Project Manager / Scrum Master,83b10217-f4c0-4f87-97f9-d95a33ddaaa0,1\n"
+        "Santosh Yadav,santosh.yadav@kombee.com,DEVELOPER,-,Backend & API Lead,d7bc3c28-33d9-4973-816e-445d51556b8b,0\n"
+        "Musaib Khan,musaib.khan@kombee.com,DEVELOPER,-,Frontend & UI Lead,c5a63f53-cc7a-4c05-ac9a-77e6991bc974,0\n"
     )
     return Response(
         content=csv_content,
