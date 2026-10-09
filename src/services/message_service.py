@@ -1206,16 +1206,11 @@ async def check_and_auto_create_jira_ticket(
         d_name = r.get("displayName") or ""
         u_id = r.get("userId") or ""
         m = get_member_by_id_or_name(user_id=u_id, display_name=d_name)
-        if m:
+        if m and m.get("is_active", True):
             m_role = (m.get("role") or "").upper().strip()
-            if m_role in ("PM", "TL", "HM"):
+            m_lvl = str(m.get("level") or "").upper().strip()
+            if m_role in ("PM", "TL", "HM") or m_lvl in ("LEVEL 1", "LEVEL 2", "LEVEL 3"):
                 approver_name = f"{m_role} {m.get('display_name')}"
-                break
-            elif m.get("can_approve"):
-                approver_name = f"{m.get('display_name')} (Authorized Approver)"
-                break
-            elif config.roles.allow_self_approval and m_role == "CLIENT":
-                approver_name = f"{m.get('display_name')} (Client Approver)"
                 break
 
     # Check if this message is a client text message

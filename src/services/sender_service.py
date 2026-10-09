@@ -92,6 +92,13 @@ def is_ticket_approval_reaction(reaction_type: Optional[str]) -> bool:
     return False
 
 
+def is_role_authorized(role: Optional[str]) -> bool:
+    """Check if a role string is an authorized management role (TL, PM, HM)."""
+    if not role:
+        return False
+    return role.upper().strip() in ("TL", "PM", "HM")
+
+
 def is_user_authorized_approver(
     user_id: Optional[str] = None,
     display_name: Optional[str] = None,
@@ -99,7 +106,7 @@ def is_user_authorized_approver(
 ) -> bool:
     """Check if a specific user has approval permissions based directly on Member.xlsx.
     Strictly: only active management levels (Level 1 TL, Level 2 PM, Level 3 HM) are authorized approvers.
-    Clients, developers, and unassigned senders cannot approve.
+    Clients, developers, and unassigned senders cannot approve under any circumstances.
     """
     member = get_member_by_id_or_name(user_id=user_id, display_name=display_name)
     if member:
@@ -121,13 +128,15 @@ def is_user_authorized_approver(
             return True
         if member.get("can_approve") and role not in ("DEVELOPER", "UNASSIGNED", "CLIENT"):
             return True
+        return False
 
-    # Fallback configured PM GUID only
+    # Fallback configured PM GUID only if not identified as a non-management user
     u_id_clean = (user_id or "").lower().strip()
     if u_id_clean and config.roles.pm and config.roles.pm.lower().strip() == u_id_clean:
         return True
 
     return False
+
 
 
 def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = None) -> bool:

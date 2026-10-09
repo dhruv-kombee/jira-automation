@@ -69,20 +69,16 @@ def has_pm_reacted(
             if pm_name and (pm_name.lower().strip() in dname or dname in pm_name.lower().strip()):
                 return True
 
-            # Check if reactor is TL, PM, HM, or authorized in Member.xlsx
+            # Check if reactor is TL, PM, HM, or authorized management in Member.xlsx
             member = get_member_by_id_or_name(user_id=uid, display_name=dname)
             if member:
                 m_role = (member.get("role") or "").upper().strip()
                 m_lvl = str(member.get("level") or "").upper().strip()
-                if m_role in ("PM", "TL", "HM") or m_lvl in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3"):
+                if member.get("is_active", True) and (m_role in ("PM", "TL", "HM") or m_lvl in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3")):
                     return True
-                if member.get("can_approve") and m_role not in ("DEVELOPER", "UNASSIGNED"):
-                    return True
-                if config.roles.allow_self_approval and m_role == "CLIENT":
+                if member.get("can_approve") and m_role not in ("DEVELOPER", "UNASSIGNED", "CLIENT"):
                     return True
 
-            if config.roles.allow_self_approval and config.roles.client and uid == config.roles.client.lower().strip():
-                return True
             if config.roles.pm and uid == config.roles.pm.lower().strip():
                 return True
 

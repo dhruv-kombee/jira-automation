@@ -46,6 +46,13 @@
     </div>
 
     <div class="header-right">
+      <div class="active-identity-box" style="display:inline-flex; align-items:center; gap:0.4rem; background:rgba(30,41,59,0.8); border:1px solid #334155; padding:5px 12px; border-radius:8px;">
+        <span style="font-size:0.75rem; color:#94a3b8; font-weight:600;">👤 Active Role:</span>
+        <select id="activeIdentitySelect" style="background:transparent; border:none; color:#38bdf8; font-size:0.8rem; font-weight:700; outline:none; cursor:pointer;">
+          <option value="">Loading...</option>
+        </select>
+      </div>
+
       <div class="status-pill status-pill-online" id="connectionStatus">
         <span class="status-dot"></span>
         <span>SYSTEM ONLINE</span>

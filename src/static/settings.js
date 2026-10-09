@@ -223,11 +223,44 @@ document.addEventListener('DOMContentLoaded', () => {
       if (data.success) {
         membersList = data.members || [];
         renderMembers();
+        updateActiveIdentityDropdown();
       }
     } catch (err) {
       console.error('Could not load members:', err);
       membersTableBody.innerHTML = `<tr><td colspan="7" style="color:var(--accent-rose); text-align:center; padding:1.5rem;">Failed to load members.</td></tr>`;
     }
+  }
+
+  function updateActiveIdentityDropdown() {
+    const sel = document.getElementById('activeIdentitySelect');
+    if (!sel || !membersList.length) return;
+    const currentSaved = localStorage.getItem('saved_jira_reviewer') || '';
+    sel.innerHTML = membersList.map(m => {
+      const name = m.display_name;
+      const role = (m.role || '').toUpperCase();
+      const lvl = m.level && m.level !== '-' ? ` (${m.level})` : '';
+      const isSel = (currentSaved && (currentSaved === name || currentSaved === m.user_id));
+      return `<option value="${name}" ${isSel ? 'selected' : ''}>${name} (${role}${lvl})</option>`;
+    }).join('');
+
+    if (!currentSaved && membersList.length) {
+      const def = membersList.find(m => (m.role || '').toUpperCase() === 'CLIENT') || membersList[0];
+      if (def) {
+        sel.value = def.display_name;
+        localStorage.setItem('saved_jira_reviewer', def.display_name);
+        document.cookie = "jira_reviewer=" + encodeURIComponent(def.display_name) + "; path=/; max-age=2592000";
+      }
+    }
+  }
+
+  const activeIdentitySelectEl = document.getElementById('activeIdentitySelect');
+  if (activeIdentitySelectEl) {
+    activeIdentitySelectEl.addEventListener('change', (e) => {
+      const val = e.target.value;
+      localStorage.setItem('saved_jira_reviewer', val);
+      document.cookie = "jira_reviewer=" + encodeURIComponent(val) + "; path=/; max-age=2592000";
+      showToast(`Switched active reviewer to ${val}`);
+    });
   }
 
   function getAvatarClass(role) {
