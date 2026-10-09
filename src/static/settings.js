@@ -1493,6 +1493,39 @@ document.addEventListener('DOMContentLoaded', () => {
       .replace(/'/g, '&#39;');
   }
 
+  // Real-time synchronization via WebSocket
+  function initSettingsWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    try {
+      const ws = new WebSocket(wsUrl);
+      ws.onmessage = async (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'ROSTER_UPDATED') {
+            if (!hasUnsavedChanges) {
+              await loadOverview();
+              await loadMembers();
+              showToast('📋 Roster updated from Member.xlsx', 'info');
+            }
+          }
+        } catch (e) {}
+      };
+      ws.onclose = () => {
+        setTimeout(initSettingsWebSocket, 5000);
+      };
+    } catch (e) {}
+  }
+
   // Run on start
   loadAllData();
+  initSettingsWebSocket();
+
+  // Periodic background sync if no unsaved changes (15s)
+  setInterval(() => {
+    if (!hasUnsavedChanges) {
+      loadOverview();
+      loadMembers();
+    }
+  }, 15000);
 });

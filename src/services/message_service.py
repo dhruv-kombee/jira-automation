@@ -418,7 +418,7 @@ async def _schedule_deferred_reaction_check(
                 (message_id,),
             ).fetchone()
             if row and not row["jira_issue_key"]:
-                if not row["confirmation_status"]:
+                if not row["confirmation_status"] or row["confirmation_status"] in ("AWAITING_FINAL_CONFIRMATION", "DECLINED"):
                     await check_and_auto_create_jira_ticket(normalized, sender_role)
 
         if result.get("updated") and result.get("reactions_changed"):
@@ -728,6 +728,8 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
         if not row["confirmation_status"]:
             if (change_type != "created" and result.get("reactions_changed", False)) or has_approval_rx:
                 should_triage = True
+        elif row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION" and has_approval_rx:
+            should_triage = True
         elif row["confirmation_status"] == "DECLINED" and has_approval_rx:
             should_triage = True
     elif not row:
@@ -1220,11 +1222,16 @@ async def check_and_auto_create_jira_ticket(
     is_client_message = bool(row and row["message_text"])
 
     # If this is a client issue message that has not yet been triaged:
-    # A reaction with ticket emoji (🎟️, 🎫) or thumbs up must execute STEP 1
-    # to display the Confirmation Block in Teams for PM approval.
+    # A reaction with ticket emoji (🎟️, 🎫) starts ticket creation (STEP 1)
+    # Per table: "Ticket or Admission Ticket emoji -> Starts ticket creation"
+    # "Thumbs Up emoji -> Approves the step-2 confirmation card"
+    # "Cross Mark emoji -> Declines ticket creation"
     target_msg_id = msg_id
     if is_client_message and confirmation_status != "AWAITING_FINAL_CONFIRMATION":
-        if not (has_approval or has_conf_approval):
+        if has_disapproval:
+            # If TL/PM/HM reacts with ❌ on the raw message, decline ticket creation immediately
+            return await execute_jira_ticket_decline(target_msg_id, approver_name=approver_name)
+        if not has_approval:
             return None
         # Fall through to STEP 1 below to post the Confirmation Block!
 
@@ -1266,6 +1273,18 @@ async def check_and_auto_create_jira_ticket(
         if has_disapproval:
             return await execute_jira_ticket_decline(target_msg_id, approver_name=approver_name)
         elif has_conf_approval:
+            # Per Specification: "Thumbs Up emoji -> Approves the step-2 confirmation card"
+            # If reacting on the original client message, require thumbs up (like / 👍)
+            # because ticket emoji 🎟️ was already used to start ticket creation in Step 1.
+            if is_client_message:
+                from src.services.sender_service import is_user_authorized_approver
+                has_thumbs_up = any(
+                    (r.get("reactionType") or "").strip().lower() in {"like", "👍", ":thumbsup:", ":+1:"}
+                    and is_user_authorized_approver(user_id=r.get("userId"), display_name=r.get("displayName"))
+                    for r in reactions
+                )
+                if not has_thumbs_up:
+                    return None
             return await execute_jira_ticket_creation(target_msg_id, approver_name=approver_name)
         return None
 

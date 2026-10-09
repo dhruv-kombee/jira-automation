@@ -9,7 +9,7 @@ Features:
 - Smart Assignee Routing by @mention or module specialty.
 - Comprehensive Offline Rule-Based Heuristic Fallback.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 import asyncio
 import json
@@ -72,7 +72,7 @@ class JiraTicketItem(BaseModel):
     )
     suggested_assignee: Optional[str] = Field(
         default=None,
-        description="Name of suggested developer (e.g. Musaib Khan, Hemil Ghori) or null",
+        description="Name of suggested developer matching active team roster, or null",
     )
     assignee_rationale: Optional[str] = Field(
         default=None,
@@ -158,15 +158,9 @@ Rules:
    - Priority: "Highest" or "High" if affecting the entire application, blocking checkouts/auth, or causing downtime. "Medium" for standard bugs. "Low" for minor cosmetic issues.
 
 6. Developer Assignment Routing:
-   - Direct Mentions: If message @mentions or specifies a developer name:
-     - Musaib / Musain -> "Musaib Khan" (Frontend Lead)
-     - Hemil -> "Hemil Ghori" (Backend Lead)
-     - Nisit -> "Nisit Patel" (Database / Infra)
-   - Module Specialty (if no mention):
-     - Frontend, UI, CSS, Design, Responsive -> "Musaib Khan"
-     - Backend, API, Server 500, Integrations -> "Hemil Ghori"
-     - Database, SQL, Migration -> "Nisit Patel"
-     - Otherwise: null (Awaiting PM Triage)
+   - Direct Mentions: If message @mentions or specifies a team member or developer by name, assign to that person.
+   - Module Specialty: If no direct mention, match against the active developer specialties in the team roster.
+   - Ambiguous or No Match: Set suggested_assignee = null (Awaiting PM Triage).
 """
 
 
@@ -252,7 +246,42 @@ def extract_text_from_attachment(raw_bytes: bytes, name: str, content_type: str)
     except Exception as exc:
         logger.debug(f"Attachment content extraction error for {name}: {exc}")
 
-    return None
+def match_assignee_from_roster(text: str) -> Tuple[Optional[str], Optional[str], str]:
+    """Dynamically match developer assignee and module from Member.xlsx roster without hardcoding names."""
+    lower = text.lower()
+    try:
+        from src.services.member_sync_service import get_all_members_from_excel
+        members = get_all_members_from_excel()
+        active_members = [
+            m for m in members
+            if m.get("is_active") and (m.get("role") or "").upper() in ("DEVELOPER", "TL")
+        ]
+
+        # 1. Direct mention / name match
+        for m in active_members:
+            full = (m.get("display_name") or "").strip()
+            first = full.split()[0].lower() if full else ""
+            if full and (full.lower() in lower or (len(first) >= 3 and first in lower)):
+                return full, "Directly mentioned in message", m.get("specialty") or "General"
+
+        # 2. Specialty keyword match
+        for m in active_members:
+            spec = (m.get("specialty") or "").strip()
+            if spec and spec.lower() not in ("general", "-", "pending role assignment", "client product owner"):
+                keywords = [w.lower() for w in re.split(r"[\s/&,]+", spec) if len(w) > 3]
+                if any(kw in lower for kw in keywords):
+                    return m.get("display_name"), f"{spec} specialist", spec
+    except Exception:
+        pass
+
+    # Generic module classification
+    if any(k in lower for k in ["ui", "css", "button", "frontend", "screen", "page", "display"]):
+        return None, None, "Frontend/UI"
+    elif any(k in lower for k in ["api", "server", "backend", "500", "endpoint", "database", "sql"]):
+        return None, None, "Backend/API"
+
+    return None, None, "General"
+
 
 def _rule_based_fallback(
     text: str,
@@ -309,26 +338,8 @@ def _rule_based_fallback(
 
     summary = f"[{issue_type}] {raw_title}"
 
-    # Suggested assignee & module
-    assignee = None
-    assignee_rationale = None
-    affected_module = "General"
-
-    if any(k in lower_text for k in ["ui", "css", "button", "frontend", "screen", "page", "display"]):
-        affected_module = "Frontend/UI"
-        assignee = "Musaib Khan"
-        assignee_rationale = "Frontend module specialist"
-    elif any(k in lower_text for k in ["api", "server", "backend", "500", "endpoint", "database", "sql"]):
-        affected_module = "Backend/API"
-        assignee = "Hemil Ghori"
-        assignee_rationale = "Backend module specialist"
-
-    if "musaib" in lower_text or "musain" in lower_text:
-        assignee = "Musaib Khan"
-        assignee_rationale = "Directly mentioned in message"
-    elif "hemil" in lower_text:
-        assignee = "Hemil Ghori"
-        assignee_rationale = "Directly mentioned in message"
+    # Suggested assignee & module dynamically matched from Member.xlsx (SSOT)
+    assignee, assignee_rationale, affected_module = match_assignee_from_roster(lower_text)
 
     evidence = []
     if attachment_names:
@@ -389,34 +400,9 @@ Details & Investigation:
             sub_assignee_rationale = None
             module_tag = "General"
 
-            if re.search(r'\b(?:ai|ml|llm|prompt|gemini|gpt|model|summariz\w*|nlp)\b', item_lower):
-                sub_module = "AI/ML"
-                sub_assignee = "Nishi Sharma"
-                sub_assignee_rationale = "AI Developer"
-                module_tag = "AI Service"
-            elif any(k in item_lower for k in ["api", "server", "backend", "500", "404", "auth", "login", "password", "reset", "email", "token", "jwt", "endpoint", "database", "sql"]):
-                sub_module = "Backend/API"
-                sub_assignee = "Santosh Yadav"
-                sub_assignee_rationale = "Backend & API Lead"
-                module_tag = "Authentication" if any(w in item_lower for w in ["auth", "login", "password", "reset", "email"]) else "Backend"
-            elif any(k in item_lower for k in ["ui", "css", "button", "frontend", "screen", "page", "display", "mobile", "navbar", "menu", "modal", "upload", "picture", "avatar"]):
-                sub_module = "Frontend/UI"
-                sub_assignee = "Musaib Khan"
-                sub_assignee_rationale = "Frontend & UI Lead"
-                module_tag = "User Profile" if any(w in item_lower for w in ["upload", "picture", "avatar", "profile"]) else "Frontend"
-
-            if "musaib" in item_lower or "musain" in item_lower:
-                sub_assignee = "Musaib Khan"
-                sub_assignee_rationale = "Directly mentioned in message"
-            elif "santosh" in item_lower:
-                sub_assignee = "Santosh Yadav"
-                sub_assignee_rationale = "Directly mentioned in message"
-            elif "nishi" in item_lower:
-                sub_assignee = "Nishi Sharma"
-                sub_assignee_rationale = "Directly mentioned in message"
-            elif "hemil" in item_lower:
-                sub_assignee = "Hemil Ghori"
-                sub_assignee_rationale = "Directly mentioned in message"
+            # Suggested assignee & module dynamically matched from Member.xlsx (SSOT)
+            sub_assignee, sub_assignee_rationale, sub_module = match_assignee_from_roster(item_lower)
+            module_tag = sub_module.split("/")[0] if "/" in sub_module else sub_module
 
             raw_first_line = [l.strip() for l in item_clean.splitlines() if l.strip()][0]
             clean_first_line = re.sub(r'^(?:(?:issue|bug|defect|task|item|point)?\s*#?[0-9]+[\.:\)-]|[-*•])\s*', '', raw_first_line, flags=re.IGNORECASE).strip()

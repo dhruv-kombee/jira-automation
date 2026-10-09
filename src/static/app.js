@@ -51,8 +51,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   await fetchStatus();
   await fetchMessages();
 
-  // Periodic status & messages poll as background sync (15s)
+  // Periodic status, roster & messages poll as background sync (15s)
   setInterval(() => {
+    loadTeamMembers();
     fetchStatus();
     fetchMessages();
   }, 15000);
@@ -378,13 +379,22 @@ function renderStatus(data) {
   if (data.roles) {
     const pmName = data.roles.pm?.name?.replace(' (PM)', '') || 'PM';
     const devName = data.roles.developer?.name?.replace(' (Developer)', '') || 'Developer';
-    const clientName = data.roles.client?.name?.replace(' (Client)', '') || 'Client';
+    const clientName = data.roles.client?.name?.replace(' (Client)', '') || 'None';
 
     const elPmLabel = document.getElementById('metricPmLabel');
-    if (elPmLabel) elPmLabel.innerText = `PM (${pmName})`;
+    if (elPmLabel) elPmLabel.innerText = data.roles.pm?.assigned !== false ? `PM (${pmName})` : 'PM (Unassigned)';
 
     const elDevLabel = document.getElementById('metricDevLabel');
-    if (elDevLabel) elDevLabel.innerText = `Developer (${devName})`;
+    if (elDevLabel) elDevLabel.innerText = data.roles.developer?.assigned !== false ? `Developer (${devName})` : 'Developer (Unassigned)';
+
+    const elClientLabel = document.getElementById('metricClientLabel');
+    if (elClientLabel) {
+      if (data.roles.client?.assigned === false || clientName === 'Unassigned' || clientName === 'None') {
+        elClientLabel.innerText = 'Client (Unassigned)';
+      } else {
+        elClientLabel.innerText = `Client (${clientName})`;
+      }
+    }
 
     const elOptPm = document.getElementById('simOptPm');
     if (elOptPm) elOptPm.innerText = `PM (${pmName})`;
@@ -528,19 +538,26 @@ function renderDirectorySidebar() {
   const roleColors = {
     CLIENT: 'role-avatar-client',
     PM: 'role-avatar-pm',
+    TL: 'role-avatar-pm',
+    HM: 'role-avatar-admin',
     DEVELOPER: 'role-avatar-dev',
     ADMIN: 'role-avatar-admin',
+    UNASSIGNED: 'role-avatar-dev',
   };
 
   const rolePillColors = {
     CLIENT: 'role-client',
     PM: 'role-pm',
+    TL: 'role-pm',
+    HM: 'role-admin',
     DEVELOPER: 'role-dev',
     ADMIN: 'role-admin',
+    UNASSIGNED: 'role-unknown',
   };
 
   container.innerHTML = window.teamMembersList.map(m => {
     const role = (m.role || 'DEVELOPER').toUpperCase();
+    const levelStr = (m.level && m.level !== '-') ? ` • ${escapeHtml(m.level)}` : '';
     const initials = (m.display_name || 'U')
       .split(' ')
       .filter(Boolean)
@@ -558,7 +575,7 @@ function renderDirectorySidebar() {
         <div class="role-avatar ${avatarClass}">${initials}</div>
         <div class="role-details">
           <span class="role-name">${escapeHtml(m.display_name)}</span>
-          <span class="role-type ${pillClass}">${role}${m.can_approve ? ' (Approver)' : ''}</span>
+          <span class="role-type ${pillClass}">${role}${levelStr}${m.can_approve ? ' (Approver)' : ''}</span>
           <span class="role-id font-mono">${escapeHtml(shortId)}</span>
         </div>
       </div>
@@ -834,7 +851,7 @@ function createMessageCard(msg, role) {
         const data = await res.json();
         if (res.ok && data.success) {
           const method = data.teams?.method || 'delivered';
-          showToast(`⏰ Follow-up sent to PM (${data.pm?.name || 'Santosh Yadav'}) via ${method}!`, 'success');
+          showToast(`⏰ Follow-up sent to PM (${data.pm?.name || 'Project Manager'}) via ${method}!`, 'success');
           await fetchMessages();
         } else {
           showToast(data.detail || data.reason || data.error || 'Failed to send reminder', 'error');
@@ -1072,6 +1089,14 @@ function initWebSocket() {
     ws.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
+
+        // Team Roster Synchronized from Member.xlsx
+        if (payload.type === 'ROSTER_UPDATED') {
+          showToast('📋 Team roster updated from Member.xlsx!', 'info');
+          loadTeamMembers();
+          fetchStatus();
+          return;
+        }
 
         // PM SLA Follow-up Reminder Sent
         if (payload.type === 'PM_REMINDER_SENT') {

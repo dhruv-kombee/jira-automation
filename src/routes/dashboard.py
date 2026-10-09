@@ -1,10 +1,11 @@
 import time
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, HTMLResponse
+from pydantic import BaseModel  
+from fastapi import APIRouter, Request, Response, HTTPException, WebSocket
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 
 from src.config import config
 from src.database import get_db
@@ -51,30 +52,50 @@ def get_system_status():
     pm_m = next((m for m in members if (m.get("role") or "").upper() == "PM"), None)
     dev_m = next((m for m in members if (m.get("role") or "").upper() == "DEVELOPER"), None)
 
-    client_id = (client_m.get("user_id") if client_m else None) or config.roles.client or ""
-    client_name = (client_m.get("display_name") if client_m else None) or "Client"
-    pm_id = (pm_m.get("user_id") if pm_m else None) or config.roles.pm or ""
-    pm_name = (pm_m.get("display_name") if pm_m else None) or "Project Manager"
-    dev_id = (dev_m.get("user_id") if dev_m else None) or config.roles.developer or ""
-    dev_name = (dev_m.get("display_name") if dev_m else None) or "Developer"
+    if client_m:
+        client_id = client_m.get("user_id") or ""
+        client_name = client_m.get("display_name") or "Client"
+        client_assigned = True
+        cursor.execute(
+            "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE ?",
+            (client_id, client_id, f"%{client_name.split()[0].lower()}%"),
+        )
+        client_msgs = cursor.fetchone()[0]
+    else:
+        client_id = ""
+        client_name = "Unassigned"
+        client_assigned = False
+        client_msgs = 0
 
-    cursor.execute(
-        "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE ?",
-        (client_id, client_id, f"%{client_name.split()[0].lower()}%"),
-    )
-    client_msgs = cursor.fetchone()[0]
+    if pm_m:
+        pm_id = pm_m.get("user_id") or ""
+        pm_name = pm_m.get("display_name") or "Project Manager"
+        pm_assigned = True
+        cursor.execute(
+            "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE ?",
+            (pm_id, pm_id, f"%{pm_name.split()[0].lower()}%"),
+        )
+        pm_msgs = cursor.fetchone()[0]
+    else:
+        pm_id = ""
+        pm_name = "Unassigned"
+        pm_assigned = False
+        pm_msgs = 0
 
-    cursor.execute(
-        "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE ?",
-        (pm_id, pm_id, f"%{pm_name.split()[0].lower()}%"),
-    )
-    pm_msgs = cursor.fetchone()[0]
-
-    cursor.execute(
-        "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE ?",
-        (dev_id, dev_id, f"%{dev_name.split()[0].lower()}%"),
-    )
-    dev_msgs = cursor.fetchone()[0]
+    if dev_m:
+        dev_id = dev_m.get("user_id") or ""
+        dev_name = dev_m.get("display_name") or "Developer"
+        dev_assigned = True
+        cursor.execute(
+            "SELECT COUNT(*) FROM messages WHERE (LOWER(sender_user_id) = LOWER(?) AND ? != '') OR LOWER(sender_display_name) LIKE ?",
+            (dev_id, dev_id, f"%{dev_name.split()[0].lower()}%"),
+        )
+        dev_msgs = cursor.fetchone()[0]
+    else:
+        dev_id = ""
+        dev_name = "Unassigned"
+        dev_assigned = False
+        dev_msgs = 0
 
     other_msgs = max(0, total_messages - (client_msgs + pm_msgs + dev_msgs))
 
@@ -97,9 +118,9 @@ def get_system_status():
             "title": "Team To Jira Ticket Creation" if config.teams.chat_id else "Channel",
         },
         "roles": {
-            "client": {"id": client_id, "name": f"{client_name} (Client)"},
-            "pm": {"id": pm_id, "name": f"{pm_name} (PM)"},
-            "developer": {"id": dev_id, "name": f"{dev_name} (Developer)"},
+            "client": {"id": client_id, "name": f"{client_name} (Client)" if client_assigned else "Unassigned", "assigned": client_assigned},
+            "pm": {"id": pm_id, "name": f"{pm_name} (PM)" if pm_assigned else "Unassigned", "assigned": pm_assigned},
+            "developer": {"id": dev_id, "name": f"{dev_name} (Developer)" if dev_assigned else "Unassigned", "assigned": dev_assigned},
         },
         "pipeline": {
             "phase1": {"name": "Message Detection", "status": "active"},
@@ -249,11 +270,15 @@ async def simulate_message(req: SimulateMessageRequest):
 
     from src.services.member_sync_service import get_active_pm_from_excel, get_all_members_from_excel
     pm_info = get_active_pm_from_excel()
+    members = get_all_members_from_excel()
+    client_m = next((m for m in members if (m.get("role") or "").upper() == "CLIENT"), None)
+    dev_m = next((m for m in members if (m.get("role") or "").upper() == "DEVELOPER"), None)
+
     role = (req.role or "CLIENT").upper()
     role_map = {
-        "CLIENT": (config.roles.client, req.sender_name or "Dhruv dobariya"),
+        "CLIENT": (client_m.get("user_id") if client_m else config.roles.client, req.sender_name or (client_m.get("display_name") if client_m else "Client User")),
         "PM": (pm_info.get("user_id") or config.roles.pm, req.sender_name or pm_info.get("name", "Project Manager")),
-        "DEVELOPER": (config.roles.developer, req.sender_name or "Musaib Khan"),
+        "DEVELOPER": (dev_m.get("user_id") if dev_m else config.roles.developer, req.sender_name or (dev_m.get("display_name") if dev_m else "Lead Developer")),
     }
 
     user_id, display_name = role_map.get(role, ("sim-user-" + str(uuid.uuid4())[:6], req.sender_name or "Test User"))
@@ -332,7 +357,7 @@ async def simulate_message(req: SimulateMessageRequest):
 
 @router.post("/api/test/simulate-pm-approval/{message_id}")
 async def simulate_pm_approval(message_id: str):
-    """Simulate PM Santosh Yadav reacting with 👍 in Teams to test closed-loop ticket creation."""
+    """Simulate PM reacting with 👍 in Teams to test closed-loop ticket creation."""
     db = get_db()
     cursor = db.cursor()
     cursor.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,))
@@ -395,7 +420,7 @@ async def simulate_pm_approval(message_id: str):
 
 @router.post("/api/test/simulate-pm-disapproval/{message_id}")
 async def simulate_pm_disapproval(message_id: str):
-    """Simulate PM Santosh Yadav reacting with ❌ in Teams to test disapproval."""
+    """Simulate PM reacting with ❌ in Teams to test disapproval."""
     db = get_db()
     cursor = db.cursor()
     cursor.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,))
@@ -460,6 +485,7 @@ def render_confirmation_html(
     message: str,
     details: Optional[dict] = None,
     actions: Optional[list] = None,
+    status_code: int = 200,
 ) -> HTMLResponse:
     details = details or {}
     actions = actions or []
@@ -479,6 +505,18 @@ def render_confirmation_html(
         f'<a href="{act.get("url")}" target="_blank" style="display:inline-block; margin:6px; padding:10px 20px; background:#3b82f6; color:#ffffff; font-weight:600; border-radius:8px; text-decoration:none;">{act.get("label")}</a>'
         for act in actions
     )
+
+    auto_close_script = ""
+    if status_type in ("success", "declined") and status_code < 400:
+        auto_close_script = """
+  <script>
+    // Automatically close tab after 1 seconds
+    window.onload = function() {
+      setTimeout(function() {
+        try { window.close(); } catch(e) {}
+      }, 2500);
+    };
+  </script>"""
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -520,7 +558,7 @@ def render_confirmation_html(
       background: {badge_color}22;
       color: {badge_color};
       border: 1px solid {badge_color}44;
-      margin-bottom: 16px;
+      margin-bottom: 20px;
     }}
     h1 {{
       font-size: 20px;
@@ -548,14 +586,7 @@ def render_confirmation_html(
       margin-top: 24px;
     }}
   </style>
-  <script>
-    // Automatically close tab after 1.5 seconds
-    window.onload = function() {{
-      setTimeout(function() {{
-        try {{ window.close(); }} catch(e) {{}}
-      }}, 1500);
-    }};
-  </script>
+  {auto_close_script}
 </head>
 <body>
   <div class="card">
@@ -571,47 +602,94 @@ def render_confirmation_html(
   </div>
 </body>
 </html>"""
-    return HTMLResponse(content=html_content, status_code=200)
+    return HTMLResponse(content=html_content, status_code=status_code)
 
 
-def render_assignee_dropdown_html(
+def resolve_and_verify_approver(approver_identifier: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Verify that the provided approver identifier belongs to an active, authorized management member (TL, PM, HM)."""
+    if not approver_identifier:
+        return None
+    from src.services.member_sync_service import get_member_by_id_or_name
+    from src.services.sender_service import is_user_authorized_approver
+
+    member = get_member_by_id_or_name(user_id=approver_identifier, display_name=approver_identifier)
+    if not member:
+        return None
+
+    # Check if member is authorized to approve (explicitly disallow client self-approval on the web form)
+    if not is_user_authorized_approver(user_id=member.get("user_id"), display_name=member.get("display_name"), allow_client=False):
+        return None
+
+    return member
+
+
+def get_approver_name_for_message(row: Optional[Any] = None, explicit_reviewer: Optional[str] = None) -> str:
+    """Resolve an authorized approver name string (e.g. 'TL', 'PM ', 'HM ')."""
+    from src.services.member_sync_service import get_active_pm_from_excel, get_member_by_id_or_name
+    import json
+
+    # 1. If explicit reviewer provided and valid
+    if explicit_reviewer:
+        m = get_member_by_id_or_name(user_id=explicit_reviewer, display_name=explicit_reviewer)
+        if m:
+            m_role = (m.get("role") or "PM").upper().strip()
+            return f"{m_role} {m.get('display_name')}"
+
+    # 2. Check reactions stored on the message for an authorized manager (TL, PM, HM)
+    if row:
+        reactions_raw = row["reactions"] if isinstance(row, dict) or hasattr(row, "__getitem__") else None
+        if reactions_raw:
+            try:
+                reactions = json.loads(reactions_raw) if isinstance(reactions_raw, str) else reactions_raw
+                if isinstance(reactions, list):
+                    for r in reactions:
+                        u_id = r.get("userId")
+                        d_name = r.get("displayName")
+                        m = get_member_by_id_or_name(user_id=u_id, display_name=d_name)
+                        if m:
+                            m_role = (m.get("role") or "").upper().strip()
+                            m_level = str(m.get("level") or "").upper().strip()
+                            if m_role in ("TL", "PM", "HM") or m_level in ("LEVEL 1", "LEVEL 2", "LEVEL 3"):
+                                return f"{m_role} {m.get('display_name')}"
+            except Exception:
+                pass
+
+    # 3. Fallback to active PM from Member.xlsx
+    active_pm = get_active_pm_from_excel()
+    pm_name = active_pm.get("name") or active_pm.get("display_name") or "Project Manager"
+    return f"PM {pm_name}"
+
+
+def render_decline_dropdown_html(
     message_id: str,
     summary: str,
     project_key: str,
-    suggested_assignee: str,
-    members: List[Dict[str, str]],
-    approver: str,
     issue_idx: Optional[int] = None,
 ) -> HTMLResponse:
-    """Render a dedicated, responsive Assignee Selection & Approval modal dialog."""
-    options_html = []
-    clean_suggested = suggested_assignee.strip().lower()
+    """Render a dedicated, responsive Decline/Reject modal dialog requiring authorized approver selection."""
+    from src.services.member_sync_service import get_active_authorized_approvers
+    authorized_approvers = get_active_authorized_approvers()
+    approvers_options_html = []
+    for ap in authorized_approvers:
+        ap_id = ap.get("user_id") or ap.get("display_name")
+        ap_name = re.sub(r"\s+", " ", ap.get("display_name", "")).strip()
+        ap_role = (ap.get("role") or "").upper().strip()
+        ap_lvl = ap.get("level", "")
+        lvl_str = f" - {ap_lvl}" if ap_lvl and ap_lvl != "-" else ""
+        approvers_options_html.append(
+            f'<option value="{ap_id}">{ap_name} ({ap_role}{lvl_str})</option>'
+        )
+    approvers_joined = "\n          ".join(approvers_options_html)
 
-    for m in members:
-        name = m.get("name", "")
-        spec = m.get("specialty", "")
-        # Match if suggested name overlaps
-        is_sel = (name.lower() in clean_suggested or clean_suggested in name.lower())
-        sel_attr = "selected" if is_sel else ""
-        label = f"{name} — {spec}" if spec else name
-        options_html.append(f'<option value="{name}" {sel_attr}>{label}</option>')
-
-    # Add Unassigned option
-    unassigned_sel = "selected" if clean_suggested in ("unassigned", "") else ""
-    options_html.append(f'<option value="Unassigned" {unassigned_sel}>Unassigned</option>')
-
-    options_joined = "\n          ".join(options_html)
-
-    action_url = f"/api/jira/confirm-issue/{message_id}/{issue_idx}" if issue_idx is not None else f"/api/jira/confirm-approval/{message_id}"
-    reject_url = f"/api/jira/decline-issue/{message_id}/{issue_idx}" if issue_idx is not None else f"/api/jira/decline-approval/{message_id}"
-    issue_label = f"Issue #{issue_idx + 1}" if issue_idx is not None else "Jira Ticket"
+    action_url = f"/api/jira/decline-issue/{message_id}/{issue_idx}" if issue_idx is not None else f"/api/jira/decline-approval/{message_id}"
+    issue_label = f"Issue #{issue_idx + 1}" if issue_idx is not None else "Ticket"
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Approve {issue_label} — Select Assignee</title>
+  <title>Reject {issue_label} — Confirmation</title>
   <style>
     * {{ box-sizing: border-box; }}
     body {{
@@ -642,9 +720,9 @@ def render_assignee_dropdown_html(
       border-radius: 9999px;
       font-size: 13px;
       font-weight: 700;
-      background: #f59e0b22;
-      color: #f59e0b;
-      border: 1px solid #f59e0b44;
+      background: #ef444422;
+      color: #ef4444;
+      border: 1px solid #ef444444;
       margin-bottom: 16px;
     }}
     h1 {{
@@ -687,6 +765,291 @@ def render_assignee_dropdown_html(
       color: #cbd5e1;
       margin-bottom: 8px;
     }}
+    select, input[type="text"] {{
+      width: 100%;
+      padding: 12px 14px;
+      background: #0f172a;
+      border: 1.5px solid #ef4444;
+      border-radius: 8px;
+      color: #f8fafc;
+      font-size: 14px;
+      font-weight: 500;
+      outline: none;
+    }}
+    select:focus, input[type="text"]:focus {{
+      border-color: #f87171;
+      box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+    }}
+    .btn-decline {{
+      width: 100%;
+      padding: 13px 20px;
+      background: #ef4444;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: background 0.15s ease;
+    }}
+    .btn-decline:hover {{
+      background: #dc2626;
+    }}
+    .footer-note {{
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 22px;
+      text-align: center;
+    }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">❌ Reject {issue_label} Confirmation</div>
+    <h1>Confirm Rejection of {issue_label}</h1>
+    <p class="subtext">Select your authorized management identity to confirm rejection. No tickets will be created in Jira.</p>
+
+    <div class="facts-box">
+      <div class="fact-row">
+        <span class="fact-label">Topic Details:</span>
+        <span class="fact-val">{summary}</span>
+      </div>
+      <div class="fact-row">
+        <span class="fact-label">Scrum Project:</span>
+        <span class="fact-val">{project_key}</span>
+      </div>
+    </div>
+
+    <form method="POST" action="{action_url}">
+      <div class="form-group">
+        <label for="approverSelect">🛡️ Confirm Your Management Identity (TL / PM / HM):</label>
+        <select name="approver_id" id="approverSelect" required>
+          <option value="" disabled selected>-- Select your name from authorized roster --</option>
+          {approvers_joined}
+        </select>
+        <span style="font-size: 11px; color: #94a3b8; display: block; margin-top: 4px;">
+          ⚠️ Verification Required: Only active Team Leads, Project Managers, and Higher Management can decline tickets.
+        </span>
+      </div>
+
+      <div class="form-group">
+        <label for="reasonInput">📝 Reason for Decline (Optional):</label>
+        <input type="text" name="reason" id="reasonInput" placeholder="e.g. Expected behavior, duplicate report, insufficient info" />
+      </div>
+
+      <button type="submit" class="btn-decline">
+        ❌ Confirm Rejection
+      </button>
+    </form>
+
+    <div style="text-align: center; margin-top: 14px;">
+      <a href="javascript:history.back()" style="color:#94a3b8; text-decoration:none; font-size:13px;">← Go Back</a>
+    </div>
+
+    <div class="footer-note">Microsoft Teams &bull; Jira Cloud Automation &bull; Closed-Loop Sync</div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html_content, status_code=200)
+
+
+def render_assignee_dropdown_html(
+    message_id: str,
+    summary: str,
+    project_key: str,
+    suggested_assignee: str,
+    members: List[Dict[str, str]],
+    approver: str,
+    issue_idx: Optional[int] = None,
+    all_roster_members: Optional[List[Dict[str, Any]]] = None,
+    default_reviewer: Optional[str] = None,
+) -> HTMLResponse:
+    """Render a dedicated, responsive Assignee Selection & Role-Verified Approval modal dialog."""
+    import re
+    if all_roster_members is None:
+        from src.services.member_sync_service import get_all_members_from_excel
+        try:
+            all_roster_members = get_all_members_from_excel()
+        except Exception:
+            all_roster_members = []
+
+    options_html = []
+    clean_suggested = suggested_assignee.strip().lower()
+
+    for m in members:
+        name = m.get("name", "")
+        spec = m.get("specialty", "")
+        is_sel = (name.lower() in clean_suggested or clean_suggested in name.lower())
+        sel_attr = "selected" if is_sel else ""
+        label = f"{name} — {spec}" if spec else name
+        options_html.append(f'<option value="{name}" {sel_attr}>{label}</option>')
+
+    unassigned_sel = "selected" if clean_suggested in ("unassigned", "") else ""
+    options_html.append(f'<option value="Unassigned" {unassigned_sel}>Unassigned</option>')
+    options_joined = "\n          ".join(options_html)
+
+    # Determine initial selected reviewer from default_reviewer (typically the message reporter e.g. Dhruv dobariya)
+    clean_default_reviewer = (default_reviewer or "").strip().lower()
+    init_member = None
+    for rm in all_roster_members:
+        rm_name = re.sub(r"\s+", " ", rm.get("display_name", "")).strip()
+        if clean_default_reviewer and (clean_default_reviewer in rm_name.lower() or rm_name.lower() in clean_default_reviewer):
+            init_member = rm
+            break
+
+    if not init_member and all_roster_members:
+        for rm in all_roster_members:
+            if (rm.get("role") or "").upper() == "CLIENT":
+                init_member = rm
+                break
+        if not init_member:
+            init_member = all_roster_members[0]
+
+    reviewers_html = []
+    for rm in all_roster_members:
+        rm_name = re.sub(r"\s+", " ", rm.get("display_name", "")).strip()
+        rm_role = (rm.get("role") or "").upper().strip()
+        rm_lvl = rm.get("level", "").strip()
+        lvl_str = f" - {rm_lvl}" if rm_lvl and rm_lvl != "-" else ""
+        rm_id = rm.get("user_id") or rm_name
+        can_appr = bool(rm.get("can_approve")) and rm_role in ("TL", "PM", "HM")
+        can_appr_attr = "1" if can_appr else "0"
+
+        is_sel = (init_member and (rm.get("user_id") == init_member.get("user_id") or rm_name.lower() == re.sub(r"\s+", " ", init_member.get("display_name", "")).strip().lower()))
+        sel_attr = "selected" if is_sel else ""
+
+        label = f"{rm_name} — {rm_role}{lvl_str}"
+        reviewers_html.append(
+            f'<option value="{rm_id}" data-can-approve="{can_appr_attr}" data-role="{rm_role}" data-name="{rm_name}" {sel_attr}>{label}</option>'
+        )
+
+    reviewers_joined = "\n          ".join(reviewers_html)
+
+    # Initial server-side state for banner, button, and reject link
+    init_role = (init_member.get("role") if init_member else "").upper().strip()
+    init_name = re.sub(r"\s+", " ", init_member.get("display_name", "")).strip() if init_member else "Reviewer"
+    init_can_approve = bool(init_member.get("can_approve")) and init_role in ("TL", "PM", "HM") if init_member else False
+
+    issue_label = f"Issue #{issue_idx + 1}" if issue_idx is not None else "Jira Ticket"
+    action_url = f"/api/jira/confirm-issue/{message_id}/{issue_idx}" if issue_idx is not None else f"/api/jira/confirm-approval/{message_id}"
+    reject_url = f"/api/jira/decline-issue/{message_id}/{issue_idx}" if issue_idx is not None else f"/api/jira/decline-approval/{message_id}"
+
+    if not init_can_approve:
+        initial_banner_html = f"""<div class="alert-box alert-danger">
+          <div class="alert-icon">⛔</div>
+          <div class="alert-body">
+            <div class="alert-title">No Authority to Confirm</div>
+            <div class="alert-desc">
+              You are currently identified as <strong>{init_name} ({init_role or 'Client'})</strong>.<br>
+              Clients and Developers do not have authority to confirm or reject Jira tickets.<br>
+              <strong>Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM) to review and approve.</strong>
+            </div>
+          </div>
+        </div>"""
+        init_btn_disabled = "disabled"
+        init_btn_class = "btn-disabled"
+        init_btn_text = "🔒 Management Authority Required (TL, PM, HM)"
+        init_reject_class = "btn-reject-disabled"
+    else:
+        initial_banner_html = f"""<div class="alert-box alert-success">
+          <div class="alert-icon">🛡️</div>
+          <div class="alert-body">
+            <div class="alert-title">Authorized Management Reviewer</div>
+            <div class="alert-desc">
+              Identified as <strong>{init_name} ({init_role})</strong>. You have authority to confirm and assign this ticket in Jira Cloud.
+            </div>
+          </div>
+        </div>"""
+        init_btn_disabled = ""
+        init_btn_class = ""
+        init_btn_text = f"🚀 Confirm & Create {issue_label}"
+        init_reject_class = ""
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Approve {issue_label} — Role Authority Verification</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }}
+    .card {{
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 14px;
+      max-width: 520px;
+      width: 100%;
+      padding: 30px;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 700;
+      background: #f59e0b22;
+      color: #f59e0b;
+      border: 1px solid #f59e0b44;
+      margin-bottom: 16px;
+    }}
+    h1 {{
+      font-size: 20px;
+      margin: 0 0 8px 0;
+      color: #ffffff;
+    }}
+    p.subtext {{
+      color: #94a3b8;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0 0 18px 0;
+    }}
+    .facts-box {{
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 20px;
+      text-align: left;
+      font-size: 13px;
+    }}
+    .fact-row {{
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px solid #1e293b;
+    }}
+    .fact-row:last-child {{ border-bottom: none; }}
+    .fact-label {{ color: #94a3b8; font-weight: 500; min-width: 110px; }}
+    .fact-val {{ color: #f8fafc; font-weight: 600; text-align: right; word-break: break-word; }}
+    .form-group {{
+      text-align: left;
+      margin-bottom: 18px;
+    }}
+    label {{
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #cbd5e1;
+      margin-bottom: 8px;
+    }}
     select {{
       width: 100%;
       padding: 12px 14px;
@@ -703,6 +1066,41 @@ def render_assignee_dropdown_html(
       border-color: #60a5fa;
       box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
     }}
+    .alert-box {{
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 18px;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      text-align: left;
+      font-size: 13px;
+      line-height: 1.5;
+    }}
+    .alert-danger {{
+      background: #451a1a;
+      border: 1px solid #ef4444;
+      color: #fca5a5;
+    }}
+    .alert-danger .alert-title {{
+      font-weight: 700;
+      color: #ef4444;
+      margin-bottom: 4px;
+    }}
+    .alert-success {{
+      background: #064e3b;
+      border: 1px solid #10b981;
+      color: #a7f3d0;
+    }}
+    .alert-success .alert-title {{
+      font-weight: 700;
+      color: #34d399;
+      margin-bottom: 4px;
+    }}
+    .alert-icon {{
+      font-size: 18px;
+      line-height: 1;
+    }}
     .btn-approve {{
       width: 100%;
       padding: 13px 20px;
@@ -717,10 +1115,17 @@ def render_assignee_dropdown_html(
       align-items: center;
       justify-content: center;
       gap: 8px;
-      transition: background 0.15s ease;
+      transition: all 0.15s ease;
     }}
-    .btn-approve:hover {{
+    .btn-approve:hover:not(:disabled) {{
       background: #059669;
+    }}
+    .btn-disabled {{
+      background: #334155 !important;
+      color: #94a3b8 !important;
+      cursor: not-allowed !important;
+      border: 1px solid #475569 !important;
+      opacity: 0.8;
     }}
     .btn-reject {{
       display: inline-block;
@@ -729,9 +1134,15 @@ def render_assignee_dropdown_html(
       text-decoration: none;
       font-size: 13px;
       font-weight: 600;
+      transition: color 0.15s;
     }}
     .btn-reject:hover {{
       text-decoration: underline;
+    }}
+    .btn-reject-disabled {{
+      color: #64748b !important;
+      cursor: not-allowed !important;
+      text-decoration: none !important;
     }}
     .footer-note {{
       font-size: 12px;
@@ -743,9 +1154,9 @@ def render_assignee_dropdown_html(
 </head>
 <body>
   <div class="card">
-    <div class="badge">📋 {issue_label} Approval Required</div>
+    <div class="badge">📋 {issue_label} Approval Verification</div>
     <h1>Confirm {issue_label} Creation</h1>
-    <p class="subtext">Select the developer who should be assigned to this ticket before creating it in Jira.</p>
+    <p class="subtext">Verify approver authority and choose developer assignment:</p>
 
     <div class="facts-box">
       <div class="fact-row">
@@ -762,25 +1173,125 @@ def render_assignee_dropdown_html(
       </div>
     </div>
 
-    <form method="POST" action="{action_url}">
+    <form method="POST" action="{action_url}" id="approvalForm">
       <div class="form-group">
+        <label for="reviewerSelect">🛡️ Reviewer Identity (Who is confirming?):</label>
+        <select name="reviewer" id="reviewerSelect" onchange="onReviewerChange()">
+          {reviewers_joined}
+        </select>
+      </div>
+
+      <div id="authorityBanner">
+        {initial_banner_html}
+      </div>
+
+      <div class="form-group" id="assigneeGroup">
         <label for="assigneeSelect">👤 Assignee Dropdown:</label>
         <select name="assignee" id="assigneeSelect">
           {options_joined}
         </select>
       </div>
 
-      <button type="submit" class="btn-approve">
-        🚀 Confirm & Create {issue_label}
+      <button type="submit" id="approveBtn" class="btn-approve {init_btn_class}" {init_btn_disabled}>
+        {init_btn_text}
       </button>
     </form>
 
     <div style="text-align: center;">
-      <a href="{reject_url}" class="btn-reject">❌ Reject {issue_label} Creation</a>
+      <a href="{reject_url}" id="rejectBtn" class="btn-reject {init_reject_class}" onclick="return onRejectClick(event)">❌ Reject {issue_label} Creation</a>
     </div>
 
     <div class="footer-note">Microsoft Teams &bull; Jira Cloud Automation &bull; Closed-Loop Sync</div>
   </div>
+
+  <script>
+    function getSelectedReviewerMeta() {{
+      const sel = document.getElementById('reviewerSelect');
+      if (!sel || sel.selectedIndex < 0) return {{ canApprove: false, role: '', name: '' }};
+      const opt = sel.options[sel.selectedIndex];
+      return {{
+        canApprove: opt.getAttribute('data-can-approve') === '1',
+        role: opt.getAttribute('data-role') || '',
+        name: opt.getAttribute('data-name') || opt.text.split('—')[0].trim()
+      }};
+    }}
+
+    function onReviewerChange() {{
+      const sel = document.getElementById('reviewerSelect');
+      const meta = getSelectedReviewerMeta();
+      try {{ localStorage.setItem('saved_jira_reviewer', sel.value); }} catch(e) {{}}
+
+      const banner = document.getElementById('authorityBanner');
+      const approveBtn = document.getElementById('approveBtn');
+      const rejectBtn = document.getElementById('rejectBtn');
+
+      if (!meta.canApprove) {{
+        banner.innerHTML = `
+          <div class="alert-box alert-danger">
+            <div class="alert-icon">⛔</div>
+            <div class="alert-body">
+              <div class="alert-title">No Authority to Confirm</div>
+              <div class="alert-desc">
+                You are currently identified as <strong>${{meta.name}} (${{meta.role || 'Client'}})</strong>.<br>
+                You have no authority to confirm or reject Jira tickets.<br>
+                <strong>Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).</strong>
+              </div>
+            </div>
+          </div>
+        `;
+        approveBtn.disabled = true;
+        approveBtn.className = 'btn-approve btn-disabled';
+        approveBtn.innerHTML = '🔒 Management Authority Required (TL, PM, HM)';
+        if (rejectBtn) {{
+          rejectBtn.className = 'btn-reject btn-reject-disabled';
+        }}
+      }} else {{
+        banner.innerHTML = `
+          <div class="alert-box alert-success">
+            <div class="alert-icon">🛡️</div>
+            <div class="alert-body">
+              <div class="alert-title">Authorized Management Reviewer</div>
+              <div class="alert-desc">
+                Identified as <strong>${{meta.name}} (${{meta.role}})</strong>. You have authority to confirm and assign this ticket in Jira Cloud.
+              </div>
+            </div>
+          </div>
+        `;
+        approveBtn.disabled = false;
+        approveBtn.className = 'btn-approve';
+        approveBtn.innerHTML = '🚀 Confirm & Create {issue_label}';
+        if (rejectBtn) {{
+          rejectBtn.className = 'btn-reject';
+        }}
+      }}
+    }}
+
+    function onRejectClick(e) {{
+      const meta = getSelectedReviewerMeta();
+      if (!meta.canApprove) {{
+        e.preventDefault();
+        alert('You have no authority to reject this ticket. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).');
+        return false;
+      }}
+      return true;
+    }}
+
+    window.addEventListener('DOMContentLoaded', function() {{
+      try {{
+        const saved = localStorage.getItem('saved_jira_reviewer');
+        const sel = document.getElementById('reviewerSelect');
+        if (saved && sel) {{
+          for (let i = 0; i < sel.options.length; i++) {{
+            if (sel.options[i].value === saved) {{
+              sel.selectedIndex = i;
+              break;
+            }}
+          }}
+        }}
+      }} catch(e) {{}}
+      onReviewerChange();
+    }});
+  </script>
 </body>
 </html>"""
     return HTMLResponse(content=html_content, status_code=200)
@@ -791,47 +1302,19 @@ async def confirm_approval_get(
     message_id: str,
     request: Request,
     assignee: Optional[str] = None,
+    reviewer: Optional[str] = None,
     auto: Optional[str] = None,
 ):
-    """PM Approval endpoint with interactive Assignee Dropdown and 1-Click execution."""
+    """1-Click PM/TL Approval endpoint for Teams card action links (GET).
+    Directly creates Jira ticket, displays success confirmation card, and auto-closes window.
+    """
     if request.method == "HEAD":
         return Response(status_code=200)
 
-    from src.services.message_service import execute_jira_ticket_creation
-    from src.services.member_sync_service import get_active_pm_from_excel, get_all_members_from_excel
     from src.database import get_db
+    from src.services.message_service import execute_jira_ticket_creation
     import json
-    import re
 
-    pm_info = get_active_pm_from_excel()
-    approver = f"PM {pm_info.get('name', 'Project Manager')}"
-
-    # If auto=1, execute ticket creation immediately with chosen or suggested assignee
-    if auto in ("1", "true", "yes"):
-        res = await execute_jira_ticket_creation(
-            message_id, approver_name=approver, assignee_override=assignee
-        )
-        if not res.get("success"):
-            return render_confirmation_html(
-                title="Action Failed",
-                status_type="error",
-                heading="Error",
-                message=res.get("error", "Failed to create Jira ticket"),
-            )
-        key = res.get("key", "Created")
-        url = res.get("url", "#")
-        already = res.get("already_existed", False)
-        target_dev = assignee or "Assigned Developer"
-        return render_confirmation_html(
-            title=f"Jira Ticket {'Already Active' if already else 'Created Successfully'}",
-            status_type="success",
-            heading="Approved by PM",
-            message=f"Ticket {key} has been created and assigned to {target_dev}. Confirmation posted to Teams.",
-            details={"Jira Ticket": key, "Status": "Created & Active", "Assignee": target_dev, "Approved By": approver},
-            actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
-        )
-
-    # Otherwise: Render interactive Assignee Dropdown modal page
     db = get_db()
     row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
     if not row:
@@ -840,64 +1323,68 @@ async def confirm_approval_get(
             status_type="error",
             heading="Error",
             message=f"Message ID '{message_id}' was not found in the database.",
+            status_code=404,
         )
 
     if row["jira_issue_key"]:
+        key = row["jira_issue_key"]
+        url = row["jira_issue_url"] or "#"
         return render_confirmation_html(
             title="Ticket Already Created",
             status_type="success",
             heading="Active in Jira",
-            message=f"Ticket {row['jira_issue_key']} has already been created for this issue.",
-            details={"Jira Ticket": row["jira_issue_key"], "Status": "Active"},
-            actions=[{"label": f"Open {row['jira_issue_key']} in Jira ↗", "url": row["jira_issue_url"] or "#"}],
+            message=f"Ticket {key} has already been created for this issue. You can close this window now.",
+            details={"Jira Ticket": key, "Status": "Active"},
+            actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
         )
 
-    ai_ticket = {}
-    if row["ai_ticket"]:
+    if reviewer:
+        member = resolve_and_verify_approver(reviewer)
+        if not member:
+            return render_confirmation_html(
+                title="No Authority to Confirm",
+                status_type="error",
+                heading="Authority Check Failed",
+                message="You have no authority to confirm Jira ticket creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                status_code=403,
+            )
+        role = (member.get("role") or "PM").upper().strip()
+        approver = f"{role} {member.get('display_name')}"
+    else:
+        approver = get_approver_name_for_message(row=row)
+
+    target_assignee = assignee
+    if not target_assignee and row["ai_ticket"]:
         try:
             ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
+            target_assignee = ai_ticket.get("suggested_assignee")
         except Exception:
-            ai_ticket = {}
+            pass
 
-    summary = ai_ticket.get("summary") or row["message_text"] or "Issue Report"
-    project_key = config.jira.project_key or "SCRUM"
-    suggested_assignee = assignee or ai_ticket.get("suggested_assignee") or "Santosh Yadav"
+    res = await execute_jira_ticket_creation(
+        message_id, approver_name=approver, assignee_override=target_assignee
+    )
+    if not res.get("success"):
+        return render_confirmation_html(
+            title="Action Failed",
+            status_type="error",
+            heading="Error",
+            message=res.get("error", "Failed to create Jira ticket"),
+            status_code=400,
+        )
 
-    # Get assignable members from Member.xlsx
-    try:
-        raw_members = get_all_members_from_excel()
-    except Exception:
-        raw_members = []
+    key = res.get("key", "Created")
+    url = res.get("url", "#")
+    already = res.get("already_existed", False)
+    display_dev = target_assignee or "Assigned Developer"
 
-    assignable_list = []
-    seen = set()
-    for m in raw_members:
-        r = (m.get("role") or "").upper()
-        if r != "CLIENT":
-            c_name = re.sub(r"\s+", " ", m.get("display_name", "")).strip()
-            if c_name and c_name not in seen:
-                seen.add(c_name)
-                assignable_list.append({
-                    "name": c_name,
-                    "specialty": m.get("specialty") or r,
-                    "role": r,
-                })
-
-    if not assignable_list:
-        assignable_list = [
-            {"name": "Santosh Yadav", "specialty": "Backend & API Lead", "role": "DEVELOPER"},
-            {"name": "Musaib Khan", "specialty": "Frontend & UI Lead", "role": "DEVELOPER"},
-            {"name": "Nishi Sharma", "specialty": "AI Developer", "role": "DEVELOPER"},
-            {"name": "Hemil Ghori", "specialty": "Project Manager / Scrum Master", "role": "PM"},
-        ]
-
-    return render_assignee_dropdown_html(
-        message_id=message_id,
-        summary=summary,
-        project_key=project_key,
-        suggested_assignee=suggested_assignee,
-        members=assignable_list,
-        approver=approver,
+    return render_confirmation_html(
+        title=f"Jira Ticket {'Already Active' if already else 'Created Successfully'}",
+        status_type="success",
+        heading=f"Approved by {approver}",
+        message=f"Ticket {key} has been created and assigned to {display_dev}. Confirmation posted to Teams. You can close this window now.",
+        details={"Jira Ticket": key, "Status": "Created & Active", "Assignee": display_dev, "Approved By": approver},
+        actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
     )
 
 
@@ -906,26 +1393,52 @@ async def confirm_approval_post(
     message_id: str,
     request: Request,
 ):
-    """Programmatic / Web Form PM Approval endpoint (POST)."""
+    """Role-verified PM/TL Approval endpoint (POST)."""
+    from src.database import get_db
     from src.services.message_service import execute_jira_ticket_creation
-    from src.services.member_sync_service import get_active_pm_from_excel
-    pm_info = get_active_pm_from_excel()
-    approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
     assignee = None
+    approver_id = None
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
         try:
             body = await request.json()
             assignee = body.get("assignee")
+            approver_id = body.get("reviewer") or body.get("approver_id") or body.get("approver")
         except Exception:
             pass
     elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
         try:
             form = await request.form()
             assignee = form.get("assignee")
+            approver_id = form.get("reviewer") or form.get("approver_id") or form.get("approver")
         except Exception:
             pass
+
+    if not approver_id and not assignee:
+        # Programmatic / Dashboard trigger without explicit reviewer
+        db = get_db()
+        row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="Message not found")
+        approver = get_approver_name_for_message(row=row)
+    else:
+        # Strictly verify that reviewer is an authorized management member (TL, PM, HM)
+        member = resolve_and_verify_approver(approver_id)
+        if not member:
+            logger.warning(
+                f"Unauthorized ticket creation attempt for message {message_id} with reviewer '{approver_id}'",
+                extra={"event": "UNAUTHORIZED_CONFIRM_ATTEMPT", "reviewer": approver_id, "messageId": message_id}
+            )
+            return render_confirmation_html(
+                title="No Authority to Confirm",
+                status_type="error",
+                heading="Authority Check Failed",
+                message="You have no authority to confirm Jira ticket creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                status_code=403,
+            )
+        role = (member.get("role") or "PM").upper().strip()
+        approver = f"{role} {member.get('display_name')}"
 
     res = await execute_jira_ticket_creation(
         message_id, approver_name=approver, assignee_override=assignee
@@ -937,6 +1450,7 @@ async def confirm_approval_post(
                 status_type="error",
                 heading="Error",
                 message=res.get("error", "Failed to create Jira ticket"),
+                status_code=400,
             )
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to create ticket"))
 
@@ -947,7 +1461,7 @@ async def confirm_approval_post(
         return render_confirmation_html(
             title="Jira Ticket Created Successfully",
             status_type="success",
-            heading="Approved by PM",
+            heading=f"Approved by {approver}",
             message=f"Ticket {key} has been created and assigned to {target_dev}. Confirmation posted to Teams.",
             details={"Jira Ticket": key, "Status": "Created & Active", "Assignee": target_dev, "Approved By": approver},
             actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
@@ -956,44 +1470,127 @@ async def confirm_approval_post(
 
 
 @router.api_route("/api/jira/decline-approval/{message_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def decline_approval_get(message_id: str, request: Request):
-    """1-Click PM Decline/Reject endpoint for Teams card action links (GET)."""
+async def decline_approval_get(
+    message_id: str,
+    request: Request,
+    reviewer: Optional[str] = None,
+    reason: Optional[str] = None,
+):
+    """1-Click PM/TL Decline endpoint for Teams card action links (GET)."""
     if request.method == "HEAD":
         return Response(status_code=200)
 
+    from src.database import get_db
     from src.services.message_service import execute_jira_ticket_decline
-    from src.services.member_sync_service import get_active_pm_from_excel
-    pm_info = get_active_pm_from_excel()
-    approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
-    res = await execute_jira_ticket_decline(message_id, approver_name=approver)
+    db = get_db()
+    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+    if not row:
+        return render_confirmation_html(
+            title="Message Not Found",
+            status_type="error",
+            heading="Error",
+            message=f"Message ID '{message_id}' was not found in the database.",
+            status_code=404,
+        )
+
+    if reviewer:
+        member = resolve_and_verify_approver(reviewer)
+        if not member:
+            return render_confirmation_html(
+                title="No Authority to Reject",
+                status_type="error",
+                heading="Authority Check Failed",
+                message="You have no authority to reject Jira ticket creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                status_code=403,
+            )
+        role = (member.get("role") or "PM").upper().strip()
+        approver = f"{role} {member.get('display_name')}"
+    else:
+        approver = get_approver_name_for_message(row=row)
+
+    res = await execute_jira_ticket_decline(message_id, approver_name=approver, reason=reason)
     if not res.get("success"):
         return render_confirmation_html(
             title="Reject Failed",
             status_type="error",
             heading="Error",
             message=res.get("error", "Failed to reject ticket"),
+            status_code=400,
         )
+
     return render_confirmation_html(
         title="Ticket Creation Rejected",
         status_type="declined",
-        heading="Rejected by PM",
-        message="Ticket creation was rejected. No tickets were created in Jira, and notification has been posted to Teams. You can close this window now.",
+        heading=f"Rejected by {approver}",
+        message=f"Ticket creation was rejected by {approver}. No tickets were created in Jira, and notification has been posted to Teams. You can close this window now.",
         details={"Status": "Rejected", "Rejected By": approver},
     )
 
 
 @router.post("/api/jira/decline-approval/{message_id}")
-async def decline_approval_post(message_id: str):
-    """Programmatic / Dashboard PM Decline endpoint (POST)."""
+async def decline_approval_post(message_id: str, request: Request):
+    """PM/TL Decline endpoint (POST)."""
+    from src.database import get_db
     from src.services.message_service import execute_jira_ticket_decline
-    from src.services.member_sync_service import get_active_pm_from_excel
-    pm_info = get_active_pm_from_excel()
-    approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
-    res = await execute_jira_ticket_decline(message_id, approver_name=approver)
+    approver_id = None
+    reason = None
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            approver_id = body.get("reviewer") or body.get("approver_id") or body.get("approver")
+            reason = body.get("reason")
+        except Exception:
+            pass
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            approver_id = form.get("reviewer") or form.get("approver_id") or form.get("approver")
+            reason = form.get("reason")
+        except Exception:
+            pass
+
+    if not approver_id and not reason:
+        db = get_db()
+        row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="Message not found")
+        approver = get_approver_name_for_message(row=row)
+    else:
+        member = resolve_and_verify_approver(approver_id)
+        if not member:
+            return render_confirmation_html(
+                title="No Authority to Reject",
+                status_type="error",
+                heading="Authority Check Failed",
+                message="You have no authority to reject Jira ticket creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                status_code=403,
+            )
+        role = (member.get("role") or "PM").upper().strip()
+        approver = f"{role} {member.get('display_name')}"
+
+    res = await execute_jira_ticket_decline(message_id, approver_name=approver, reason=reason)
     if not res.get("success"):
+        if "text/html" in request.headers.get("accept", "") or "form" in content_type:
+            return render_confirmation_html(
+                title="Reject Failed",
+                status_type="error",
+                heading="Error",
+                message=res.get("error", "Failed to reject ticket"),
+                status_code=400,
+            )
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to decline ticket"))
+
+    if "text/html" in request.headers.get("accept", "") or "form" in content_type:
+        return render_confirmation_html(
+            title="Ticket Creation Rejected",
+            status_type="declined",
+            heading=f"Rejected by {approver}",
+            message=f"Ticket creation was rejected by {approver}. No tickets were created in Jira, and notification has been posted to Teams.",
+            details={"Status": "Rejected", "Rejected By": approver},
+        )
     return res
 
 
@@ -1002,12 +1599,13 @@ async def confirm_issue_all_get(
     message_id: str,
     request: Request,
     assignee: Optional[str] = None,
+    reviewer: Optional[str] = None,
     auto: Optional[str] = None,
 ):
     """1-Click PM Approval for all issues in a message (GET)."""
     if request.method == "HEAD":
         return Response(status_code=200)
-    return await confirm_approval_get(message_id, request, assignee=assignee, auto=auto)
+    return await confirm_approval_get(message_id, request, assignee=assignee, reviewer=reviewer, auto=auto)
 
 
 @router.post("/api/jira/confirm-issue/{message_id}")
@@ -1017,17 +1615,22 @@ async def confirm_issue_all_post(message_id: str, request: Request):
 
 
 @router.api_route("/api/jira/decline-issue/{message_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def decline_issue_all_get(message_id: str, request: Request):
+async def decline_issue_all_get(
+    message_id: str,
+    request: Request,
+    reviewer: Optional[str] = None,
+    reason: Optional[str] = None,
+):
     """1-Click PM Decline for all issues in a message (GET)."""
     if request.method == "HEAD":
         return Response(status_code=200)
-    return await decline_approval_get(message_id, request)
+    return await decline_approval_get(message_id, request, reviewer=reviewer, reason=reason)
 
 
 @router.post("/api/jira/decline-issue/{message_id}")
-async def decline_issue_all_post(message_id: str):
+async def decline_issue_all_post(message_id: str, request: Request):
     """Programmatic PM Decline for all issues in a message (POST)."""
-    return await decline_approval_post(message_id)
+    return await decline_approval_post(message_id, request)
 
 
 @router.api_route("/api/jira/confirm-issue/{message_id}/{issue_idx}", methods=["GET", "HEAD"], response_class=HTMLResponse)
@@ -1036,47 +1639,17 @@ async def confirm_issue_get(
     issue_idx: int,
     request: Request,
     assignee: Optional[str] = None,
+    reviewer: Optional[str] = None,
     auto: Optional[str] = None,
 ):
-    """1-Click PM Approval or Assignee Dropdown for a specific single issue (GET)."""
+    """1-Click PM Approval for a specific single issue in a multi-issue triage card (GET)."""
     if request.method == "HEAD":
         return Response(status_code=200)
 
-    from src.services.message_service import execute_jira_ticket_creation
-    from src.services.member_sync_service import get_active_pm_from_excel, get_all_members_from_excel
     from src.database import get_db
+    from src.services.message_service import execute_jira_ticket_creation
     import json
-    import re
 
-    pm_info = get_active_pm_from_excel()
-    approver = f"PM {pm_info.get('name', 'Project Manager')}"
-
-    # If auto=1, execute ticket creation immediately with chosen or suggested assignee
-    if auto in ("1", "true", "yes"):
-        res = await execute_jira_ticket_creation(
-            message_id, approver_name=approver, issue_idx=issue_idx, assignee_override=assignee
-        )
-        if not res.get("success"):
-            return render_confirmation_html(
-                title="Issue Creation Failed",
-                status_type="error",
-                heading="Action Required",
-                message=res.get("error", f"Failed to create Issue #{issue_idx + 1}"),
-            )
-        key = res.get("key", "Created")
-        url = res.get("url", "#")
-        already = res.get("already_existed", False)
-        target_dev = assignee or "Assigned Developer"
-        return render_confirmation_html(
-            title=f"Issue #{issue_idx + 1} {'Already Active' if already else 'Created'} in Jira",
-            status_type="success",
-            heading="Ticket Active in Jira" if already else f"Issue #{issue_idx + 1} Approved & Created",
-            message=f"Ticket {key} {'is already active in Jira' if already else f'was successfully created in Jira for Issue #{issue_idx + 1} and assigned to {target_dev}'}.",
-            details={"Jira Ticket": key, "Status": "Active in Jira", "Assignee": target_dev, "Approved By": approver},
-            actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
-        )
-
-    # Otherwise: Render interactive Assignee Dropdown modal page for this specific issue
     db = get_db()
     row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
     if not row:
@@ -1085,6 +1658,7 @@ async def confirm_issue_get(
             status_type="error",
             heading="Error",
             message=f"Message ID '{message_id}' was not found in the database.",
+            status_code=404,
         )
 
     ai_ticket = {}
@@ -1092,7 +1666,7 @@ async def confirm_issue_get(
         try:
             ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
         except Exception:
-            ai_ticket = {}
+            pass
 
     issues = ai_ticket.get("issues", [])
     if not issues or not isinstance(issues, list):
@@ -1104,6 +1678,7 @@ async def confirm_issue_get(
             status_type="error",
             heading="Error",
             message=f"Issue #{issue_idx + 1} was not found in this message.",
+            status_code=400,
         )
 
     target_issue = issues[issue_idx]
@@ -1113,7 +1688,7 @@ async def confirm_issue_get(
             title=f"Issue #{issue_idx + 1} Already Created",
             status_type="success",
             heading=f"Issue #{issue_idx + 1} Active in Jira",
-            message=f"Ticket {active_key} has already been created for Issue #{issue_idx + 1}.",
+            message=f"Ticket {active_key} has already been created for Issue #{issue_idx + 1}. You can close this window now.",
             details={"Jira Ticket": active_key, "Status": "Active"},
             actions=[{"label": f"Open {active_key} in Jira ↗", "url": target_issue.get("jira_url") or row["jira_issue_url"] or "#"}],
         )
@@ -1127,45 +1702,47 @@ async def confirm_issue_get(
             details={"Status": "Declined", "Declined By": target_issue.get("declined_by", "PM")},
         )
 
-    summary = target_issue.get("summary") or f"Issue #{issue_idx + 1}"
-    project_key = config.jira.project_key or "SCRUM"
-    suggested_assignee = assignee or target_issue.get("suggested_assignee") or "Santosh Yadav"
+    if reviewer:
+        member = resolve_and_verify_approver(reviewer)
+        if not member:
+            return render_confirmation_html(
+                title="No Authority to Confirm",
+                status_type="error",
+                heading="Authority Check Failed",
+                message=f"You have no authority to confirm Issue #{issue_idx + 1} creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                status_code=403,
+            )
+        role = (member.get("role") or "PM").upper().strip()
+        approver = f"{role} {member.get('display_name')}"
+    else:
+        approver = get_approver_name_for_message(row=row)
 
-    try:
-        raw_members = get_all_members_from_excel()
-    except Exception:
-        raw_members = []
+    target_assignee = assignee or target_issue.get("suggested_assignee")
 
-    assignable_list = []
-    seen = set()
-    for m in raw_members:
-        r = (m.get("role") or "").upper()
-        if r != "CLIENT":
-            c_name = re.sub(r"\s+", " ", m.get("display_name", "")).strip()
-            if c_name and c_name not in seen:
-                seen.add(c_name)
-                assignable_list.append({
-                    "name": c_name,
-                    "specialty": m.get("specialty") or r,
-                    "role": r,
-                })
+    res = await execute_jira_ticket_creation(
+        message_id, approver_name=approver, issue_idx=issue_idx, assignee_override=target_assignee
+    )
+    if not res.get("success"):
+        return render_confirmation_html(
+            title=f"Issue #{issue_idx + 1} Creation Failed",
+            status_type="error",
+            heading="Error",
+            message=res.get("error", f"Failed to create Issue #{issue_idx + 1}"),
+            status_code=400,
+        )
 
-    if not assignable_list:
-        assignable_list = [
-            {"name": "Santosh Yadav", "specialty": "Backend & API Lead", "role": "DEVELOPER"},
-            {"name": "Musaib Khan", "specialty": "Frontend & UI Lead", "role": "DEVELOPER"},
-            {"name": "Nishi Sharma", "specialty": "AI Developer", "role": "DEVELOPER"},
-            {"name": "Hemil Ghori", "specialty": "Project Manager / Scrum Master", "role": "PM"},
-        ]
+    key = res.get("key", "Created")
+    url = res.get("url", "#")
+    display_dev = target_assignee or "Assigned Developer"
+    already = res.get("already_existed", False)
 
-    return render_assignee_dropdown_html(
-        message_id=message_id,
-        summary=summary,
-        project_key=project_key,
-        suggested_assignee=suggested_assignee,
-        members=assignable_list,
-        approver=approver,
-        issue_idx=issue_idx,
+    return render_confirmation_html(
+        title=f"Issue #{issue_idx + 1} {'Already Created' if already else 'Created Successfully'}",
+        status_type="success",
+        heading=f"Issue #{issue_idx + 1} Approved by {approver}",
+        message=f"Ticket {key} {'is already active in Jira' if already else f'has been created in Jira and assigned to {display_dev}. Confirmation posted to Teams.'} You can close this window now.",
+        details={"Jira Ticket": key, "Status": "Active in Jira", "Assignee": display_dev, "Approved By": approver},
+        actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
     )
 
 
@@ -1175,26 +1752,45 @@ async def confirm_issue_post(
     issue_idx: int,
     request: Request,
 ):
-    """Programmatic / Dashboard PM Approval for a specific single issue (POST)."""
+    """Role-verified PM/TL Approval for a specific single issue (POST)."""
+    from src.database import get_db
     from src.services.message_service import execute_jira_ticket_creation
-    from src.services.member_sync_service import get_active_pm_from_excel
-    pm_info = get_active_pm_from_excel()
-    approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
     assignee = None
+    approver_id = None
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
         try:
             body = await request.json()
             assignee = body.get("assignee")
+            approver_id = body.get("reviewer") or body.get("approver_id") or body.get("approver")
         except Exception:
             pass
     elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
         try:
             form = await request.form()
             assignee = form.get("assignee")
+            approver_id = form.get("reviewer") or form.get("approver_id") or form.get("approver")
         except Exception:
             pass
+
+    # Strictly verify that reviewer is an authorized management member (TL, PM, HM)
+    member = resolve_and_verify_approver(approver_id)
+    if not member:
+        logger.warning(
+            f"Unauthorized confirmation attempt for issue #{issue_idx + 1} with reviewer '{approver_id}'",
+            extra={"event": "UNAUTHORIZED_CONFIRM_ATTEMPT", "reviewer": approver_id, "messageId": message_id, "issueIdx": issue_idx}
+        )
+        return render_confirmation_html(
+            title="No Authority to Confirm",
+            status_type="error",
+            heading="Authority Check Failed",
+            message=f"You have no authority to confirm Issue #{issue_idx + 1} creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+            status_code=403,
+        )
+
+    role = (member.get("role") or "PM").upper().strip()
+    approver = f"{role} {member.get('display_name')}"
 
     res = await execute_jira_ticket_creation(
         message_id, approver_name=approver, issue_idx=issue_idx, assignee_override=assignee
@@ -1206,6 +1802,7 @@ async def confirm_issue_post(
                 status_type="error",
                 heading="Error",
                 message=res.get("error", f"Failed to create Issue #{issue_idx + 1}"),
+                status_code=400,
             )
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to create Jira issue"))
 
@@ -1216,7 +1813,7 @@ async def confirm_issue_post(
         return render_confirmation_html(
             title=f"Issue #{issue_idx + 1} Created Successfully",
             status_type="success",
-            heading=f"Issue #{issue_idx + 1} Approved by PM",
+            heading=f"Issue #{issue_idx + 1} Approved by {approver}",
             message=f"Ticket {key} has been created in Jira and assigned to {target_dev}. Confirmation posted to Teams.",
             details={"Jira Ticket": key, "Status": "Created & Active", "Assignee": target_dev, "Approved By": approver},
             actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
@@ -1229,44 +1826,118 @@ async def decline_issue_get(
     message_id: str,
     issue_idx: int,
     request: Request,
+    reviewer: Optional[str] = None,
+    reason: Optional[str] = None,
 ):
     """1-Click PM Decline for a specific single issue in a multi-issue triage card (GET)."""
     if request.method == "HEAD":
         return Response(status_code=200)
 
+    from src.database import get_db
     from src.services.message_service import execute_jira_ticket_decline
-    from src.services.member_sync_service import get_active_pm_from_excel
-    pm_info = get_active_pm_from_excel()
-    approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
-    res = await execute_jira_ticket_decline(message_id, approver_name=approver, issue_idx=issue_idx)
+    db = get_db()
+    row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
+    if not row:
+        return render_confirmation_html(
+            title="Message Not Found",
+            status_type="error",
+            heading="Error",
+            message=f"Message ID '{message_id}' was not found in the database.",
+            status_code=404,
+        )
+
+    if reviewer:
+        member = resolve_and_verify_approver(reviewer)
+        if not member:
+            return render_confirmation_html(
+                title="No Authority to Reject",
+                status_type="error",
+                heading="Authority Check Failed",
+                message=f"You have no authority to reject Issue #{issue_idx + 1} creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                status_code=403,
+            )
+        role = (member.get("role") or "PM").upper().strip()
+        approver = f"{role} {member.get('display_name')}"
+    else:
+        approver = get_approver_name_for_message(row=row)
+
+    res = await execute_jira_ticket_decline(message_id, approver_name=approver, issue_idx=issue_idx, reason=reason)
     if not res.get("success"):
         return render_confirmation_html(
-            title="Action Failed",
+            title=f"Issue #{issue_idx + 1} Reject Failed",
             status_type="error",
             heading="Cannot Reject",
             message=res.get("error", "Failed to reject issue"),
+            status_code=400,
         )
+
     return render_confirmation_html(
         title=f"Issue #{issue_idx + 1} Rejected",
         status_type="declined",
-        heading=f"Issue #{issue_idx + 1} Rejected by PM",
-        message=f"Issue #{issue_idx + 1} was rejected. No Jira ticket was created for this issue. You can close this window now.",
+        heading=f"Issue #{issue_idx + 1} Rejected by {approver}",
+        message=f"Issue #{issue_idx + 1} was rejected by {approver}. No Jira ticket was created for this issue. You can close this window now.",
         details={"Status": f"Issue #{issue_idx + 1} Rejected", "Rejected By": approver},
     )
 
 
 @router.post("/api/jira/decline-issue/{message_id}/{issue_idx}")
-async def decline_issue_post(message_id: str, issue_idx: int):
-    """Programmatic / Dashboard PM Decline for a specific single issue (POST)."""
+async def decline_issue_post(message_id: str, issue_idx: int, request: Request):
+    """PM/TL Decline for a specific single issue (POST)."""
+    from src.database import get_db
     from src.services.message_service import execute_jira_ticket_decline
-    from src.services.member_sync_service import get_active_pm_from_excel
-    pm_info = get_active_pm_from_excel()
-    approver = f"PM {pm_info.get('name', 'Project Manager')}"
 
-    res = await execute_jira_ticket_decline(message_id, approver_name=approver, issue_idx=issue_idx)
+    approver_id = None
+    reason = None
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            approver_id = body.get("reviewer") or body.get("approver_id") or body.get("approver")
+            reason = body.get("reason")
+        except Exception:
+            pass
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            approver_id = form.get("reviewer") or form.get("approver_id") or form.get("approver")
+            reason = form.get("reason")
+        except Exception:
+            pass
+
+    member = resolve_and_verify_approver(approver_id)
+    if not member:
+        return render_confirmation_html(
+            title="No Authority to Reject",
+            status_type="error",
+            heading="Authority Check Failed",
+            message=f"You have no authority to reject Issue #{issue_idx + 1} creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+            status_code=403,
+        )
+
+    role = (member.get("role") or "PM").upper().strip()
+    approver = f"{role} {member.get('display_name')}"
+
+    res = await execute_jira_ticket_decline(message_id, approver_name=approver, reason=reason, issue_idx=issue_idx)
     if not res.get("success"):
+        if "text/html" in request.headers.get("accept", "") or "form" in content_type:
+            return render_confirmation_html(
+                title="Action Failed",
+                status_type="error",
+                heading="Cannot Reject",
+                message=res.get("error", "Failed to reject issue"),
+                status_code=400,
+            )
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to decline Jira issue"))
+
+    if "text/html" in request.headers.get("accept", "") or "form" in content_type:
+        return render_confirmation_html(
+            title=f"Issue #{issue_idx + 1} Rejected",
+            status_type="declined",
+            heading=f"Issue #{issue_idx + 1} Rejected by {approver}",
+            message=f"Issue #{issue_idx + 1} was rejected by {approver}. No Jira ticket was created for this issue. You can close this window now.",
+            details={"Status": f"Issue #{issue_idx + 1} Rejected", "Rejected By": approver},
+        )
     return res
 
 
@@ -1379,12 +2050,12 @@ async def test_teams_webhook():
     from src.services.teams_notifier import send_ticket_created_notification
     res = await send_ticket_created_notification(
         ticket_key="TEST-1",
-        ticket_url=config.jira.base_url or "https://dhruvdkombee.atlassian.net",
+        ticket_url=config.jira.base_url or "https://your-domain.atlassian.net",
         summary="Test notification from Teams-to-Jira Automation",
         issue_type="Task",
         priority="Medium",
-        assignee="Developer (Musaib Khan)",
-        reporter="Client (Dhruv dobariya)",
+        assignee="Lead Developer",
+        reporter="Client Reporter",
         approval_note="Test message sent from Dashboard",
     )
 @router.post("/api/messages/{message_id}/send-reminder")
@@ -1427,7 +2098,7 @@ async def simulate_pm_followup_latest():
         sim_msg = {
             "messageId": f"sim-followup-{int(datetime.now().timestamp())}",
             "chatId": config.teams.chat_id,
-            "sender": {"userId": "client-test-id", "displayName": "Dhruv dobariya"},
+            "sender": {"userId": "client-test-id", "displayName": "Client Reporter"},
             "message": {"text": "#issue Checkout button returns 500 error on payment page"},
             "createdDateTime": datetime.now(timezone.utc).isoformat(),
         }
@@ -1443,11 +2114,11 @@ async def test_email_endpoint(to_email: Optional[str] = None):
     from src.services.email_service import send_pm_followup_email
     from src.services.reminder_service import get_active_pm
     pm_info = get_active_pm()
-    target_email = to_email or pm_info.get("email") or "santosh.yadav@kombee.com"
+    target_email = to_email or pm_info.get("email") or "pm@example.com"
 
     res = await send_pm_followup_email(
         pm_email=target_email,
-        pm_name=pm_info.get("name", "Santosh Yadav"),
+        pm_name=pm_info.get("name", "Project Manager"),
         reporter_name="Client (Test)",
         elapsed_minutes=15,
         issues=[{
@@ -1455,7 +2126,7 @@ async def test_email_endpoint(to_email: Optional[str] = None):
             "issue_type": "Task",
             "priority": "High",
             "affected_module": "Authentication",
-            "suggested_assignee": "Musaib Khan",
+            "suggested_assignee": pm_info.get("name", "Lead Developer"),
             "observed_behavior": "This is a test notification to verify Outlook / SMTP email delivery."
         }],
         raw_message="Test message for email configuration verification",

@@ -122,6 +122,61 @@ def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
     return xlsx_bytes
 
 
+def read_excel_file_bytes_safe(file_path: Path) -> Optional[bytes]:
+    """Read binary file bytes on Windows even when exclusively open in Microsoft Excel desktop.
+    Uses Win32 CreateFileW with FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE on Windows.
+    Falls back to standard open() on other platforms or if Win32 API is unavailable.
+    """
+    if not file_path.exists():
+        return None
+
+    import sys
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.windll.kernel32
+            GENERIC_READ = 0x80000000
+            FILE_SHARE_READ = 0x00000001
+            FILE_SHARE_WRITE = 0x00000002
+            FILE_SHARE_DELETE = 0x00000004
+            OPEN_EXISTING = 3
+            FILE_ATTRIBUTE_NORMAL = 0x80
+
+            p_str = str(file_path.resolve())
+            handle = kernel32.CreateFileW(
+                p_str,
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+            if handle != -1 and handle != 0xFFFFFFFFFFFFFFFF:
+                try:
+                    high = wintypes.DWORD()
+                    low = kernel32.GetFileSize(handle, ctypes.byref(high))
+                    file_size = (high.value << 32) + low
+                    if file_size > 0:
+                        buf = ctypes.create_string_buffer(file_size)
+                        bytes_read = wintypes.DWORD()
+                        if kernel32.ReadFile(handle, buf, file_size, ctypes.byref(bytes_read), None):
+                            return buf.raw[:bytes_read.value]
+                finally:
+                    kernel32.CloseHandle(handle)
+        except Exception as win_err:
+            logger.debug(f"Win32 CreateFile read notice: {win_err}")
+
+    # Standard fallback
+    try:
+        with open(file_path, "rb") as f:
+            return f.read()
+    except Exception as std_err:
+        logger.debug(f"Standard open read notice: {std_err}")
+        return None
+
+
 def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, Any]]:
     """Read all members directly from Member.xlsx (The Single Source of Truth).
     Returns list of member dicts including role and level.
@@ -134,11 +189,28 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
         logger.warning(f"Member.xlsx does not exist at {target}. Creating initial sheet...")
         export_members_to_excel(target)
 
-    try:
-        wb = openpyxl.load_workbook(target, data_only=True)
-    except (PermissionError, OSError):
-        logger.warning(f"File {target} is locked by another process (e.g. Excel). Falling back to {LOCAL_MEMBER_PATH}")
-        wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH, data_only=True)
+    wb = None
+    target_bytes = read_excel_file_bytes_safe(target)
+    if target_bytes and len(target_bytes) > 500:
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(target_bytes), data_only=True)
+            # Synchronize to local fallback
+            if target != LOCAL_MEMBER_PATH:
+                try:
+                    LOCAL_MEMBER_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    with open(LOCAL_MEMBER_PATH, "wb") as lf:
+                        lf.write(target_bytes)
+                except Exception:
+                    pass
+        except Exception as load_err:
+            logger.debug(f"openpyxl load from memory buffer notice: {load_err}")
+
+    if wb is None:
+        try:
+            wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH, data_only=True)
+        except Exception as fb_err:
+            logger.warning(f"Failed to load fallback Member.xlsx: {fb_err}")
+            return []
     ws = wb.active
 
     # Find the header row (first row where a cell contains 'Full Name' or 'Name')
@@ -166,7 +238,7 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
                     col_map["can_approve"] = col_idx
                 elif "project" in cell_val or "jira" in cell_val:
                     col_map["project"] = col_idx
-                elif "status" in cell_val:
+                elif "status" in cell_val or "active" in cell_val:
                     col_map["status"] = col_idx
                 elif "updated" in cell_val:
                     col_map["updated_at"] = col_idx
@@ -196,7 +268,21 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
             continue
 
         email = str(get_col("email", "")).strip().lower()
-        role = str(get_col("role", "DEVELOPER")).strip().upper() or "DEVELOPER"
+        raw_role = str(get_col("role", "UNASSIGNED")).strip().upper()
+        if raw_role in ("TL", "PM", "HM", "DEVELOPER", "CLIENT", "UNASSIGNED"):
+            role = raw_role
+        elif raw_role in ("HIGHER MANAGEMENT", "MANAGEMENT", "DIRECTOR", "VP"):
+            role = "HM"
+        elif raw_role in ("PROJECT MANAGER",):
+            role = "PM"
+        elif raw_role in ("TEAM LEAD", "LEAD"):
+            role = "TL"
+        elif raw_role in ("DEV", "SOFTWARE ENGINEER", "ENGINEER"):
+            role = "DEVELOPER"
+        else:
+            # FR-03: Anyone with an unknown role is treated as UNASSIGNED
+            role = "UNASSIGNED"
+
         level = str(get_col("level", "")).strip()
 
         # Infer or normalize hierarchy level
@@ -214,18 +300,19 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
         user_id = str(get_col("user_id", "")).strip()
         raw_approve = str(get_col("can_approve", "0")).strip().lower()
 
-        # Approval permissions:
+        # Approval permissions per Specification Role & Hierarchy Matrix:
         # All management levels (Level 1 TL, Level 2 PM, Level 3 HM) can approve/decline tickets
         if role in ("PM", "TL", "HM") or level in ("Level 1", "Level 2", "Level 3"):
             can_approve = True
         elif role == "CLIENT":
-            can_approve = raw_approve in ("1", "true", "yes", "y") or raw_approve not in ("0", "false", "no")
-        else:
             can_approve = raw_approve in ("1", "true", "yes", "y")
+        else:
+            # AC-03: Reactions from DEVELOPER and UNASSIGNED users trigger nothing (Blocked)
+            can_approve = False
 
         project = str(get_col("project", config.jira.project_key or "SCRUM")).strip()
         status = str(get_col("status", "Active")).strip()
-        is_active = status.lower() not in ("inactive", "disabled", "0", "false")
+        is_active = status.lower() not in ("inactive", "disabled", "0", "false", "no", "n")
         updated_at = str(get_col("updated_at", "")).strip()
 
         members.append({
@@ -298,7 +385,7 @@ def sync_db_from_excel() -> List[Dict[str, Any]]:
                 """,
                 (name, email, user_id, role, level, specialty, can_approve, is_active, existing["id"]),
             )
-            active_ids.append(existing["id"])
+            member_id = existing["id"]
         else:
             cursor.execute(
                 """
@@ -307,20 +394,23 @@ def sync_db_from_excel() -> List[Dict[str, Any]]:
                 """,
                 (user_id, name, email, role, level, specialty, can_approve, is_active),
             )
-            active_ids.append(cursor.lastrowid)
+            member_id = cursor.lastrowid
+        active_ids.append(member_id)
+        m["id"] = member_id
 
     # Clean up any removed members from SQLite table so it strictly mirrors Member.xlsx
     if active_ids:
         placeholders = ",".join("?" * len(active_ids))
         cursor.execute(f"DELETE FROM team_members WHERE id NOT IN ({placeholders})", active_ids)
 
-    logger.info(f"Synchronized database cache from Member.xlsx ({len(members)} members)")
-    return members
-
-    # Clean up any removed members from SQLite table so it strictly mirrors Member.xlsx
-    if active_ids:
-        placeholders = ",".join("?" * len(active_ids))
-        cursor.execute(f"DELETE FROM team_members WHERE id NOT IN ({placeholders})", active_ids)
+    global _cached_members, _cached_mtime
+    _cached_members = members
+    target = get_primary_excel_path()
+    if target.exists():
+        try:
+            _cached_mtime = os.path.getmtime(target)
+        except Exception:
+            pass
 
     logger.info(f"Synchronized database cache from Member.xlsx ({len(members)} members)")
     return members
@@ -415,9 +505,41 @@ def get_active_hms() -> List[Dict[str, Any]]:
     ]
 
 
+def get_active_authorized_approvers() -> List[Dict[str, Any]]:
+    """Retrieve all active members authorized to approve/decline tickets from Member.xlsx.
+    Includes management tiers: Level 1 (TL), Level 2 (PM), Level 3 (HM), or members with explicit can_approve=True.
+    Strictly excludes DEVELOPER, UNASSIGNED, and CLIENT (unless can_approve=True).
+    """
+    members = get_all_members_from_excel()
+    approvers = []
+    seen = set()
+    for m in members:
+        if not m.get("is_active"):
+            continue
+        role = (m.get("role") or "").upper().strip()
+        level = str(m.get("level") or "").upper().strip()
+        can_approve = bool(m.get("can_approve"))
+
+        if role in ("DEVELOPER", "UNASSIGNED", "CLIENT") and not can_approve:
+            continue
+
+        if role in ("PM", "TL", "HM") or level in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3", "L1", "L2", "L3") or can_approve:
+            uid = m.get("user_id") or m.get("display_name")
+            if uid and uid not in seen:
+                seen.add(uid)
+                approvers.append(m)
+    return approvers
+
+
 def get_members_by_level(level: str) -> List[Dict[str, Any]]:
     """Retrieve all active members assigned to a specific hierarchy level."""
     clean_lvl = (level or "").strip().upper()
+    if clean_lvl in ("1", "LEVEL 1", "L1", "TL"):
+        return get_active_tls()
+    elif clean_lvl in ("2", "LEVEL 2", "L2", "PM"):
+        return get_active_pms()
+    elif clean_lvl in ("3", "LEVEL 3", "L3", "HM"):
+        return get_active_hms()
     members = get_all_members_from_excel()
     return [
         m for m in members
@@ -496,17 +618,20 @@ def feed_member_to_excel(
         except Exception:
             pass
 
-    # Determine role
+    # Determine role dynamically without hardcoding names
     assigned_role = role
     if not assigned_role:
-        name_lower = name_clean.lower()
         spec_lower = (specialty or "").lower()
-        if "dhruv" in name_lower or "client" in spec_lower or "product owner" in spec_lower:
+        if "client" in spec_lower or "product owner" in spec_lower:
             assigned_role = "CLIENT"
-        elif "hemil" in name_lower or "pm" in spec_lower or "project manager" in spec_lower or "scrum" in spec_lower:
+        elif "pm" in spec_lower or "project manager" in spec_lower or "scrum" in spec_lower:
             assigned_role = "PM"
+        elif "tl" in spec_lower or "team lead" in spec_lower:
+            assigned_role = "TL"
+        elif "developer" in spec_lower or "engineer" in spec_lower:
+            assigned_role = "DEVELOPER"
         else:
-            # Per user specification: newly discovered chat members default to UNASSIGNED
+            # Per FR-03: newly discovered or unassigned chat members default to UNASSIGNED
             assigned_role = "UNASSIGNED"
     assigned_role = assigned_role.upper()
 
@@ -525,23 +650,17 @@ def feed_member_to_excel(
     # Specialty
     if not specialty:
         if assigned_role == "CLIENT":
-            specialty = "Client Product Owner"
+            specialty = "Client / Product Owner"
         elif assigned_role == "PM":
             specialty = "Project Manager / Scrum Master"
         elif assigned_role == "TL":
-            specialty = "Team Lead"
+            specialty = "Technical Team Lead"
         elif assigned_role in ("HM", "HIGHER MANAGEMENT"):
             specialty = "Higher Management"
-        elif assigned_role == "UNASSIGNED":
-            specialty = "Pending Role Assignment"
+        elif assigned_role == "DEVELOPER":
+            specialty = "Software Engineer"
         else:
-            name_lower = name_clean.lower()
-            if "musaib" in name_lower:
-                specialty = "Frontend & UI Lead"
-            elif "santosh" in name_lower:
-                specialty = "Backend & API Lead"
-            else:
-                specialty = "Software Engineer"
+            specialty = "Pending Role Assignment"
 
     if can_approve is None:
         can_approve = assigned_role in ("PM", "TL", "HM") or assigned_level in ("Level 1", "Level 2", "Level 3")
@@ -1205,8 +1324,21 @@ async def _excel_file_watcher_loop():
                             extra={"event": "MANUAL_SHEET_EDIT_DETECTED", "file": str(target)},
                         )
                         loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(None, sync_db_from_excel)
+                        updated_members = await loop.run_in_executor(None, sync_db_from_excel)
+                        _cached_members = updated_members
                         _cached_mtime = current_mtime
+
+                        # Proactively broadcast ROSTER_UPDATED to all connected dashboards via WebSocket
+                        try:
+                            from src.services.broadcaster import broadcast_message
+                            await broadcast_message({
+                                "type": "ROSTER_UPDATED",
+                                "message": f"Team roster synchronized from Member.xlsx ({len(updated_members)} members)",
+                                "members": updated_members,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+                        except Exception as b_err:
+                            logger.debug(f"Broadcast roster error notice: {b_err}")
                     elif _cached_mtime == 0.0:
                         _cached_mtime = current_mtime
                 except Exception as watch_err:

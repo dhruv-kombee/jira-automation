@@ -272,16 +272,38 @@ def build_pending_approval_card(
     base_url: Optional[str] = None,
     duplicate_warning: Optional[Dict[str, Any]] = None,
     extractor_mode: Optional[str] = None,
+    target_users: Optional[List[Dict[str, Any]]] = None,
+    target_role: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build a minimal, compact Adaptive Card prompting PM for approval of identified issue(s).
+    """Build a minimal, compact Adaptive Card prompting TL/PM for approval of identified issue(s).
     Strictly focuses on: Topic Details, Scrum Project, and Assignee.
+    Per FR-04 and AC-05, all active members of the targeted tier are tagged at once.
     """
     app_base = base_url or get_app_base_url()
     issue_count = len(issues)
     project_key = config.jira.project_key or "SCRUM"
 
+    # Build multi-user mention entities (FR-04 / AC-05)
+    mention_entities: List[Dict[str, Any]] = []
+    mention_tags: List[str] = []
+    if target_users:
+        for u in target_users:
+            u_name = u.get("display_name") or u.get("name") or "Reviewer"
+            u_id = u.get("user_id") or u.get("email") or ""
+            mention_entities.append({
+                "type": "mention",
+                "text": f"<at>{u_name}</at>",
+                "mentioned": {
+                    "id": u_id,
+                    "name": u_name,
+                },
+            })
+            mention_tags.append(f"<at>{u_name}</at>")
+
+    tag_str = " ".join(mention_tags)
     display_timestamp = format_card_timestamp(created_at)
-    header_text = f"Ticket Confirmation ({issue_count} Issues)" if issue_count > 1 else "Ticket Confirmation"
+    role_prefix = f"[{target_role}] " if target_role else ""
+    header_text = f"{role_prefix}Ticket Confirmation ({issue_count} Issues)" if issue_count > 1 else f"{role_prefix}Ticket Confirmation"
     body_elements: List[Dict[str, Any]] = [
         {
             "type": "Container",
@@ -306,6 +328,15 @@ def build_pending_approval_card(
             ],
         },
     ]
+
+    if tag_str:
+        body_elements.append({
+            "type": "TextBlock",
+            "text": f"🔔 {tag_str} Please review and confirm ticket creation using the buttons below:",
+            "weight": "Bolder",
+            "size": "Small",
+            "wrap": True,
+        })
 
     if duplicate_warning:
         dup_key = duplicate_warning.get("key", "Recent Ticket")
@@ -345,10 +376,9 @@ def build_pending_approval_card(
 
     if not assignable_choices:
         assignable_choices = [
-            {"name": "Santosh Yadav", "specialty": "Backend & API Lead", "role": "DEVELOPER"},
-            {"name": "Musaib Khan", "specialty": "Frontend & UI Lead", "role": "DEVELOPER"},
-            {"name": "Nishi Sharma", "specialty": "AI Developer", "role": "DEVELOPER"},
-            {"name": "Hemil Ghori", "specialty": "Project Manager / Scrum Master", "role": "PM"},
+            {"name": "Lead Developer", "specialty": "Backend / Core API", "role": "DEVELOPER"},
+            {"name": "Frontend Developer", "specialty": "Frontend & UI", "role": "DEVELOPER"},
+            {"name": "Project Manager", "specialty": "Sprint & Delivery Oversight", "role": "PM"},
         ]
 
     facts: List[Dict[str, str]] = []
@@ -385,7 +415,7 @@ def build_pending_approval_card(
             {
                 "type": "Action.OpenUrl",
                 "title": f"⚡ Approve ({dev1_short})",
-                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?auto=1&assignee={urllib.parse.quote_plus(dev1)}",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(dev1)}",
             },
             {
                 "type": "Action.OpenUrl",
@@ -399,7 +429,7 @@ def build_pending_approval_card(
             issue1_subactions.append({
                 "type": "Action.OpenUrl",
                 "title": f"Assign {m_name} ({short_role})",
-                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?auto=1&assignee={urllib.parse.quote_plus(m_name)}",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(m_name)}",
             })
 
         actions = [
@@ -439,7 +469,7 @@ def build_pending_approval_card(
             {
                 "type": "Action.OpenUrl",
                 "title": f"⚡ Approve ({dev1_short})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?auto=1&assignee={urllib.parse.quote_plus(dev1)}",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?assignee={urllib.parse.quote_plus(dev1)}",
             },
             {
                 "type": "Action.OpenUrl",
@@ -453,7 +483,7 @@ def build_pending_approval_card(
             issue1_subactions.append({
                 "type": "Action.OpenUrl",
                 "title": f"Assign {m_name} ({short_role})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?auto=1&assignee={urllib.parse.quote_plus(m_name)}",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?assignee={urllib.parse.quote_plus(m_name)}",
             })
         issue1_subactions.append({
             "type": "Action.OpenUrl",
@@ -473,7 +503,7 @@ def build_pending_approval_card(
             {
                 "type": "Action.OpenUrl",
                 "title": f"⚡ Approve ({dev2_short})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?auto=1&assignee={urllib.parse.quote_plus(dev2)}",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?assignee={urllib.parse.quote_plus(dev2)}",
             },
             {
                 "type": "Action.OpenUrl",
@@ -487,7 +517,7 @@ def build_pending_approval_card(
             issue2_subactions.append({
                 "type": "Action.OpenUrl",
                 "title": f"Assign {m_name} ({short_role})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?auto=1&assignee={urllib.parse.quote_plus(m_name)}",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?assignee={urllib.parse.quote_plus(m_name)}",
             })
         issue2_subactions.append({
             "type": "Action.OpenUrl",
@@ -500,7 +530,7 @@ def build_pending_approval_card(
             {
                 "type": "Action.OpenUrl",
                 "title": "⚡ Approve All (Suggested Assignees)",
-                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?auto=1",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}",
             },
             {
                 "type": "Action.OpenUrl",
@@ -514,7 +544,7 @@ def build_pending_approval_card(
             approve_all_subactions.append({
                 "type": "Action.OpenUrl",
                 "title": f"Assign All to {m_name} ({short_role})",
-                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?auto=1&assignee={urllib.parse.quote_plus(m_name)}",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(m_name)}",
             })
 
         actions = [
@@ -598,7 +628,7 @@ def build_pending_approval_card(
             {
                 "type": "Action.OpenUrl",
                 "title": f"⚡ Approve ({dev1_short})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?auto=1&assignee={urllib.parse.quote_plus(dev1)}",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?assignee={urllib.parse.quote_plus(dev1)}",
             },
             {
                 "type": "Action.OpenUrl",
@@ -612,7 +642,7 @@ def build_pending_approval_card(
             issue1_subactions.append({
                 "type": "Action.OpenUrl",
                 "title": f"Assign {m_name} ({short_role})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?auto=1&assignee={urllib.parse.quote_plus(m_name)}",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?assignee={urllib.parse.quote_plus(m_name)}",
             })
 
         iss2 = issues[1]
@@ -626,7 +656,7 @@ def build_pending_approval_card(
             {
                 "type": "Action.OpenUrl",
                 "title": f"⚡ Approve ({dev2_short})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?auto=1&assignee={urllib.parse.quote_plus(dev2)}",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?assignee={urllib.parse.quote_plus(dev2)}",
             },
             {
                 "type": "Action.OpenUrl",
@@ -640,7 +670,7 @@ def build_pending_approval_card(
             issue2_subactions.append({
                 "type": "Action.OpenUrl",
                 "title": f"Assign {m_name} ({short_role})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?auto=1&assignee={urllib.parse.quote_plus(m_name)}",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?assignee={urllib.parse.quote_plus(m_name)}",
             })
 
         more_issue_actions = []
@@ -651,7 +681,7 @@ def build_pending_approval_card(
             more_issue_actions.append({
                 "type": "Action.OpenUrl",
                 "title": f"⚡ Approve #{i+1} ({cur_short})",
-                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/{i}?auto=1&assignee={urllib.parse.quote_plus(cur_dev)}",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/{i}?assignee={urllib.parse.quote_plus(cur_dev)}",
             })
             more_issue_actions.append({
                 "type": "Action.OpenUrl",
@@ -728,10 +758,24 @@ def build_pending_approval_card(
             },
         ]
 
+    plain_tags = " ".join(f"@{u.get('display_name', 'Lead')}" for u in target_users) if target_users else ""
+    prefix = f"{plain_tags} " if plain_tags else ""
     plain_text = (
-        f"Ticket Confirmation ({issue_count} Issue{'s' if issue_count > 1 else ''})\n"
+        f"{prefix}Ticket Confirmation ({issue_count} Issue{'s' if issue_count > 1 else ''})\n"
         + "\n".join(plain_summary_lines)
     )
+
+    card_content: Dict[str, Any] = {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": body_elements,
+        "actions": actions,
+    }
+    if mention_entities:
+        card_content["msteams"] = {
+            "entities": mention_entities,
+        }
 
     return {
         "type": "message",
@@ -740,13 +784,7 @@ def build_pending_approval_card(
             {
                 "contentType": "application/vnd.microsoft.card.adaptive",
                 "contentUrl": None,
-                "content": {
-                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                    "type": "AdaptiveCard",
-                    "version": "1.4",
-                    "body": body_elements,
-                    "actions": actions,
-                },
+                "content": card_content,
             }
         ],
     }
@@ -764,10 +802,26 @@ async def send_pending_approval_notification(
     parent_message_id: Optional[str] = None,
     duplicate_warning: Optional[Dict[str, Any]] = None,
     extractor_mode: Optional[str] = None,
+    target_users: Optional[List[Dict[str, Any]]] = None,
+    target_role: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Send confirmation request card to Teams asking PM to confirm or decline ticket creation."""
+    """Send confirmation request card to Teams asking TL/PM to confirm or decline ticket creation.
+    Per FR-04 and AC-05, all active members of the targeted tier are tagged at once.
+    """
     timestamp = created_at or get_current_timestamp_str()
     webhook_url = (config.teams.webhook_url or "").strip()
+
+    # Determine targeted tier members if not explicitly provided
+    if target_users is None:
+        from src.services.member_sync_service import get_active_tls, get_active_pms
+        active_tls = get_active_tls()
+        if active_tls:
+            target_users = active_tls
+            target_role = target_role or "TL"
+        else:
+            active_pms = get_active_pms()
+            target_users = active_pms
+            target_role = target_role or "PM"
 
     card_payload = build_pending_approval_card(
         message_id=message_id,
@@ -777,6 +831,8 @@ async def send_pending_approval_notification(
         created_at=timestamp,
         duplicate_warning=duplicate_warning,
         extractor_mode=extractor_mode,
+        target_users=target_users,
+        target_role=target_role,
     )
 
     if webhook_url:
@@ -785,19 +841,39 @@ async def send_pending_approval_notification(
                 res = await client.post(webhook_url, json=card_payload)
                 if res.status_code in (200, 201, 202):
                     logger.info(
-                        f"✅ Successfully posted pending approval card to Teams for message {message_id}",
-                        extra={"event": "TEAMS_PENDING_APPROVAL_POST", "status": res.status_code},
+                        f"✅ Successfully posted pending approval card to Teams for message {message_id} (tagged: {len(target_users or [])})",
+                        extra={"event": "TEAMS_PENDING_APPROVAL_POST", "status": res.status_code, "targetRole": target_role},
                     )
                     return {"success": True, "method": "webhook", "status": res.status_code}
         except Exception as webhook_err:
             logger.error(f"Error calling Teams Webhook for pending approval: {webhook_err}")
 
-    # Fallback to Graph API
+    # Fallback to Graph API with multi-mentions
     effective_chat_id = chat_id or config.teams.chat_id
     if effective_chat_id:
         from src.graph_client import send_chat_message
-        html_msg = f"<b>📋 PM Triage: {len(issues)} Issue(s) Identified</b><br/>Reporter: {reporter}<br/>React 🎟️ to Approve or ❌ to Decline."
-        graph_res = await send_chat_message(effective_chat_id, html_msg)
+        graph_mentions = []
+        graph_tags = []
+        if target_users:
+            for idx, u in enumerate(target_users):
+                u_name = u.get("display_name") or u.get("name") or "Lead"
+                u_id = u.get("user_id") or u.get("email") or ""
+                graph_mentions.append({
+                    "id": idx,
+                    "mentionText": u_name,
+                    "mentioned": {
+                        "user": {
+                            "displayName": u_name,
+                            "id": u_id,
+                            "userIdentityType": "aadUser",
+                        }
+                    },
+                })
+                graph_tags.append(f'<at id="{idx}">{u_name}</at>')
+        mention_html = (" ".join(graph_tags) + " ") if graph_tags else ""
+        role_label = target_role or "TL/PM"
+        html_msg = f"{mention_html}<b>📋 {role_label} Triage: {len(issues)} Issue(s) Identified</b><br/>Reporter: {reporter}<br/>React 👍 to Approve or ❌ to Decline."
+        graph_res = await send_chat_message(effective_chat_id, html_msg, mentions=graph_mentions if graph_mentions else None)
         return {"success": bool(graph_res), "method": "graph_chat", "result": graph_res}
 
     return {"success": False, "method": "none"}
@@ -934,8 +1010,9 @@ def build_pm_followup_reminder_card(
     issues: list,
     raw_message: str,
     base_url: Optional[str] = None,
+    mention_users: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Build a compact one-line Adaptive Card mentioning PM for follow-up on client issue."""
+    """Build a compact one-line Adaptive Card mentioning PM / TL for follow-up on client issue."""
     app_base = base_url or get_app_base_url()
 
     first_summary = ""
@@ -945,12 +1022,45 @@ def build_pm_followup_reminder_card(
     if len(clean_snippet) > 90:
         clean_snippet = clean_snippet[:87] + "..."
 
+    # Build mentions entities and tag string
+    mention_entities: List[Dict[str, Any]] = []
+    mention_tags: List[str] = []
+    if mention_users:
+        for u in mention_users:
+            u_name = u.get("display_name") or u.get("name") or "Reviewer"
+            u_id = u.get("user_id") or u.get("email") or ""
+            mention_entities.append({
+                "type": "mention",
+                "text": f"<at>{u_name}</at>",
+                "mentioned": {
+                    "id": u_id,
+                    "name": u_name,
+                },
+            })
+            mention_tags.append(f"<at>{u_name}</at>")
+        tag_str = " ".join(mention_tags)
+        plain_tag = " ".join(f"@{u.get('display_name') or u.get('name')}" for u in mention_users)
+    elif pm_name:
+        mention_entities.append({
+            "type": "mention",
+            "text": f"<at>{pm_name}</at>",
+            "mentioned": {
+                "id": pm_user_id or "",
+                "name": pm_name,
+            },
+        })
+        tag_str = f"<at>{pm_name}</at>"
+        plain_tag = f"@{pm_name}"
+    else:
+        tag_str = "@Reviewers"
+        plain_tag = "@Reviewers"
+
     # One-line concise message mentioning PM directly
     card_text = (
-        f"⏰ <at>{pm_name}</at> Please review client issue from **{reporter}**: "
+        f"⏰ {tag_str} Please review client issue from **{reporter}**: "
         f"*\"{clean_snippet}\"* — react 🎟️ to approve or ❌ to decline."
     )
-    plain_text = f"⏰ @{pm_name} Please review client issue from {reporter}: \"{clean_snippet}\" (React 🎟️ to approve, ❌ to decline)"
+    plain_text = f"⏰ {plain_tag} Please review client issue from {reporter}: \"{clean_snippet}\" (React 🎟️ to approve, ❌ to decline)"
 
     body_elements: list = [
         {
@@ -983,18 +1093,9 @@ def build_pm_followup_reminder_card(
     }
 
     # Tag PM using official Teams mention schema
-    if pm_name:
+    if mention_entities:
         card_content["msteams"] = {
-            "entities": [
-                {
-                    "type": "mention",
-                    "text": f"<at>{pm_name}</at>",
-                    "mentioned": {
-                        "id": pm_user_id or "",
-                        "name": pm_name,
-                    },
-                }
-            ]
+            "entities": mention_entities,
         }
 
     return {
@@ -1132,6 +1233,7 @@ async def send_pm_followup_reminder(
             elapsed_minutes=elapsed_minutes,
             issues=issues,
             raw_message=raw_message,
+            mention_users=mention_users,
         )
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:

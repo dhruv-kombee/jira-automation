@@ -179,4 +179,165 @@ class TestTicketConfirmationCard(unittest.TestCase):
         self.assertFalse(any("🌐" in t for t in more_titles))
         self.assertFalse(any("Assign All" in t for t in more_titles))
 
+    def test_solution1_reactions_removed_and_no_auto_execution(self):
+        """Solution 1: Verify reaction text is completely removed and no buttons have auto=1."""
+        target_tls = [{"display_name": "Nishi Sharma", "user_id": "tl-nishi"}]
+        card = build_pending_approval_card(
+            message_id="msg-solution1-check",
+            issues=[{"summary": "Test issue", "suggested_assignee": "Santosh Yadav"}],
+            reporter="Dhruv dobariya",
+            raw_message="Need fix",
+            created_at="2026-10-09T10:00:00Z",
+            target_users=target_tls,
+            target_role="TL",
+            base_url="http://localhost:3000",
+        )
+        card_str = json.dumps(card)
+
+        # 1. No reaction prompt in card
+        self.assertNotIn("react 👍", card_str.lower())
+        self.assertNotIn("react", card_str.lower())
+        self.assertNotIn("❌ to decline", card_str.lower())
+        self.assertIn("Please review and confirm ticket creation using the buttons below:", card_str)
+
+        # 2. No auto=1 in any URL (prevents unauthenticated 1-click execution)
+        self.assertNotIn("auto=1", card_str)
+
+    def test_solution1_authorized_approver_resolution(self):
+        """Solution 1: Verify resolve_and_verify_approver strictly allows TL/PM/HM and blocks Client/Dev/Unassigned."""
+        from src.routes.dashboard import resolve_and_verify_approver
+
+        # Authorized management roles
+        pm_member = resolve_and_verify_approver("Musaib Khan")
+        self.assertIsNotNone(pm_member)
+        self.assertEqual(pm_member.get("role"), "PM")
+
+        hm_member = resolve_and_verify_approver("Hemil Ghori")
+        self.assertIsNotNone(hm_member)
+        self.assertEqual(hm_member.get("role"), "HM")
+
+        tl_member = resolve_and_verify_approver("Nishi Sharma")
+        self.assertIsNotNone(tl_member)
+        self.assertEqual(tl_member.get("role"), "TL")
+
+        # Unauthorized roles
+        # Santosh is DEVELOPER (can_approve: False)
+        dev_member = resolve_and_verify_approver("Santosh Yadav")
+        self.assertIsNone(dev_member)
+
+        # Dhruv dobariya is UNASSIGNED / CLIENT (can_approve: False)
+        client_member = resolve_and_verify_approver("Dhruv dobariya")
+        self.assertIsNone(client_member)
+
+        # Non-existent member
+        unknown_member = resolve_and_verify_approver("Random Person")
+        self.assertIsNone(unknown_member)
+
+        # None / Empty
+        self.assertIsNone(resolve_and_verify_approver(None))
+        self.assertIsNone(resolve_and_verify_approver(""))
+
+    def test_web_assignee_modal_has_role_authority_verification(self):
+        """Verify that web modal checks role authority and displays warning for Client / Developer."""
+        from src.routes.dashboard import render_assignee_dropdown_html
+
+        # 1. When default reviewer is Client (Dhruv dobariya) -> No Authority banner and disabled button
+        resp_client = render_assignee_dropdown_html(
+            message_id="msg-101",
+            summary="Bug summary",
+            project_key="SCRUM",
+            suggested_assignee="Santosh Yadav",
+            members=[{"name": "Santosh Yadav", "specialty": "Dev"}],
+            approver="PM Musaib Khan",
+            default_reviewer="Dhruv dobariya",
+        )
+        html_client = resp_client.body.decode("utf-8")
+        self.assertIn('name="assignee"', html_client)
+        self.assertIn('name="reviewer"', html_client)
+        self.assertIn("No Authority to Confirm", html_client)
+        self.assertIn("btn-disabled", html_client)
+
+        # 2. When default reviewer is PM (Musaib Khan) -> Authorized banner and enabled button
+        resp_pm = render_assignee_dropdown_html(
+            message_id="msg-102",
+            summary="Bug summary",
+            project_key="SCRUM",
+            suggested_assignee="Santosh Yadav",
+            members=[{"name": "Santosh Yadav", "specialty": "Dev"}],
+            approver="PM Musaib Khan",
+            default_reviewer="Musaib Khan",
+        )
+        html_pm = resp_pm.body.decode("utf-8")
+        self.assertIn("Authorized Management Reviewer", html_pm)
+        self.assertNotIn('class="btn-approve btn-disabled"', html_pm)
+        self.assertNotIn('disabled', html_pm.split('<button')[1].split('</button>')[0])
+
+    def test_web_endpoint_role_authority_enforcement(self):
+        """Verify web approval and decline endpoints strictly require authorized management role (TL/PM/HM)."""
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch, AsyncMock
+        from src.app import app
+
+        client = TestClient(app)
+
+        # 1. POST confirm-approval with Client reviewer -> 403 Forbidden
+        res_client = client.post(
+            "/api/jira/confirm-approval/test-msg-flow",
+            data={"assignee": "Santosh Yadav", "reviewer": "Dhruv dobariya"}
+        )
+        self.assertEqual(res_client.status_code, 403)
+        self.assertIn("No Authority to Confirm", res_client.text)
+
+        # 2. POST confirm-approval with Developer reviewer -> 403 Forbidden
+        res_dev = client.post(
+            "/api/jira/confirm-approval/test-msg-flow",
+            data={"assignee": "Santosh Yadav", "reviewer": "Santosh Yadav"}
+        )
+        self.assertEqual(res_dev.status_code, 403)
+        self.assertIn("No Authority to Confirm", res_dev.text)
+
+        # 3. POST confirm-approval without reviewer -> 403 Forbidden
+        res_none = client.post(
+            "/api/jira/confirm-approval/test-msg-flow",
+            data={"assignee": "Santosh Yadav"}
+        )
+        self.assertEqual(res_none.status_code, 403)
+        self.assertIn("No Authority to Confirm", res_none.text)
+
+        # 4. POST confirm-approval with authorized PM -> 200 OK
+        with patch("src.services.message_service.execute_jira_ticket_creation", new=AsyncMock(return_value={"success": True, "key": "SCRUM-202"})) as mock_create:
+            res_pm = client.post(
+                "/api/jira/confirm-approval/test-msg-flow",
+                data={"assignee": "Santosh Yadav", "reviewer": "Musaib Khan"}
+            )
+            self.assertEqual(res_pm.status_code, 200)
+            mock_create.assert_called_once()
+            self.assertIn("PM Musaib", mock_create.call_args[1].get("approver_name"))
+
+        # 5. POST decline-approval with Client reviewer -> 403 Forbidden
+        res_dec_client = client.post(
+            "/api/jira/decline-approval/test-msg-flow",
+            data={"reviewer": "Dhruv dobariya"}
+        )
+        self.assertEqual(res_dec_client.status_code, 403)
+        self.assertIn("No Authority to Reject", res_dec_client.text)
+
+        # 6. POST decline-approval with authorized PM -> 200 OK
+        with patch("src.services.message_service.execute_jira_ticket_decline", new=AsyncMock(return_value={"success": True, "status": "DECLINED"})) as mock_decline:
+            res_dec_pm = client.post(
+                "/api/jira/decline-approval/test-msg-flow",
+                data={"reviewer": "Musaib Khan"}
+            )
+            self.assertEqual(res_dec_pm.status_code, 200)
+            mock_decline.assert_called_once()
+            self.assertIn("Ticket Creation Rejected", res_dec_pm.text)
+
+        # 3. Chat authorization check: Client and Developer reactions are blocked, only TL/PM/HM can approve
+        from src.services.sender_service import is_user_authorized_approver
+        self.assertFalse(is_user_authorized_approver(display_name="Dhruv dobariya"))  # Client / Unassigned -> False
+        self.assertFalse(is_user_authorized_approver(display_name="Santosh Yadav"))   # Developer -> False
+        self.assertTrue(is_user_authorized_approver(display_name="Musaib Khan"))     # PM -> True
+        self.assertTrue(is_user_authorized_approver(display_name="Nishi Sharma"))    # TL -> True
+        self.assertTrue(is_user_authorized_approver(display_name="Hemil Ghori"))     # HM -> True
+
 

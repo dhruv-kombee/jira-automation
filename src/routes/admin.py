@@ -492,10 +492,10 @@ def download_members_template():
     """Download standard CSV template for team members import."""
     csv_content = (
         "Name,Email,Role,Level,Specialty,Teams_User_ID,Can_Approve\n"
-        "Dhruv Dobariya,dhruv.d.kombee@gmail.com,CLIENT,-,Client Product Owner,35e03956-1723-469c-b561-90f03fc566ed,1\n"
-        "Hemil Ghori,hemil.ghori@kombee.com,PM,Level 2,Project Manager / Scrum Master,83b10217-f4c0-4f87-97f9-d95a33ddaaa0,1\n"
-        "Santosh Yadav,santosh.yadav@kombee.com,DEVELOPER,-,Backend & API Lead,d7bc3c28-33d9-4973-816e-445d51556b8b,0\n"
-        "Musaib Khan,musaib.khan@kombee.com,DEVELOPER,-,Frontend & UI Lead,c5a63f53-cc7a-4c05-ac9a-77e6991bc974,0\n"
+        "Alex Client,client@example.com,CLIENT,-,Client Product Owner,,0\n"
+        "Jordan Lead,tl@example.com,TL,Level 1,Technical Team Lead,,1\n"
+        "Sam Manager,pm@example.com,PM,Level 2,Project Manager,,1\n"
+        "Taylor Dev,dev@example.com,DEVELOPER,-,Full Stack Developer,,0\n"
     )
     return Response(
         content=csv_content,
@@ -859,8 +859,8 @@ async def test_email(req: TestEmailRequest):
     from src.services.email_service import send_pm_followup_email
     from src.services.reminder_service import get_active_pm
     pm = get_active_pm()
-    target_email = req.to_email or pm.get("email") or "santosh.yadav@kombee.com"
-    target_name = pm.get("name") or "Santosh Yadav"
+    target_email = req.to_email or pm.get("email") or "pm@example.com"
+    target_name = pm.get("name") or "Project Manager"
 
     res = await send_pm_followup_email(
         pm_email=target_email,
@@ -872,7 +872,7 @@ async def test_email(req: TestEmailRequest):
             "issue_type": config.jira.default_issue_type,
             "priority": "High",
             "affected_module": "Product Catalog",
-            "suggested_assignee": "Frontend & UI Lead (Musaib Khan)",
+            "suggested_assignee": "Frontend & UI Lead",
             "observed_behavior": "Clicking the category filter results in a frozen dropdown and console error 500."
         }],
         raw_message="#issue The product catalog search dropdown is unresponsive when selecting multiple categories.",

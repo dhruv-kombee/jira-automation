@@ -44,15 +44,15 @@ def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[s
             return Roles.DEVELOPER
 
     logger.info(
-        "Unknown sender",
+        "Unassigned / unlisted sender (treated as UNASSIGNED per FR-03)",
         extra={
-            "event": "UNKNOWN_SENDER",
+            "event": "UNASSIGNED_SENDER",
             "userId": user_id,
             "displayName": display_name,
         },
     )
 
-    return Roles.UNKNOWN
+    return Roles.UNASSIGNED
 
 
 TICKET_APPROVAL_NAMES = {
@@ -98,33 +98,34 @@ def is_user_authorized_approver(
     allow_client: Optional[bool] = None,
 ) -> bool:
     """Check if a specific user has approval permissions based directly on Member.xlsx.
-    All management levels (Level 1 TL, Level 2 PM, Level 3 HM) are authorized approvers.
+    Strictly: only active management levels (Level 1 TL, Level 2 PM, Level 3 HM) are authorized approvers.
+    Clients, developers, and unassigned senders cannot approve.
     """
-    allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
-
     member = get_member_by_id_or_name(user_id=user_id, display_name=display_name)
     if member:
+        # Check active status: Only active members are authorized
+        if not member.get("is_active", True):
+            return False
+
         role = (member.get("role") or "").upper().strip()
         level = str(member.get("level") or "").upper().strip()
-        can_approve = bool(member.get("can_approve"))
+
+        # Block DEVELOPER, UNASSIGNED, and CLIENT users from approving
+        if role in ("DEVELOPER", "UNASSIGNED", "CLIENT"):
+            return False
 
         # Management tiers: Level 1 (TL), Level 2 (PM), Level 3 (HM) are all authorized
         if role in ("PM", "TL", "HM"):
             return True
         if level in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3", "L1", "L2", "L3"):
             return True
-        if role == "CLIENT":
-            return bool(allow_self and can_approve)
-        if can_approve and role not in ("DEVELOPER", "UNASSIGNED"):
+        if member.get("can_approve") and role not in ("DEVELOPER", "UNASSIGNED", "CLIENT"):
             return True
 
-    # Check fallback configured GUIDs
+    # Fallback configured PM GUID only
     u_id_clean = (user_id or "").lower().strip()
-    if u_id_clean:
-        if config.roles.pm and config.roles.pm.lower().strip() == u_id_clean:
-            return True
-        if allow_self and config.roles.client and config.roles.client.lower().strip() == u_id_clean:
-            return True
+    if u_id_clean and config.roles.pm and config.roles.pm.lower().strip() == u_id_clean:
+        return True
 
     return False
 
