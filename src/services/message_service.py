@@ -726,6 +726,15 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     from src.database import get_db
     db = get_db()
 
+    # In chat mode (not threaded channel), find the latest message awaiting confirmation in this chat
+    if not thread_parent_id and normalized.get("chatId"):
+        p_row_candidate = db.execute(
+            "SELECT message_id FROM messages WHERE chat_id = ? AND confirmation_status = 'AWAITING_FINAL_CONFIRMATION' AND jira_issue_key IS NULL ORDER BY id DESC LIMIT 1",
+            (normalized.get("chatId"),),
+        ).fetchone()
+        if p_row_candidate:
+            thread_parent_id = p_row_candidate["message_id"]
+
     if thread_parent_id:
         p_row = db.execute(
             "SELECT * FROM messages WHERE message_id = ?",
@@ -736,8 +745,8 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
             reply_body = (normalized.get("message") or {}).get("text", "").strip()
             reply_lower = reply_body.lower()
 
-            is_appr_cmd = any(reply_lower.startswith(kw) for kw in ("approve", "confirm", "yes", "create ticket", "lgtm"))
-            is_decl_cmd = any(reply_lower.startswith(kw) for kw in ("decline", "reject", "cancel", "no"))
+            is_appr_cmd = any(reply_lower.startswith(kw) for kw in ("approve", "approving", "confirm", "yes", "create ticket", "lgtm"))
+            is_decl_cmd = any(reply_lower.startswith(kw) for kw in ("decline", "declining", "reject", "cancel", "no"))
 
             if is_appr_cmd or is_decl_cmd:
                 from src.services.sender_service import is_user_authorized_approver

@@ -1245,19 +1245,67 @@ async def post_thread_reply_alert(
     channel_id: Optional[str] = None,
 ) -> None:
     """Post an access denied alert in Teams when an unauthorized user tries to approve/decline."""
+    from src.config import config
+    webhook_url = (config.teams.webhook_url or "").strip()
+
+    card_payload = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": [
+                        {
+                            "type": "Container",
+                            "style": "attention",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": "⛔ **Access Denied: Action Strictly Not Permitted**",
+                                    "weight": "Bolder",
+                                    "size": "Medium",
+                                    "color": "Attention",
+                                    "wrap": True,
+                                },
+                                {
+                                    "type": "TextBlock",
+                                    "text": f"@{user_name}, you have role **{user_role}**.\n\nYou are strictly not permitted to approve or reject tickets. Only **Team Lead (TL)**, **Project Manager (PM)**, or **Higher Management (HM)** can approve or decline Jira tickets.\n\n*Please ask your TL, PM, or HM to confirm.*",
+                                    "wrap": True,
+                                    "spacing": "Medium",
+                                },
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    if webhook_url:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.post(webhook_url, json=card_payload)
+                if res.status_code in (200, 201, 202):
+                    return
+        except Exception as wh_err:
+            logger.debug(f"Webhook alert post failed: {wh_err}")
+
     alert_text = (
         f"⛔ @{user_name} You are strictly not permitted to approve or reject tickets (Role: {user_role}).\n\n"
         f"Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can approve Jira tickets. "
         f"Please ask your TL, PM, or HM to confirm."
     )
     try:
-        from src.config import config
         effective_chat_id = chat_id or config.teams.chat_id
         if effective_chat_id:
             from src.graph_client import send_chat_message
             await send_chat_message(effective_chat_id, alert_text)
     except Exception as e:
         logger.debug(f"Failed to post thread reply alert: {e}")
+
 
 
 
