@@ -285,29 +285,25 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
 
         level = str(get_col("level", "")).strip()
 
-        # Infer or normalize hierarchy level
-        if not level or level in ("-", "none", "null"):
-            if role == "TL":
-                level = "Level 1"
-            elif role == "PM":
-                level = "Level 2"
-            elif role in ("HM", "HIGHER MANAGEMENT"):
-                level = "Level 3"
-            else:
-                level = "-"
-
-        specialty = str(get_col("specialty", "")).strip()
-        user_id = str(get_col("user_id", "")).strip()
-        raw_approve = str(get_col("can_approve", "0")).strip().lower()
-
-        # Approval permissions per Specification Role & Hierarchy Matrix:
-        # All management levels (Level 1 TL, Level 2 PM, Level 3 HM) can approve/decline tickets
-        if role in ("PM", "TL", "HM") or level in ("Level 1", "Level 2", "Level 3"):
-            can_approve = True
-        elif role == "CLIENT":
-            can_approve = raw_approve in ("1", "true", "yes", "y")
+        # Infer or normalize hierarchy level and approval permissions
+        if role in ("PM", "TL", "HM"):
+            if not level or level in ("-", "none", "null"):
+                if role == "TL":
+                    level = "Level 1"
+                elif role == "PM":
+                    level = "Level 2"
+                elif role in ("HM", "HIGHER MANAGEMENT"):
+                    level = "Level 3"
+            specialty = str(get_col("specialty", "")).strip()
+            user_id = str(get_col("user_id", "")).strip()
+            raw_approve = str(get_col("can_approve", "1")).strip().lower()
+            can_approve = raw_approve not in ("0", "false", "no", "n")
         else:
-            # AC-03: Reactions from DEVELOPER and UNASSIGNED users trigger nothing (Blocked)
+            # DEVELOPER, CLIENT, and UNASSIGNED users are strictly non-management:
+            # They cannot approve/decline tickets and have level '-'
+            level = "-"
+            specialty = str(get_col("specialty", "")).strip()
+            user_id = str(get_col("user_id", "")).strip()
             can_approve = False
 
         project = str(get_col("project", config.jira.project_key or "SCRUM")).strip()
@@ -1286,20 +1282,24 @@ EXCEL_WATCHER_INTERVAL_SECONDS = 3  # Check disk every 3 seconds for manual shee
 
 
 async def _excel_file_watcher_loop():
-    """Background loop that polls Member.xlsx on disk every 3s:
+    """Background loop that polls Member.xlsx on disk every 3s and cloud OneDrive every 15s:
     1. Detects manual changes (role/level/member changes) in Excel desktop or Excel Online.
     2. Instantly syncs SQLite team_members database cache.
     3. Automatically flushes any deferred writes waiting for Excel file lock release.
     """
     logger.info(
-        f"Proactive Member.xlsx file watcher started (polling disk every {EXCEL_WATCHER_INTERVAL_SECONDS}s)",
+        f"Proactive Member.xlsx file watcher started (polling disk every {EXCEL_WATCHER_INTERVAL_SECONDS}s, cloud every 15s)",
         extra={"event": "EXCEL_WATCHER_START"},
     )
     global _cached_mtime, _pending_excel_flushes
 
+    cloud_poll_ticks = 0
+    last_cloud_bytes_hash = None
+
     while True:
         try:
             await asyncio.sleep(EXCEL_WATCHER_INTERVAL_SECONDS)
+            cloud_poll_ticks += 1
 
             # 1. Flush any pending writes if Excel was previously locked
             if _pending_excel_flushes is not None and ONEDRIVE_MEMBER_PATH.parent.exists():
@@ -1343,6 +1343,52 @@ async def _excel_file_watcher_loop():
                         _cached_mtime = current_mtime
                 except Exception as watch_err:
                     logger.debug(f"Excel file watcher check notice: {watch_err}")
+
+            # 3. Periodically poll OneDrive Cloud URL (every 15s) to catch live Excel Online edits
+            if cloud_poll_ticks >= 5:
+                cloud_poll_ticks = 0
+                try:
+                    loop = asyncio.get_running_loop()
+                    cloud_bytes = await loop.run_in_executor(None, download_onedrive_workbook, DEFAULT_ONEDRIVE_URL)
+                    if cloud_bytes and len(cloud_bytes) > 500:
+                        import hashlib
+                        current_hash = hashlib.md5(cloud_bytes).hexdigest()
+                        if last_cloud_bytes_hash is None:
+                            last_cloud_bytes_hash = current_hash
+                        elif current_hash != last_cloud_bytes_hash:
+                            last_cloud_bytes_hash = current_hash
+                            logger.info("☁️ Detected change in live Excel Online (cloud sheet); syncing local files & database")
+                            if ONEDRIVE_MEMBER_PATH.parent.exists():
+                                try:
+                                    with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
+                                        f.write(cloud_bytes)
+                                except Exception:
+                                    pass
+                            try:
+                                LOCAL_MEMBER_PATH.parent.mkdir(parents=True, exist_ok=True)
+                                with open(LOCAL_MEMBER_PATH, "wb") as f:
+                                    f.write(cloud_bytes)
+                            except Exception:
+                                pass
+
+                            updated_members = await loop.run_in_executor(None, sync_db_from_excel)
+                            _cached_members = updated_members
+                            if target.exists():
+                                _cached_mtime = os.path.getmtime(target)
+
+                            try:
+                                from src.services.broadcaster import broadcast_message
+                                await broadcast_message({
+                                    "type": "ROSTER_UPDATED",
+                                    "message": f"Team roster synchronized from live Excel Online ({len(updated_members)} members)",
+                                    "members": updated_members,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                })
+                            except Exception:
+                                pass
+                except Exception as cloud_err:
+                    logger.debug(f"Cloud poll check notice: {cloud_err}")
+
         except asyncio.CancelledError:
             break
         except Exception as err:
@@ -1369,41 +1415,40 @@ def stop_excel_watcher():
 
 
 def sync_from_onedrive_sheet(url: Optional[str] = None) -> Dict[str, Any]:
-    """Sync database from shared OneDrive Excel sheet, or download from URL."""
+    """Sync database from shared OneDrive Excel sheet, downloading live cloud workbook."""
     target_url = url or DEFAULT_ONEDRIVE_URL
 
-    # If the local OneDrive sync folder exists on disk, read directly from it!
-    if ONEDRIVE_MEMBER_PATH.exists():
+    # 1. Download fresh live copy directly from cloud OneDrive URL
+    file_bytes = download_onedrive_workbook(target_url) if target_url else None
+    if file_bytes and len(file_bytes) > 500:
+        if ONEDRIVE_MEMBER_PATH.parent.exists():
+            try:
+                with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
+                    f.write(file_bytes)
+            except Exception as e:
+                logger.debug(f"Could not overwrite ONEDRIVE_MEMBER_PATH with cloud copy: {e}")
+        try:
+            LOCAL_MEMBER_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(LOCAL_MEMBER_PATH, "wb") as f:
+                f.write(file_bytes)
+        except Exception as e:
+            logger.debug(f"Could not write cloud sheet to LOCAL_MEMBER_PATH: {e}")
+
         members = sync_db_from_excel()
         return {
             "success": True,
-            "source": "onedrive_local_sync",
-            "message": f"Synchronized from local OneDrive file ({len(members)} members)",
-            "excel_file": str(ONEDRIVE_MEMBER_PATH),
+            "source": "onedrive_cloud_download",
+            "message": f"Downloaded and synchronized from live OneDrive Cloud ({len(members)} members)",
+            "excel_file": str(ONEDRIVE_MEMBER_PATH if ONEDRIVE_MEMBER_PATH.parent.exists() else LOCAL_MEMBER_PATH),
             "total_members": len(members),
         }
 
-    # Otherwise download from cloud URL
-    file_bytes = download_onedrive_workbook(target_url)
-    if not file_bytes:
-        members = sync_db_from_excel()
-        return {
-            "success": True,
-            "source": "local_fallback",
-            "message": "OneDrive sheet could not be downloaded; refreshed local Member.xlsx",
-            "excel_file": str(LOCAL_MEMBER_PATH),
-            "total_members": len(members),
-        }
-
-    # Save downloaded bytes
-    with open(LOCAL_MEMBER_PATH, "wb") as f:
-        f.write(file_bytes)
-
+    # 2. Fallback to local file on disk if cloud download is unavailable (e.g. offline)
     members = sync_db_from_excel()
     return {
         "success": True,
-        "source": "onedrive_download",
-        "message": f"Downloaded and synchronized from OneDrive URL ({len(members)} members)",
-        "excel_file": str(LOCAL_MEMBER_PATH),
+        "source": "onedrive_local_sync" if ONEDRIVE_MEMBER_PATH.exists() else "local_fallback",
+        "message": f"Synchronized from local file cache ({len(members)} members)",
+        "excel_file": str(get_primary_excel_path()),
         "total_members": len(members),
     }

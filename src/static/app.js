@@ -524,11 +524,44 @@ async function loadTeamMembers() {
       if (data.members) {
         window.teamMembersList = data.members;
         renderDirectorySidebar();
+        updateActiveIdentityDropdown();
       }
     }
   } catch (e) {
     console.debug('Failed to load members from Member.xlsx:', e);
   }
+}
+
+function updateActiveIdentityDropdown() {
+  const sel = document.getElementById('activeIdentitySelect');
+  if (!sel || !window.teamMembersList.length) return;
+  const currentSaved = localStorage.getItem('saved_jira_reviewer') || '';
+  sel.innerHTML = window.teamMembersList.map(m => {
+    const name = m.display_name;
+    const role = (m.role || '').toUpperCase();
+    const lvl = m.level && m.level !== '-' ? ` (${m.level})` : '';
+    const isSel = (currentSaved && (currentSaved === name || currentSaved === m.user_id));
+    return `<option value="${name}" ${isSel ? 'selected' : ''}>${name} (${role}${lvl})</option>`;
+  }).join('');
+
+  if (!currentSaved && window.teamMembersList.length) {
+    const def = window.teamMembersList.find(m => ['DEVELOPER', 'CLIENT', 'UNASSIGNED'].includes((m.role || '').toUpperCase())) || window.teamMembersList[0];
+    if (def) {
+      sel.value = def.display_name;
+      localStorage.setItem('saved_jira_reviewer', def.display_name);
+      document.cookie = "jira_reviewer=" + encodeURIComponent(def.display_name) + "; path=/; max-age=2592000";
+    }
+  }
+}
+
+const activeIdentitySelectEl = document.getElementById('activeIdentitySelect');
+if (activeIdentitySelectEl) {
+  activeIdentitySelectEl.addEventListener('change', (e) => {
+    const val = e.target.value;
+    localStorage.setItem('saved_jira_reviewer', val);
+    document.cookie = "jira_reviewer=" + encodeURIComponent(val) + "; path=/; max-age=2592000";
+    showToast(`Switched active reviewer to ${val}`, 'info');
+  });
 }
 
 function renderDirectorySidebar() {
@@ -895,23 +928,45 @@ function openPayloadModal(msg) {
       actionsBar.appendChild(linkJira);
     } else {
       if (msg.confirmation_status === 'AWAITING_FINAL_CONFIRMATION') {
+        const currentReviewer = localStorage.getItem('saved_jira_reviewer') || '';
+        const member = (window.teamMembersList || []).find(m => m.display_name === currentReviewer || m.user_id === currentReviewer);
+        const currentRole = (member?.role || 'DEVELOPER').toUpperCase();
+        const canApprove = member ? (Boolean(member.can_approve) && ['TL', 'PM', 'HM'].includes(currentRole)) : false;
+
+        if (!canApprove) {
+          const warnBadge = document.createElement('div');
+          warnBadge.style.cssText = 'color:#f87171; font-size:12px; font-weight:600; padding:6px 12px; background:#450a0a33; border:1px solid #7f1d1d; border-radius:6px; margin-right:auto;';
+          warnBadge.innerHTML = `🔒 Management Authority Required (TL, PM, HM) — Active Role: ${currentRole || 'Developer'}`;
+          actionsBar.appendChild(warnBadge);
+        }
+
         const btnConfirm = document.createElement('button');
-        btnConfirm.className = 'btn btn-primary';
+        btnConfirm.className = canApprove ? 'btn btn-primary' : 'btn btn-secondary';
         btnConfirm.style.fontSize = '12px';
         btnConfirm.style.padding = '5px 12px';
-        btnConfirm.innerHTML = '⚡ Approve & Create in Jira';
+        btnConfirm.innerHTML = canApprove ? '⚡ Approve & Create in Jira' : '🔒 Approve (Management Only)';
+        btnConfirm.disabled = !canApprove;
         btnConfirm.addEventListener('click', async () => {
+          if (!canApprove) {
+            showToast(`Permission Denied: You have role ${currentRole}. Only TL, PM, or HM can approve tickets.`, 'error');
+            return;
+          }
           try {
             btnConfirm.disabled = true;
             btnConfirm.innerText = 'Creating in Jira...';
-            const res = await fetch(`/api/jira/confirm-approval/${msg.message_id}`, { method: 'POST' });
+            const activeRev = localStorage.getItem('saved_jira_reviewer') || '';
+            const res = await fetch(`/api/jira/confirm-approval/${msg.message_id}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reviewer: activeRev })
+            });
             const data = await res.json();
             if (res.ok) {
               showToast(`🎉 Jira Ticket Created: ${data.key}!`, 'success');
               elPayloadModal.classList.remove('active');
               await fetchMessages();
             } else {
-              showToast(data.detail || 'Creation failed', 'error');
+              showToast(data.detail || data.error || 'Creation failed', 'error');
             }
           } catch (err) {
             showToast('Creation network error', 'error');
@@ -926,20 +981,30 @@ function openPayloadModal(msg) {
         btnDecl.className = 'btn btn-secondary';
         btnDecl.style.fontSize = '12px';
         btnDecl.style.padding = '5px 12px';
-        btnDecl.style.color = '#F87171';
-        btnDecl.innerHTML = '❌ Decline Ticket Creation';
+        btnDecl.style.color = canApprove ? '#F87171' : '#64748b';
+        btnDecl.innerHTML = canApprove ? '❌ Decline Ticket Creation' : '🔒 Decline (Management Only)';
+        btnDecl.disabled = !canApprove;
         btnDecl.addEventListener('click', async () => {
+          if (!canApprove) {
+            showToast(`Permission Denied: You have role ${currentRole}. Only TL, PM, or HM can decline tickets.`, 'error');
+            return;
+          }
           try {
             btnDecl.disabled = true;
             btnDecl.innerText = 'Declining...';
-            const res = await fetch(`/api/jira/decline-approval/${msg.message_id}`, { method: 'POST' });
+            const activeRev = localStorage.getItem('saved_jira_reviewer') || '';
+            const res = await fetch(`/api/jira/decline-approval/${msg.message_id}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reviewer: activeRev })
+            });
             const data = await res.json();
             if (res.ok) {
               showToast('❌ Ticket creation declined', 'info');
               elPayloadModal.classList.remove('active');
               await fetchMessages();
             } else {
-              showToast(data.detail || 'Decline failed', 'error');
+              showToast(data.detail || data.error || 'Decline failed', 'error');
             }
           } catch (err) {
             showToast('Decline network error', 'error');

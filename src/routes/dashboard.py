@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel  
-from fastapi import APIRouter, Request, Response, HTTPException, WebSocket
+from fastapi import APIRouter, Request, Response, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 
 from src.config import config
@@ -522,7 +522,7 @@ def render_confirmation_html(
     if status_code == 403:
         switch_identity_html = """
         <div style="margin-top:14px;">
-          <button onclick="try{localStorage.removeItem('saved_jira_reviewer'); document.cookie='jira_reviewer=; path=/; max-age=0;';}catch(e){} window.location.reload();" style="background:#1e293b; color:#38bdf8; border:1px solid #0284c7; padding:8px 18px; border-radius:8px; cursor:pointer; font-weight:600; font-size:12px;">🔄 Switch Active Reviewer Identity</button>
+          <button onclick="try{localStorage.removeItem('saved_jira_reviewer'); document.cookie='jira_reviewer=; path=/; max-age=0;';}catch(e){} let u=new URL(window.location.href); u.searchParams.delete('reviewer'); window.location.href=u.toString();" style="background:#1e293b; color:#38bdf8; border:1px solid #0284c7; padding:8px 18px; border-radius:8px; cursor:pointer; font-weight:600; font-size:12px;">🔄 Switch Active Reviewer Identity</button>
         </div>"""
 
     html_content = f"""<!DOCTYPE html>
@@ -639,10 +639,13 @@ def resolve_and_verify_approver(approver_identifier: Optional[str]) -> Optional[
     return member
 
 
-def get_approver_name_for_message(row: Optional[Any] = None, explicit_reviewer: Optional[str] = None) -> str:
-    """Resolve an authorized approver name string (e.g. 'TL', 'PM ', 'HM ')."""
-    from src.services.member_sync_service import get_active_pm_from_excel, get_member_by_id_or_name
-    from src.services.sender_service import is_user_authorized_approver
+def get_approver_name_for_message(row: Optional[Any] = None, explicit_reviewer: Optional[str] = None) -> Optional[str]:
+    """Resolve an authorized approver name string (e.g. 'TL <Name>', 'PM <Name>', 'HM <Name>').
+    Returns None if no authorized management member (TL, PM, HM) is verified.
+    Does NOT auto-impersonate or fall back to PM.
+    """
+    from src.services.member_sync_service import get_member_by_id_or_name
+    from src.services.sender_service import is_user_authorized_approver, is_ticket_approval_reaction
     import json
 
     # 1. If explicit reviewer provided and valid
@@ -662,17 +665,16 @@ def get_approver_name_for_message(row: Optional[Any] = None, explicit_reviewer: 
                     for r in reactions:
                         u_id = r.get("userId")
                         d_name = r.get("displayName")
-                        m = get_member_by_id_or_name(user_id=u_id, display_name=d_name)
-                        if m and is_user_authorized_approver(user_id=m.get("user_id"), display_name=m.get("display_name")):
-                            m_role = (m.get("role") or "").upper().strip()
-                            return f"{m_role} {m.get('display_name')}"
+                        r_type = r.get("reactionType")
+                        if is_ticket_approval_reaction(r_type) and is_user_authorized_approver(user_id=u_id, display_name=d_name):
+                            m = get_member_by_id_or_name(user_id=u_id, display_name=d_name)
+                            if m:
+                                m_role = (m.get("role") or "").upper().strip()
+                                return f"{m_role} {m.get('display_name')}"
             except Exception:
                 pass
 
-    # 3. Fallback to active PM from Member.xlsx
-    active_pm = get_active_pm_from_excel()
-    pm_name = active_pm.get("name") or active_pm.get("display_name") or "Project Manager"
-    return f"PM {pm_name}"
+    return None
 
 
 def render_identity_gateway_html(
@@ -683,10 +685,11 @@ def render_identity_gateway_html(
     reason: Optional[str] = None,
 ) -> HTMLResponse:
     """Render an instant client-side identity gateway.
-    1. If localStorage already has 'saved_jira_reviewer', immediately redirects with reviewer query parameter.
-    2. If not, displays 1-click roster buttons to identify the reviewer.
+    Only authorized management members (HM, PM, TL) are allowed to confirm/decline tickets.
+    Developers, Clients, and Unassigned senders are strictly prevented and shown an access denied warning.
     """
     from src.services.member_sync_service import get_all_members_from_excel
+    import json
     import re
 
     try:
@@ -694,26 +697,39 @@ def render_identity_gateway_html(
     except Exception:
         roster = []
 
-    buttons_html = []
+    # Strictly filter for authorized management approvers (TL, PM, HM) only!
+    mgmt_members = []
+    mgmt_names = []
     for m in roster:
         m_name = re.sub(r"\s+", " ", m.get("display_name", "")).strip()
         m_role = (m.get("role") or "").upper().strip()
         m_lvl = str(m.get("level") or "").strip()
+        can_appr = m.get("can_approve")
+        is_mgmt = (m_role in ("TL", "PM", "HM") or m_lvl in ("Level 1", "Level 2", "Level 3", "1", "2", "3")) and bool(can_appr)
+        if is_mgmt and m_role not in ("DEVELOPER", "CLIENT", "UNASSIGNED"):
+            mgmt_members.append(m)
+            mgmt_names.append(m_name)
+
+    buttons_html = []
+    for m in mgmt_members:
+        m_name = re.sub(r"\s+", " ", m.get("display_name", "")).strip()
+        m_role = (m.get("role") or "").upper().strip()
+        m_lvl = str(m.get("level") or "").strip()
         lvl_str = f" ({m_lvl})" if m_lvl and m_lvl != "-" else ""
-        icon = "🌟" if m_role == "TL" else ("👑" if m_role == "PM" else ("🏛️" if m_role == "HM" else ("👤" if m_role == "CLIENT" else "💻")))
-        is_mgmt = m_role in ("TL", "PM", "HM") or m_lvl in ("Level 1", "Level 2", "Level 3", "1", "2", "3")
-        badge_style = "background:#10b98122; color:#10b981; border:1px solid #10b98144;" if is_mgmt else "background:#64748b22; color:#94a3b8; border:1px solid #64748b44;"
+        icon = "🌟" if m_role == "TL" else ("👑" if m_role == "PM" else "🏛️")
+        badge_style = "background:#10b98122; color:#10b981; border:1px solid #10b98144;"
 
         buttons_html.append(f"""
-        <button onclick="selectReviewer('{m_name}')" style="display:flex; align-items:center; justify-content:space-between; width:100%; padding:11px 16px; margin-bottom:8px; background:#0f172a; border:1px solid #334155; border-radius:10px; color:#f8fafc; font-size:14px; font-weight:600; cursor:pointer; text-align:left; transition:background 0.15s ease;">
+        <button onclick="selectReviewer('{m_name}')" style="display:flex; align-items:center; justify-content:space-between; width:100%; padding:12px 16px; margin-bottom:8px; background:#0f172a; border:1px solid #334155; border-radius:10px; color:#f8fafc; font-size:14px; font-weight:600; cursor:pointer; text-align:left; transition:background 0.15s ease;">
           <div style="display:flex; align-items:center; gap:10px;">
-            <span style="font-size:17px;">{icon}</span>
+            <span style="font-size:18px;">{icon}</span>
             <span>{m_name}</span>
           </div>
-          <span style="font-size:11px; font-weight:700; padding:3px 8px; border-radius:9999px; {badge_style}">{m_role}{lvl_str}</span>
+          <span style="font-size:11px; font-weight:700; padding:4px 10px; border-radius:9999px; {badge_style}">{m_role}{lvl_str}</span>
         </button>""")
 
     buttons_joined = "\n".join(buttons_html)
+    mgmt_names_json = json.dumps(mgmt_names)
     action_label = "Confirm Approval" if action_type == "confirm" else "Confirm Rejection"
 
     html_content = f"""<!DOCTYPE html>
@@ -760,27 +776,42 @@ def render_identity_gateway_html(
     }}
     h1 {{ font-size: 20px; margin: 0 0 8px 0; color: #ffffff; }}
     p.subtext {{ color: #94a3b8; font-size: 13.5px; line-height: 1.5; margin: 0 0 18px 0; }}
-    .note {{
-      background: #0f172a;
-      border-left: 3px solid #f59e0b;
-      padding: 10px 14px;
-      border-radius: 6px;
-      font-size: 12px;
-      color: #cbd5e1;
-      text-align: left;
-      margin-bottom: 18px;
-    }}
     .footer-note {{ font-size: 12px; color: #64748b; margin-top: 18px; }}
   </style>
   <script>
+    const authorizedManagers = {mgmt_names_json};
+
+    function showForbiddenScreen(roleOrName) {{
+      document.getElementById('gatewayCard').innerHTML = `
+        <div style="padding:10px 0;">
+          <div style="display:inline-flex; align-items:center; gap:6px; padding:6px 14px; border-radius:9999px; font-size:13px; font-weight:700; background:#ef444422; color:#f87171; border:1px solid #ef444455; margin-bottom:16px;">
+            ⛔ Strictly Not Permitted
+          </div>
+          <h1 style="color:#f87171; font-size:21px; margin-bottom:12px;">Access Denied</h1>
+          <p style="color:#cbd5e1; font-size:14.5px; line-height:1.6; margin-bottom:20px;">
+            You are strictly <strong>not allowed or permitted to approve or reject</strong> Jira tickets.
+          </p>
+          <div style="background:#0f172a; border-left:4px solid #ef4444; padding:14px 16px; border-radius:8px; text-align:left; font-size:13.5px; color:#fca5a5; margin-bottom:24px; line-height:1.5;">
+            ⚠️ <strong>Action Required:</strong> Please ask a <strong>Project Manager (PM)</strong>, <strong>Team Lead (TL)</strong>, or <strong>Higher Management (HM)</strong> to approve or reject this request.
+          </div>
+          <button onclick="window.close()" style="background:#334155; color:#f8fafc; border:1px solid #475569; padding:10px 24px; border-radius:8px; cursor:pointer; font-weight:600; font-size:13.5px;">✕ Close Window</button>
+        </div>
+      `;
+    }}
+
     (function() {{
       try {{
         const saved = localStorage.getItem('saved_jira_reviewer');
         if (saved) {{
-          document.cookie = "jira_reviewer=" + encodeURIComponent(saved) + "; path=/; max-age=2592000";
-          let u = new URL(window.location.href);
-          u.searchParams.set('reviewer', saved);
-          window.location.replace(u.toString());
+          if (authorizedManagers.includes(saved)) {{
+            document.cookie = "jira_reviewer=" + encodeURIComponent(saved) + "; path=/; max-age=2592000";
+            let u = new URL(window.location.href);
+            u.searchParams.set('reviewer', saved);
+            window.location.replace(u.toString());
+          }} else {{
+            // Saved user is a Developer, Client, or Unassigned
+            showForbiddenScreen(saved);
+          }}
         }}
       }} catch(e) {{}}
     }})();
@@ -794,21 +825,25 @@ def render_identity_gateway_html(
       u.searchParams.set('reviewer', name);
       window.location.replace(u.toString());
     }}
+
+    function rejectUnauthorized() {{
+      showForbiddenScreen('Non-Management');
+    }}
   </script>
 </head>
 <body>
-  <div class="card">
+  <div class="card" id="gatewayCard">
     <div class="badge">🛡️ Role Authority Verification</div>
-    <h1>Confirm Your Team Identity</h1>
-    <p class="subtext">Select who is reviewing this ticket. Only Team Leads (TL), Project Managers (PM), and Higher Management (HM) are authorized to approve or reject.</p>
+    <h1>Confirm Your Management Identity</h1>
+    <p class="subtext">Only <strong>Team Leads (TL)</strong>, <strong>Project Managers (PM)</strong>, and <strong>Higher Management (HM)</strong> are permitted to approve or reject Jira tickets.</p>
     
-    <div class="note">
-      ⚠️ <strong>Strict Role Policy:</strong> Clients, Developers, and Unassigned senders cannot approve or reject Jira tickets.
-    </div>
-
     <div style="display:flex; flex-direction:column; gap:6px;">
       {buttons_joined}
     </div>
+
+    <button onclick="rejectUnauthorized()" style="display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:12px 16px; margin-top:10px; background:#ef444415; border:1px solid #ef444444; border-radius:10px; color:#f87171; font-size:13px; font-weight:700; cursor:pointer; transition:background 0.15s ease;">
+      <span>🚫 I am a Developer, Client, or Other Role</span>
+    </button>
 
     <div class="footer-note">Microsoft Teams &bull; Jira Cloud Automation &bull; Closed-Loop Sync</div>
   </div>
@@ -1061,7 +1096,7 @@ def render_assignee_dropdown_html(
 
     if not init_member and all_roster_members:
         for rm in all_roster_members:
-            if (rm.get("role") or "").upper() == "CLIENT":
+            if (rm.get("role") or "").upper() in ("CLIENT", "DEVELOPER", "UNASSIGNED"):
                 init_member = rm
                 break
         if not init_member:
@@ -1508,10 +1543,10 @@ async def confirm_approval_get(
             unauth_name = (unauth.get("display_name") if unauth else active_reviewer) or "User"
             unauth_role = (unauth.get("role") if unauth else "Unauthorized") or "Client"
             return render_confirmation_html(
-                title="No Authority to Confirm",
+                title="Access Denied",
                 status_type="error",
-                heading="Authority Check Failed",
-                message=f"You are currently identified as {unauth_name} ({unauth_role}). Clients, Developers, and Unassigned roles do not have authority to approve Jira tickets. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                heading="⛔ Strictly Not Permitted",
+                message=f"You are currently identified as {unauth_name} ({unauth_role}). You are strictly not allowed or permitted to approve or reject Jira tickets. Please ask a Project Manager (PM), Team Lead (TL), or Higher Management (HM) to approve or reject.",
                 status_code=403,
             )
         role = (member.get("role") or "PM").upper().strip()
@@ -1524,6 +1559,15 @@ async def confirm_approval_get(
         )
     else:
         approver = get_approver_name_for_message(row=row)
+
+    if not approver:
+        return render_confirmation_html(
+            title="Access Denied",
+            status_type="error",
+            heading="⛔ Strictly Not Permitted",
+            message="No authorized management reviewer identified. You are strictly not allowed or permitted to approve or reject Jira tickets. Please ask a Project Manager (PM), Team Lead (TL), or Higher Management (HM) to approve or reject.",
+            status_code=403,
+        )
 
     target_assignee = assignee
     if not target_assignee and row["ai_ticket"]:
@@ -1597,19 +1641,43 @@ async def confirm_approval_post(
         if not row:
             raise HTTPException(status_code=400, detail="Message not found")
         approver = get_approver_name_for_message(row=row)
-    else:
-        # Strictly verify that reviewer is an authorized management member (TL, PM, HM)
-        member = resolve_and_verify_approver(approver_id)
-        if not member:
-            logger.warning(
-                f"Unauthorized ticket creation attempt for message {message_id} with reviewer '{approver_id}'",
-                extra={"event": "UNAUTHORIZED_CONFIRM_ATTEMPT", "reviewer": approver_id, "messageId": message_id}
-            )
+        if not approver:
+            if "application/json" in content_type:
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": "Authority Check Failed: No authorized management reviewer identified. Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can approve Jira tickets."
+                    },
+                )
             return render_confirmation_html(
                 title="No Authority to Confirm",
                 status_type="error",
                 heading="Authority Check Failed",
-                message="You have no authority to confirm Jira ticket creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                message="No authorized management reviewer identified. Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can approve Jira tickets.",
+                status_code=403,
+            )
+    else:
+        # Strictly verify that reviewer is an authorized management member (TL, PM, HM)
+        member = resolve_and_verify_approver(approver_id)
+        if not member:
+            unauth = get_member_or_sender_identity(approver_id)
+            unauth_role = (unauth.get("role") if unauth else "Unauthorized") or "Developer"
+            logger.warning(
+                f"Unauthorized ticket creation attempt for message {message_id} with reviewer '{approver_id}' (role: {unauth_role})",
+                extra={"event": "UNAUTHORIZED_CONFIRM_ATTEMPT", "reviewer": approver_id, "messageId": message_id}
+            )
+            if "application/json" in content_type:
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": f"Authority Check Failed: You have role '{unauth_role}'. Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can approve tickets."
+                    },
+                )
+            return render_confirmation_html(
+                title="No Authority to Confirm",
+                status_type="error",
+                heading="Authority Check Failed",
+                message=f"You have no authority to confirm Jira ticket creation (Role: {unauth_role}). Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can approve tickets.",
                 status_code=403,
             )
         role = (member.get("role") or "PM").upper().strip()
@@ -1680,10 +1748,10 @@ async def decline_approval_get(
             unauth_name = (unauth.get("display_name") if unauth else active_reviewer) or "User"
             unauth_role = (unauth.get("role") if unauth else "Unauthorized") or "Client"
             return render_confirmation_html(
-                title="No Authority to Reject",
+                title="Access Denied",
                 status_type="error",
-                heading="Authority Check Failed",
-                message=f"You are currently identified as {unauth_name} ({unauth_role}). Clients, Developers, and Unassigned roles do not have authority to reject Jira tickets. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                heading="⛔ Strictly Not Permitted",
+                message=f"You are currently identified as {unauth_name} ({unauth_role}). You are strictly not allowed or permitted to approve or reject Jira tickets. Please ask a Project Manager (PM), Team Lead (TL), or Higher Management (HM) to approve or reject.",
                 status_code=403,
             )
         role = (member.get("role") or "PM").upper().strip()
@@ -1696,6 +1764,15 @@ async def decline_approval_get(
         )
     else:
         approver = get_approver_name_for_message(row=row)
+
+    if not approver:
+        return render_confirmation_html(
+            title="Access Denied",
+            status_type="error",
+            heading="⛔ Strictly Not Permitted",
+            message="No authorized management reviewer identified. You are strictly not allowed or permitted to approve or reject Jira tickets. Please ask a Project Manager (PM), Team Lead (TL), or Higher Management (HM) to approve or reject.",
+            status_code=403,
+        )
 
     res = await execute_jira_ticket_decline(message_id, approver_name=approver, reason=reason)
     if not res.get("success"):
@@ -1749,14 +1826,38 @@ async def decline_approval_post(message_id: str, request: Request):
         if not row:
             raise HTTPException(status_code=400, detail="Message not found")
         approver = get_approver_name_for_message(row=row)
-    else:
-        member = resolve_and_verify_approver(approver_id)
-        if not member:
+        if not approver:
+            if "application/json" in content_type:
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": "Authority Check Failed: No authorized management reviewer identified. Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can reject Jira tickets."
+                    },
+                )
             return render_confirmation_html(
                 title="No Authority to Reject",
                 status_type="error",
                 heading="Authority Check Failed",
-                message="You have no authority to reject Jira ticket creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                message="No authorized management reviewer identified. Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can reject Jira tickets.",
+                status_code=403,
+            )
+    else:
+        member = resolve_and_verify_approver(approver_id)
+        if not member:
+            unauth = get_member_or_sender_identity(approver_id)
+            unauth_role = (unauth.get("role") if unauth else "Unauthorized") or "Developer"
+            if "application/json" in content_type:
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": f"Authority Check Failed: You have role '{unauth_role}'. Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can reject tickets."
+                    },
+                )
+            return render_confirmation_html(
+                title="No Authority to Reject",
+                status_type="error",
+                heading="Authority Check Failed",
+                message=f"You have no authority to reject Jira ticket creation (Role: {unauth_role}). Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can reject tickets.",
                 status_code=403,
             )
         role = (member.get("role") or "PM").upper().strip()
@@ -1904,10 +2005,10 @@ async def confirm_issue_get(
             unauth_name = (unauth.get("display_name") if unauth else active_reviewer) or "User"
             unauth_role = (unauth.get("role") if unauth else "Unauthorized") or "Client"
             return render_confirmation_html(
-                title="No Authority to Confirm",
+                title="Access Denied",
                 status_type="error",
-                heading="Authority Check Failed",
-                message=f"You are currently identified as {unauth_name} ({unauth_role}). Clients, Developers, and Unassigned roles do not have authority to confirm Issue #{issue_idx + 1} creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                heading="⛔ Strictly Not Permitted",
+                message=f"You are currently identified as {unauth_name} ({unauth_role}). You are strictly not allowed or permitted to approve or reject Issue #{issue_idx + 1}. Please ask a Project Manager (PM), Team Lead (TL), or Higher Management (HM) to approve or reject.",
                 status_code=403,
             )
         role = (member.get("role") or "PM").upper().strip()
@@ -1921,6 +2022,15 @@ async def confirm_issue_get(
         )
     else:
         approver = get_approver_name_for_message(row=row)
+
+    if not approver:
+        return render_confirmation_html(
+            title="Access Denied",
+            status_type="error",
+            heading="⛔ Strictly Not Permitted",
+            message=f"No authorized management reviewer identified. You are strictly not allowed or permitted to approve or reject Issue #{issue_idx + 1}. Please ask a Project Manager (PM), Team Lead (TL), or Higher Management (HM) to approve or reject.",
+            status_code=403,
+        )
 
     target_assignee = assignee or target_issue.get("suggested_assignee")
 
@@ -1985,15 +2095,22 @@ async def confirm_issue_post(
     # Strictly verify that reviewer is an authorized management member (TL, PM, HM)
     member = resolve_and_verify_approver(approver_id)
     if not member:
+        unauth = get_member_or_sender_identity(approver_id)
+        unauth_role = (unauth.get("role") if unauth else "Unauthorized") or "Developer"
         logger.warning(
-            f"Unauthorized confirmation attempt for issue #{issue_idx + 1} with reviewer '{approver_id}'",
+            f"Unauthorized confirmation attempt for issue #{issue_idx + 1} with reviewer '{approver_id}' (role: {unauth_role})",
             extra={"event": "UNAUTHORIZED_CONFIRM_ATTEMPT", "reviewer": approver_id, "messageId": message_id, "issueIdx": issue_idx}
         )
+        if "application/json" in content_type:
+            return JSONResponse(
+                status_code=403,
+                content={"error": f"Authority Check Failed: You have role '{unauth_role}'. Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can confirm tickets."},
+            )
         return render_confirmation_html(
             title="No Authority to Confirm",
             status_type="error",
             heading="Authority Check Failed",
-            message=f"You have no authority to confirm Issue #{issue_idx + 1} creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+            message=f"You have no authority to confirm Issue #{issue_idx + 1} creation (Role: {unauth_role}). Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
             status_code=403,
         )
 
@@ -2066,10 +2183,10 @@ async def decline_issue_get(
             unauth_name = (unauth.get("display_name") if unauth else active_reviewer) or "User"
             unauth_role = (unauth.get("role") if unauth else "Unauthorized") or "Client"
             return render_confirmation_html(
-                title="No Authority to Reject",
+                title="Access Denied",
                 status_type="error",
-                heading="Authority Check Failed",
-                message=f"You are currently identified as {unauth_name} ({unauth_role}). Clients, Developers, and Unassigned roles do not have authority to reject Issue #{issue_idx + 1} creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+                heading="⛔ Strictly Not Permitted",
+                message=f"You are currently identified as {unauth_name} ({unauth_role}). You are strictly not allowed or permitted to approve or reject Issue #{issue_idx + 1}. Please ask a Project Manager (PM), Team Lead (TL), or Higher Management (HM) to approve or reject.",
                 status_code=403,
             )
         role = (member.get("role") or "PM").upper().strip()
@@ -2083,6 +2200,15 @@ async def decline_issue_get(
         )
     else:
         approver = get_approver_name_for_message(row=row)
+
+    if not approver:
+        return render_confirmation_html(
+            title="Access Denied",
+            status_type="error",
+            heading="⛔ Strictly Not Permitted",
+            message=f"No authorized management reviewer identified. You are strictly not allowed or permitted to approve or reject Issue #{issue_idx + 1}. Please ask a Project Manager (PM), Team Lead (TL), or Higher Management (HM) to approve or reject.",
+            status_code=403,
+        )
 
     res = await execute_jira_ticket_decline(message_id, approver_name=approver, issue_idx=issue_idx, reason=reason)
     if not res.get("success"):
@@ -2132,11 +2258,18 @@ async def decline_issue_post(message_id: str, issue_idx: int, request: Request):
 
     member = resolve_and_verify_approver(approver_id)
     if not member:
+        unauth = get_member_or_sender_identity(approver_id)
+        unauth_role = (unauth.get("role") if unauth else "Unauthorized") or "Developer"
+        if "application/json" in content_type:
+            return JSONResponse(
+                status_code=403,
+                content={"error": f"Authority Check Failed: You have role '{unauth_role}'. Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can reject tickets."},
+            )
         return render_confirmation_html(
             title="No Authority to Reject",
             status_type="error",
             heading="Authority Check Failed",
-            message=f"You have no authority to reject Issue #{issue_idx + 1} creation. Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
+            message=f"You have no authority to reject Issue #{issue_idx + 1} creation (Role: {unauth_role}). Please ask a Team Lead (TL), Project Manager (PM), or Higher Management (HM).",
             status_code=403,
         )
 

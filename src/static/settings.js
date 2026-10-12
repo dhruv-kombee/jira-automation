@@ -244,7 +244,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }).join('');
 
     if (!currentSaved && membersList.length) {
-      const def = membersList.find(m => (m.role || '').toUpperCase() === 'CLIENT') || membersList[0];
+      const def = membersList.find(m => ['DEVELOPER', 'CLIENT', 'UNASSIGNED'].includes((m.role || '').toUpperCase())) || membersList[0];
       if (def) {
         sel.value = def.display_name;
         localStorage.setItem('saved_jira_reviewer', def.display_name);

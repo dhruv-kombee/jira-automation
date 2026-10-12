@@ -117,18 +117,21 @@ def is_user_authorized_approver(
         role = (member.get("role") or "").upper().strip()
         level = str(member.get("level") or "").upper().strip()
 
-        # Block DEVELOPER, UNASSIGNED, and CLIENT users from approving
+        # Block DEVELOPER, UNASSIGNED, and CLIENT users from approving under any circumstances
         if role in ("DEVELOPER", "UNASSIGNED", "CLIENT"):
             return False
 
-        # Management tiers: Level 1 (TL), Level 2 (PM), Level 3 (HM) are all authorized
-        if role in ("PM", "TL", "HM"):
-            return True
-        if level in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3", "L1", "L2", "L3"):
-            return True
-        if member.get("can_approve") and role not in ("DEVELOPER", "UNASSIGNED", "CLIENT"):
-            return True
-        return False
+        # Strictly management tiers: Level 1 (TL), Level 2 (PM), Level 3 (HM)
+        is_mgmt_role = role in ("PM", "TL", "HM") or level in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3", "L1", "L2", "L3")
+        if not is_mgmt_role:
+            return False
+
+        # Check explicit can_approve permission flag
+        can_approve_flag = member.get("can_approve")
+        if can_approve_flag is not None and not bool(can_approve_flag):
+            return False
+
+        return True
 
     # Fallback configured PM GUID only if not identified as a non-management user
     u_id_clean = (user_id or "").lower().strip()
