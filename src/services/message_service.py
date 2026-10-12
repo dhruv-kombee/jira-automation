@@ -716,90 +716,9 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
         or is_pm_disapproval(reactions)
     )
 
-    # Check if this incoming message is a conversational reply to an existing pending approval card
-    thread_parent_id = None
-    if "parent_message_id" in locals() and parent_message_id:
-        thread_parent_id = parent_message_id
-    elif normalized.get("replyToId"):
-        thread_parent_id = normalized.get("replyToId")
-
+    should_triage = False
     from src.database import get_db
     db = get_db()
-
-    # In chat mode (not threaded channel), find the latest message awaiting confirmation in this chat
-    if not thread_parent_id and normalized.get("chatId"):
-        p_row_candidate = db.execute(
-            "SELECT message_id FROM messages WHERE chat_id = ? AND confirmation_status = 'AWAITING_FINAL_CONFIRMATION' AND jira_issue_key IS NULL ORDER BY id DESC LIMIT 1",
-            (normalized.get("chatId"),),
-        ).fetchone()
-        if p_row_candidate:
-            thread_parent_id = p_row_candidate["message_id"]
-
-    if thread_parent_id:
-        p_row = db.execute(
-            "SELECT * FROM messages WHERE message_id = ?",
-            (thread_parent_id,),
-        ).fetchone()
-
-        if p_row and p_row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION" and not p_row["jira_issue_key"]:
-            reply_body = (normalized.get("message") or {}).get("text", "").strip()
-            reply_lower = reply_body.lower()
-
-            is_appr_cmd = any(reply_lower.startswith(kw) for kw in ("approve", "approving", "confirm", "yes", "create ticket", "lgtm"))
-            is_decl_cmd = any(reply_lower.startswith(kw) for kw in ("decline", "declining", "reject", "cancel", "no"))
-
-            if is_appr_cmd or is_decl_cmd:
-                from src.services.sender_service import is_user_authorized_approver
-                from src.services.member_sync_service import get_member_by_id_or_name
-                s_id = normalized["sender"].get("userId")
-                s_name = normalized["sender"].get("displayName")
-                is_auth_mgr = is_user_authorized_approver(user_id=s_id, display_name=s_name)
-                m_info = get_member_by_id_or_name(user_id=s_id, display_name=s_name)
-                mgr_role = (m_info.get("role") if m_info else sender_role) or "DEVELOPER"
-
-                if not is_auth_mgr:
-                    logger.warning(
-                        f"⛔ Unauthorized thread approval attempt by '{s_name}' (Role: {mgr_role}) on message {thread_parent_id}",
-                        extra={"event": "UNAUTHORIZED_THREAD_APPROVAL", "user": s_name, "role": mgr_role, "parentId": thread_parent_id}
-                    )
-                    from src.services.teams_notifier import post_thread_reply_alert
-                    await post_thread_reply_alert(
-                        parent_id=thread_parent_id,
-                        user_name=s_name or "User",
-                        user_role=mgr_role,
-                        chat_id=normalized.get("chatId"),
-                        team_id=normalized.get("teamId"),
-                        channel_id=normalized.get("channelId"),
-                    )
-                else:
-                    approver_disp = f"{mgr_role} {s_name}"
-                    if is_appr_cmd:
-                        # Extract assignee if mentioned in reply (e.g. "approve @Nishi Sharma" or "approve Santosh")
-                        override_assignee = None
-                        try:
-                            from src.services.member_sync_service import get_all_members_from_excel
-                            for rm in get_all_members_from_excel():
-                                rm_name = rm.get("display_name", "").strip()
-                                if rm_name and rm_name.lower() in reply_lower and rm.get("role") != "CLIENT":
-                                    override_assignee = rm_name
-                                    break
-                        except Exception:
-                            pass
-
-                        await execute_jira_ticket_creation(
-                            message_id=thread_parent_id,
-                            approver_name=approver_disp,
-                            assignee_override=override_assignee,
-                        )
-                    elif is_decl_cmd:
-                        await execute_jira_ticket_decline(
-                            message_id=thread_parent_id,
-                            approver_name=approver_disp,
-                            reason=reply_body,
-                        )
-
-    should_triage = False
-
     row = db.execute(
         "SELECT confirmation_status, jira_issue_key FROM messages WHERE message_id = ?",
         (normalized.get("messageId"),),

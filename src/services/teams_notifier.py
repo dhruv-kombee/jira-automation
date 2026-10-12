@@ -403,329 +403,358 @@ def build_pending_approval_card(
         "facts": facts,
     })
 
-    # Build choices for in-card Assignee ChoiceSet
-    choice_items = []
-    for m in assignable_choices:
-        m_name = m["name"]
-        short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
-        choice_items.append({
-            "title": f"{m_name} ({short_role})",
-            "value": m_name,
-        })
-    choice_items.append({
-        "title": "Unassigned",
-        "value": "Unassigned",
-    })
-
-    def _resolve_default_choice(suggested: str) -> str:
-        sug_clean = (suggested or "Unassigned").strip()
-        for c in choice_items:
-            if c["value"].lower() == sug_clean.lower():
-                return c["value"]
-        for c in choice_items:
-            if sug_clean.lower() in c["value"].lower() or c["value"].lower() in sug_clean.lower():
-                return c["value"]
-        return "Unassigned"
-
     if issue_count == 1:
         iss1 = issues[0]
         dev1 = (iss1.get("suggested_assignee") or "Unassigned").strip()
-        default_choice1 = _resolve_default_choice(dev1)
-
-        body_elements.append({
-            "type": "Container",
-            "spacing": "Medium",
-            "items": [
-                {
-                    "type": "TextBlock",
-                    "text": "👤 **Assign Ticket To:**",
-                    "weight": "Bolder",
-                    "size": "Small",
-                    "wrap": True,
-                },
-                {
-                    "type": "Input.ChoiceSet",
-                    "id": "selected_assignee",
-                    "style": "compact",
-                    "value": default_choice1,
-                    "choices": choice_items,
-                },
-            ],
-        })
-
-        actions = [
-            {
-                "type": "Action.Submit",
-                "title": "✅ Approve & Create Ticket",
-                "style": "positive",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Approving ticket in Teams...",
-                        "text": f"approve_ticket {message_id}",
-                    },
-                    "action": "approve",
-                    "message_id": message_id,
-                },
-            },
-            {
-                "type": "Action.Submit",
-                "title": "❌ Decline Ticket",
-                "style": "destructive",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Declining ticket in Teams...",
-                        "text": f"decline_ticket {message_id}",
-                    },
-                    "action": "decline",
-                    "message_id": message_id,
-                },
-            },
-        ]
-    elif issue_count == 2:
-        iss1 = issues[0]
-        dev1 = (iss1.get("suggested_assignee") or "Unassigned").strip()
-        default_choice1 = _resolve_default_choice(dev1)
-        summary1 = (iss1.get("summary") or "Issue #1").replace("\n", " ").strip()
+        dev1_short = dev1.split()[0] if dev1 != "Unassigned" else "Dev"
+        summary1 = (iss1.get("summary") or "Issue Report").replace("\n", " ").strip()
         if len(summary1) > 40:
             summary1 = summary1[:37] + "..."
 
-        iss2 = issues[1]
-        dev2 = (iss2.get("suggested_assignee") or "Unassigned").strip()
-        default_choice2 = _resolve_default_choice(dev2)
-        summary2 = (iss2.get("summary") or "Issue #2").replace("\n", " ").strip()
-        if len(summary2) > 40:
-            summary2 = summary2[:37] + "..."
-
-        body_elements.append({
-            "type": "Container",
-            "spacing": "Medium",
-            "items": [
-                {
-                    "type": "TextBlock",
-                    "text": f"👤 **Assign Issue #1 ({summary1}):**",
-                    "weight": "Bolder",
-                    "size": "Small",
-                    "wrap": True,
-                },
-                {
-                    "type": "Input.ChoiceSet",
-                    "id": "selected_assignee_0",
-                    "style": "compact",
-                    "value": default_choice1,
-                    "choices": choice_items,
-                },
-                {
-                    "type": "TextBlock",
-                    "text": f"👤 **Assign Issue #2 ({summary2}):**",
-                    "weight": "Bolder",
-                    "size": "Small",
-                    "wrap": True,
-                    "spacing": "Medium",
-                },
-                {
-                    "type": "Input.ChoiceSet",
-                    "id": "selected_assignee_1",
-                    "style": "compact",
-                    "value": default_choice2,
-                    "choices": choice_items,
-                },
-            ],
-        })
-
-        actions = [
+        issue1_subactions = [
             {
-                "type": "Action.Submit",
-                "title": "✅ Approve Both (2)",
-                "style": "positive",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Approving all tickets...",
-                        "text": f"approve_ticket {message_id}",
-                    },
-                    "action": "approve",
-                    "message_id": message_id,
-                },
+                "type": "Action.OpenUrl",
+                "title": f"⚡ Approve ({dev1_short})",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(dev1)}",
             },
             {
-                "type": "Action.Submit",
-                "title": "❌ Decline Both (2)",
-                "style": "destructive",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Declining all tickets...",
-                        "text": f"decline_ticket {message_id}",
-                    },
-                    "action": "decline",
-                    "message_id": message_id,
-                },
-            },
-            {
-                "type": "Action.Submit",
-                "title": "⚡ Approve #1",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Approving issue #1...",
-                        "text": f"approve_ticket {message_id} 0",
-                    },
-                    "action": "approve",
-                    "message_id": message_id,
-                    "issue_idx": 0,
-                },
-            },
-            {
-                "type": "Action.Submit",
-                "title": "❌ Reject #1",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Rejecting issue #1...",
-                        "text": f"decline_ticket {message_id} 0",
-                    },
-                    "action": "decline",
-                    "message_id": message_id,
-                    "issue_idx": 0,
-                },
-            },
-            {
-                "type": "Action.Submit",
-                "title": "⚡ Approve #2",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Approving issue #2...",
-                        "text": f"approve_ticket {message_id} 1",
-                    },
-                    "action": "approve",
-                    "message_id": message_id,
-                    "issue_idx": 1,
-                },
-            },
-            {
-                "type": "Action.Submit",
-                "title": "❌ Reject #2",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Rejecting issue #2...",
-                        "text": f"decline_ticket {message_id} 1",
-                    },
-                    "action": "decline",
-                    "message_id": message_id,
-                    "issue_idx": 1,
-                },
+                "type": "Action.OpenUrl",
+                "title": "🌐 Assignee Dropdown (Web)",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}",
             },
         ]
-    else:
-        # Multi-issue card (> 2 issues):
-        dropdown_items = []
-        for i, cur_iss in enumerate(issues):
-            cur_dev = (cur_iss.get("suggested_assignee") or "Unassigned").strip()
-            cur_default = _resolve_default_choice(cur_dev)
-            cur_sum = (cur_iss.get("summary") or f"Issue #{i+1}").replace("\n", " ").strip()
-            if len(cur_sum) > 35:
-                cur_sum = cur_sum[:32] + "..."
-            dropdown_items.append({
-                "type": "TextBlock",
-                "text": f"👤 **Assign #{i+1} ({cur_sum}):**",
-                "weight": "Bolder",
-                "size": "Small",
-                "wrap": True,
-            })
-            dropdown_items.append({
-                "type": "Input.ChoiceSet",
-                "id": f"selected_assignee_{i}",
-                "style": "compact",
-                "value": cur_default,
-                "choices": choice_items,
-            })
-
-        body_elements.append({
-            "type": "Container",
-            "spacing": "Medium",
-            "items": dropdown_items,
-        })
-
-        more_subactions = []
-        for i in range(len(issues)):
-            more_subactions.append({
-                "type": "Action.Submit",
-                "title": f"⚡ Approve #{i+1}",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": f"Approving issue #{i+1}...",
-                        "text": f"approve_ticket {message_id} {i}",
-                    },
-                    "action": "approve",
-                    "message_id": message_id,
-                    "issue_idx": i,
-                },
-            })
-            more_subactions.append({
-                "type": "Action.Submit",
-                "title": f"❌ Reject #{i+1}",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": f"Rejecting issue #{i+1}...",
-                        "text": f"decline_ticket {message_id} {i}",
-                    },
-                    "action": "decline",
-                    "message_id": message_id,
-                    "issue_idx": i,
-                },
+        for m in assignable_choices:
+            m_name = m["name"]
+            short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
+            issue1_subactions.append({
+                "type": "Action.OpenUrl",
+                "title": f"Assign {m_name} ({short_role})",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(m_name)}",
             })
 
         actions = [
             {
-                "type": "Action.Submit",
-                "title": f"✅ Approve All ({issue_count})",
-                "style": "positive",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Approving all issues...",
-                        "text": f"approve_ticket {message_id}",
-                    },
-                    "action": "approve",
-                    "message_id": message_id,
-                },
-            },
-            {
-                "type": "Action.Submit",
-                "title": f"❌ Reject All ({issue_count})",
-                "style": "destructive",
-                "data": {
-                    "msteams": {
-                        "type": "messageBack",
-                        "displayText": "Rejecting all issues...",
-                        "text": f"decline_ticket {message_id}",
-                    },
-                    "action": "decline",
-                    "message_id": message_id,
-                },
-            },
-            {
                 "type": "Action.ShowCard",
-                "title": f"📋 Individual Issues ({issue_count}) ▾",
+                "title": f"Approve ({dev1_short}) ▾",
                 "card": {
                     "type": "AdaptiveCard",
                     "body": [
                         {
                             "type": "TextBlock",
-                            "text": f"Select individual action for {issue_count} issues:",
+                            "text": f"Approve Issue: {summary1}",
                             "weight": "Bolder",
                             "size": "Small",
                             "wrap": True,
                         }
                     ],
-                    "actions": more_subactions,
+                    "actions": issue1_subactions,
                 },
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "❌ Reject",
+                "url": f"{app_base}/api/jira/decline-approval/{message_id}",
+            },
+        ]
+    elif issue_count == 2:
+        # Issue #1:
+        iss1 = issues[0]
+        dev1 = (iss1.get("suggested_assignee") or "Unassigned").strip()
+        dev1_short = dev1.split()[0] if dev1 != "Unassigned" else "Dev 1"
+        summary1 = (iss1.get("summary") or "Issue #1").replace("\n", " ").strip()
+        if len(summary1) > 40:
+            summary1 = summary1[:37] + "..."
+
+        issue1_subactions = [
+            {
+                "type": "Action.OpenUrl",
+                "title": f"⚡ Approve ({dev1_short})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?assignee={urllib.parse.quote_plus(dev1)}",
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "🌐 Assignee Dropdown (Web)",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0",
+            },
+        ]
+        for m in assignable_choices:
+            m_name = m["name"]
+            short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
+            issue1_subactions.append({
+                "type": "Action.OpenUrl",
+                "title": f"Assign {m_name} ({short_role})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?assignee={urllib.parse.quote_plus(m_name)}",
+            })
+        issue1_subactions.append({
+            "type": "Action.OpenUrl",
+            "title": "❌ Reject Issue #1 Only",
+            "url": f"{app_base}/api/jira/decline-issue/{message_id}/0",
+        })
+
+        # Issue #2:
+        iss2 = issues[1]
+        dev2 = (iss2.get("suggested_assignee") or "Unassigned").strip()
+        dev2_short = dev2.split()[0] if dev2 != "Unassigned" else "Dev 2"
+        summary2 = (iss2.get("summary") or "Issue #2").replace("\n", " ").strip()
+        if len(summary2) > 40:
+            summary2 = summary2[:37] + "..."
+
+        issue2_subactions = [
+            {
+                "type": "Action.OpenUrl",
+                "title": f"⚡ Approve ({dev2_short})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?assignee={urllib.parse.quote_plus(dev2)}",
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "🌐 Assignee Dropdown (Web)",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1",
+            },
+        ]
+        for m in assignable_choices:
+            m_name = m["name"]
+            short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
+            issue2_subactions.append({
+                "type": "Action.OpenUrl",
+                "title": f"Assign {m_name} ({short_role})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?assignee={urllib.parse.quote_plus(m_name)}",
+            })
+        issue2_subactions.append({
+            "type": "Action.OpenUrl",
+            "title": "❌ Reject Issue #2 Only",
+            "url": f"{app_base}/api/jira/decline-issue/{message_id}/1",
+        })
+
+        # Bulk All Issues:
+        approve_all_subactions = [
+            {
+                "type": "Action.OpenUrl",
+                "title": "⚡ Approve All (Suggested Assignees)",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}",
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "🌐 Assignee Dropdown for All (Web)",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}",
+            },
+        ]
+        for m in assignable_choices:
+            m_name = m["name"]
+            short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
+            approve_all_subactions.append({
+                "type": "Action.OpenUrl",
+                "title": f"Assign All to {m_name} ({short_role})",
+                "url": f"{app_base}/api/jira/confirm-approval/{message_id}?assignee={urllib.parse.quote_plus(m_name)}",
+            })
+
+        actions = [
+            {
+                "type": "Action.ShowCard",
+                "title": f"Approve #1 ({dev1_short}) ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": f"Approve Issue #1: {summary1}",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": issue1_subactions,
+                },
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "❌ Reject #1",
+                "url": f"{app_base}/api/jira/decline-issue/{message_id}/0",
+            },
+            {
+                "type": "Action.ShowCard",
+                "title": f"Approve #2 ({dev2_short}) ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": f"Approve Issue #2: {summary2}",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": issue2_subactions,
+                },
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "❌ Reject #2",
+                "url": f"{app_base}/api/jira/decline-issue/{message_id}/1",
+            },
+            {
+                "type": "Action.ShowCard",
+                "title": "✅ Approve All (2) ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Approve Both Issues #1 & #2:",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": approve_all_subactions,
+                },
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "❌ Reject All (2)",
+                "url": f"{app_base}/api/jira/decline-approval/{message_id}",
+            },
+        ]
+    else:
+        # Multi-issue card (> 2 issues):
+        iss1 = issues[0]
+        dev1 = (iss1.get("suggested_assignee") or "Unassigned").strip()
+        dev1_short = dev1.split()[0] if dev1 != "Unassigned" else "Dev 1"
+        summary1 = (iss1.get("summary") or "Issue #1").replace("\n", " ").strip()
+        if len(summary1) > 40:
+            summary1 = summary1[:37] + "..."
+
+        issue1_subactions = [
+            {
+                "type": "Action.OpenUrl",
+                "title": f"⚡ Approve ({dev1_short})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?assignee={urllib.parse.quote_plus(dev1)}",
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "🌐 Assignee Dropdown (Web)",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0",
+            },
+        ]
+        for m in assignable_choices:
+            m_name = m["name"]
+            short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
+            issue1_subactions.append({
+                "type": "Action.OpenUrl",
+                "title": f"Assign {m_name} ({short_role})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/0?assignee={urllib.parse.quote_plus(m_name)}",
+            })
+
+        iss2 = issues[1]
+        dev2 = (iss2.get("suggested_assignee") or "Unassigned").strip()
+        dev2_short = dev2.split()[0] if dev2 != "Unassigned" else "Dev 2"
+        summary2 = (iss2.get("summary") or "Issue #2").replace("\n", " ").strip()
+        if len(summary2) > 40:
+            summary2 = summary2[:37] + "..."
+
+        issue2_subactions = [
+            {
+                "type": "Action.OpenUrl",
+                "title": f"⚡ Approve ({dev2_short})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?assignee={urllib.parse.quote_plus(dev2)}",
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "🌐 Assignee Dropdown (Web)",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1",
+            },
+        ]
+        for m in assignable_choices:
+            m_name = m["name"]
+            short_role = "PM" if m["role"] == "PM" else (m["specialty"].split("&")[0].split("/")[0].strip())
+            issue2_subactions.append({
+                "type": "Action.OpenUrl",
+                "title": f"Assign {m_name} ({short_role})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/1?assignee={urllib.parse.quote_plus(m_name)}",
+            })
+
+        more_issue_actions = []
+        for i in range(2, len(issues)):
+            cur_iss = issues[i]
+            cur_dev = (cur_iss.get("suggested_assignee") or "Unassigned").strip()
+            cur_short = cur_dev.split()[0] if cur_dev != "Unassigned" else f"Dev {i+1}"
+            more_issue_actions.append({
+                "type": "Action.OpenUrl",
+                "title": f"⚡ Approve #{i+1} ({cur_short})",
+                "url": f"{app_base}/api/jira/confirm-issue/{message_id}/{i}?assignee={urllib.parse.quote_plus(cur_dev)}",
+            })
+            more_issue_actions.append({
+                "type": "Action.OpenUrl",
+                "title": f"❌ Reject #{i+1}",
+                "url": f"{app_base}/api/jira/decline-issue/{message_id}/{i}",
+            })
+
+        actions = [
+            {
+                "type": "Action.ShowCard",
+                "title": f"Approve #1 ({dev1_short}) ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": f"Approve Issue #1: {summary1}",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": issue1_subactions,
+                },
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "❌ Reject #1",
+                "url": f"{app_base}/api/jira/decline-issue/{message_id}/0",
+            },
+            {
+                "type": "Action.ShowCard",
+                "title": f"Approve #2 ({dev2_short}) ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": f"Approve Issue #2: {summary2}",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": issue2_subactions,
+                },
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": "❌ Reject #2",
+                "url": f"{app_base}/api/jira/decline-issue/{message_id}/1",
+            },
+            {
+                "type": "Action.ShowCard",
+                "title": f"📋 More ({issue_count - 2}) / All ▾",
+                "card": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": f"Remaining Issues ({issue_count - 2} total):",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": True,
+                        }
+                    ],
+                    "actions": more_issue_actions,
+                },
+            },
+            {
+                "type": "Action.OpenUrl",
+                "title": f"❌ Reject All ({issue_count})",
+                "url": f"{app_base}/api/jira/decline-approval/{message_id}",
             },
         ]
 
@@ -1234,78 +1263,5 @@ async def send_pm_followup_reminder(
             logger.debug(f"Graph chat reminder error: {g_err}")
 
     return {"success": False, "method": "none", "error": "No delivery channel succeeded"}
-
-
-async def post_thread_reply_alert(
-    parent_id: str,
-    user_name: str,
-    user_role: str,
-    chat_id: Optional[str] = None,
-    team_id: Optional[str] = None,
-    channel_id: Optional[str] = None,
-) -> None:
-    """Post an access denied alert in Teams when an unauthorized user tries to approve/decline."""
-    from src.config import config
-    webhook_url = (config.teams.webhook_url or "").strip()
-
-    card_payload = {
-        "type": "message",
-        "attachments": [
-            {
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": {
-                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                    "type": "AdaptiveCard",
-                    "version": "1.4",
-                    "body": [
-                        {
-                            "type": "Container",
-                            "style": "attention",
-                            "items": [
-                                {
-                                    "type": "TextBlock",
-                                    "text": "⛔ **Access Denied: Action Strictly Not Permitted**",
-                                    "weight": "Bolder",
-                                    "size": "Medium",
-                                    "color": "Attention",
-                                    "wrap": True,
-                                },
-                                {
-                                    "type": "TextBlock",
-                                    "text": f"@{user_name}, you have role **{user_role}**.\n\nYou are strictly not permitted to approve or reject tickets. Only **Team Lead (TL)**, **Project Manager (PM)**, or **Higher Management (HM)** can approve or decline Jira tickets.\n\n*Please ask your TL, PM, or HM to confirm.*",
-                                    "wrap": True,
-                                    "spacing": "Medium",
-                                },
-                            ],
-                        }
-                    ],
-                },
-            }
-        ],
-    }
-
-    if webhook_url:
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                res = await client.post(webhook_url, json=card_payload)
-                if res.status_code in (200, 201, 202):
-                    return
-        except Exception as wh_err:
-            logger.debug(f"Webhook alert post failed: {wh_err}")
-
-    alert_text = (
-        f"⛔ @{user_name} You are strictly not permitted to approve or reject tickets (Role: {user_role}).\n\n"
-        f"Only Team Lead (TL), Project Manager (PM), or Higher Management (HM) can approve Jira tickets. "
-        f"Please ask your TL, PM, or HM to confirm."
-    )
-    try:
-        effective_chat_id = chat_id or config.teams.chat_id
-        if effective_chat_id:
-            from src.graph_client import send_chat_message
-            await send_chat_message(effective_chat_id, alert_text)
-    except Exception as e:
-        logger.debug(f"Failed to post thread reply alert: {e}")
-
-
 
 

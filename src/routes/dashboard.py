@@ -1,6 +1,7 @@
 import time
 import uuid
 import re
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel  
@@ -507,14 +508,26 @@ def render_confirmation_html(
     )
 
     auto_close_script = ""
+    auto_close_banner = ""
     if status_type in ("success", "declined") and status_code < 400:
+        auto_close_banner = """
+        <div style="margin-top:16px; font-size:13.5px; color:#38bdf8; background:#0284c715; border:1px solid #0284c733; padding:10px 16px; border-radius:8px;">
+          ⏱️ Ticket recorded! This window will automatically close in <span id="autoCloseSec" style="font-weight:700;">2</span> seconds.
+        </div>"""
         auto_close_script = """
   <script>
-    // Automatically close tab after 2.5 seconds
+    // Automatically close tab after 2 seconds with countdown
     window.onload = function() {
-      setTimeout(function() {
-        try { window.close(); } catch(e) {}
-      }, 2500);
+      let sec = 2;
+      let el = document.getElementById("autoCloseSec");
+      let timer = setInterval(function() {
+        sec--;
+        if (el) el.textContent = sec;
+        if (sec <= 0) {
+          clearInterval(timer);
+          try { window.close(); } catch(e) {}
+        }
+      }, 1000);
     };
   </script>"""
 
@@ -602,7 +615,7 @@ def render_confirmation_html(
     <h1>{title}</h1>
     <p>{message}</p>
     {f'<div class="facts-box">{facts_html}</div>' if details else ''}
-    <div>{actions_html}{switch_identity_html}</div>
+    <div>{actions_html}{switch_identity_html}{auto_close_banner}</div>
     <div style="margin-top:16px;">
       <button onclick="window.close()" style="background:#334155; color:#f8fafc; border:1px solid #475569; padding:8px 20px; border-radius:8px; cursor:pointer; font-weight:600; font-size:13px;">✕ Close Window</button>
     </div>
@@ -637,6 +650,50 @@ def resolve_and_verify_approver(approver_identifier: Optional[str]) -> Optional[
         return None
 
     return member
+
+
+def resolve_active_reviewer_from_request(request: Request, explicit_reviewer: Optional[str] = None) -> Optional[str]:
+    """Resolve reviewer display name prioritizing: explicit query param -> verified SSO session -> cookie."""
+    if explicit_reviewer and explicit_reviewer.strip():
+        return explicit_reviewer.strip()
+    try:
+        from src.routes.auth import get_authenticated_reviewer_from_request
+        sso_user = get_authenticated_reviewer_from_request(request)
+        if sso_user and sso_user.get("display_name"):
+            return sso_user.get("display_name")
+    except Exception:
+        pass
+    if config.microsoft.tenant_id and config.microsoft.client_id:
+        return None
+    return request.cookies.get("jira_reviewer")
+
+
+def get_browser_redirect_or_gateway(
+    request: Request,
+    action_type: str,
+    message_id: str,
+    assignee: Optional[str] = None,
+    issue_idx: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> Response:
+    """If Microsoft SSO credentials exist, seamlessly redirect to /auth/login for zero-click verification.
+    Otherwise fallback to the identity gateway screen.
+    """
+    if config.microsoft.tenant_id and config.microsoft.client_id:
+        req_path = request.url.path
+        if request.url.query:
+            req_path = f"{req_path}?{request.url.query}"
+        return RedirectResponse(
+            url=f"/auth/login?redirect_after={urllib.parse.quote(req_path)}",
+            status_code=302,
+        )
+    return render_identity_gateway_html(
+        action_type=action_type,
+        message_id=message_id,
+        assignee=assignee,
+        issue_idx=issue_idx,
+        reason=reason,
+    )
 
 
 def get_approver_name_for_message(row: Optional[Any] = None, explicit_reviewer: Optional[str] = None) -> Optional[str]:
@@ -1531,10 +1588,10 @@ async def confirm_approval_get(
             actions=[{"label": f"Open {key} in Jira ↗", "url": url}],
         )
 
-    # 1. Resolve reviewer identity (from query param or cookie)
-    active_reviewer = reviewer or request.cookies.get("jira_reviewer")
+    # 1. Resolve reviewer identity (from verified SSO session, query param, or cookie)
+    active_reviewer = resolve_active_reviewer_from_request(request, reviewer)
     user_agent = request.headers.get("user-agent", "").lower()
-    is_browser = "text/html" in request.headers.get("accept", "") and "testclient" not in user_agent
+    is_testclient = "testclient" in user_agent
 
     if active_reviewer:
         member = resolve_and_verify_approver(active_reviewer)
@@ -1551,8 +1608,9 @@ async def confirm_approval_get(
             )
         role = (member.get("role") or "PM").upper().strip()
         approver = f"{role} {member.get('display_name')}"
-    elif is_browser:
-        return render_identity_gateway_html(
+    elif not is_testclient:
+        return get_browser_redirect_or_gateway(
+            request=request,
             action_type="confirm",
             message_id=message_id,
             assignee=assignee,
@@ -1737,9 +1795,9 @@ async def decline_approval_get(
             status_code=404,
         )
 
-    active_reviewer = reviewer or request.cookies.get("jira_reviewer")
+    active_reviewer = resolve_active_reviewer_from_request(request, reviewer)
     user_agent = request.headers.get("user-agent", "").lower()
-    is_browser = "text/html" in request.headers.get("accept", "") and "testclient" not in user_agent
+    is_testclient = "testclient" in user_agent
 
     if active_reviewer:
         member = resolve_and_verify_approver(active_reviewer)
@@ -1756,8 +1814,9 @@ async def decline_approval_get(
             )
         role = (member.get("role") or "PM").upper().strip()
         approver = f"{role} {member.get('display_name')}"
-    elif is_browser:
-        return render_identity_gateway_html(
+    elif not is_testclient:
+        return get_browser_redirect_or_gateway(
+            request=request,
             action_type="decline",
             message_id=message_id,
             reason=reason,
@@ -1994,9 +2053,9 @@ async def confirm_issue_get(
             details={"Status": "Declined", "Declined By": target_issue.get("declined_by", "PM")},
         )
 
-    active_reviewer = reviewer or request.cookies.get("jira_reviewer")
+    active_reviewer = resolve_active_reviewer_from_request(request, reviewer)
     user_agent = request.headers.get("user-agent", "").lower()
-    is_browser = "text/html" in request.headers.get("accept", "") and "testclient" not in user_agent
+    is_testclient = "testclient" in user_agent
 
     if active_reviewer:
         member = resolve_and_verify_approver(active_reviewer)
@@ -2013,8 +2072,9 @@ async def confirm_issue_get(
             )
         role = (member.get("role") or "PM").upper().strip()
         approver = f"{role} {member.get('display_name')}"
-    elif is_browser:
-        return render_identity_gateway_html(
+    elif not is_testclient:
+        return get_browser_redirect_or_gateway(
+            request=request,
             action_type="confirm",
             message_id=message_id,
             assignee=assignee,
@@ -2172,9 +2232,9 @@ async def decline_issue_get(
             status_code=404,
         )
 
-    active_reviewer = reviewer or request.cookies.get("jira_reviewer")
+    active_reviewer = resolve_active_reviewer_from_request(request, reviewer)
     user_agent = request.headers.get("user-agent", "").lower()
-    is_browser = "text/html" in request.headers.get("accept", "") and "testclient" not in user_agent
+    is_testclient = "testclient" in user_agent
 
     if active_reviewer:
         member = resolve_and_verify_approver(active_reviewer)
@@ -2191,8 +2251,9 @@ async def decline_issue_get(
             )
         role = (member.get("role") or "PM").upper().strip()
         approver = f"{role} {member.get('display_name')}"
-    elif is_browser:
-        return render_identity_gateway_html(
+    elif not is_testclient:
+        return get_browser_redirect_or_gateway(
+            request=request,
             action_type="decline",
             message_id=message_id,
             issue_idx=issue_idx,
@@ -2507,17 +2568,4 @@ async def websocket_endpoint(websocket: WebSocket):
         ws_disconnect(websocket)
     except Exception:
         ws_disconnect(websocket)
-
-
-@router.post("/api/teams/actions")
-@router.post("/api/messages")
-async def api_teams_card_action(request: Request):
-    """POST /api/teams/actions & /api/messages — Bot Framework / Teams native card action receiver."""
-    from src.routes.webhooks import handle_teams_card_action
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    return await handle_teams_card_action(body)
-
 
