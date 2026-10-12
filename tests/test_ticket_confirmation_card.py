@@ -50,19 +50,32 @@ class TestTicketConfirmationCard(unittest.TestCase):
         self.assertNotIn("Assignee:", fact_titles)
         self.assertNotIn("Assignee", [f["title"] for f in factset["facts"]])
 
-        # 5. Buttons have Approve with member dropdown and ❌ Reject
+        # 5. Buttons have Native Action.Submit for Approve and Decline (Zero Action.OpenUrl)
         self.assertEqual(len(actions), 2)
-        self.assertIn("Approve (Hemil)", actions[0]["title"])
-        self.assertEqual(actions[0]["type"], "Action.ShowCard")
-        subactions = actions[0]["card"]["actions"]
-        subaction_titles = [s["title"] for s in subactions]
-        self.assertTrue(any("Approve (Hemil)" in t for t in subaction_titles))
-        self.assertTrue(any("Assignee Dropdown (Web)" in t for t in subaction_titles))
-        self.assertTrue(any("Assign" in t for t in subaction_titles))
+        self.assertEqual(actions[0]["type"], "Action.Submit")
+        self.assertIn("Approve", actions[0]["title"])
+        self.assertEqual(actions[0]["data"]["action"], "approve")
+        self.assertEqual(actions[0]["data"]["message_id"], "msg-otp-test-1")
 
-        self.assertEqual(actions[1]["title"], "❌ Reject")
-        self.assertEqual(actions[1]["type"], "Action.OpenUrl")
-        self.assertIn("/api/jira/decline-approval/msg-otp-test-1", actions[1]["url"])
+        self.assertEqual(actions[1]["type"], "Action.Submit")
+        self.assertIn("Decline", actions[1]["title"])
+        self.assertEqual(actions[1]["data"]["action"], "decline")
+        self.assertEqual(actions[1]["data"]["message_id"], "msg-otp-test-1")
+
+        # 6. In-card ChoiceSet dropdown exists in body elements
+        choiceset = None
+        for el in body:
+            if el.get("type") == "Container":
+                for item in el.get("items", []):
+                    if item.get("type") == "Input.ChoiceSet":
+                        choiceset = item
+                        break
+        self.assertIsNotNone(choiceset)
+        self.assertEqual(choiceset["id"], "selected_assignee")
+        self.assertEqual(choiceset["value"], "Hemil Ghori")
+
+        # 7. Strictly zero Action.OpenUrl in the card (100% in-Teams, no browser links)
+        self.assertNotIn("Action.OpenUrl", json.dumps(card))
 
     def test_multi_issue_card_header_and_facts(self):
         issues = [
@@ -152,32 +165,33 @@ class TestTicketConfirmationCard(unittest.TestCase):
             base_url="http://localhost:3000",
         )
         actions = card["attachments"][0]["content"]["actions"]
+        body = card["attachments"][0]["content"]["body"]
 
-        # Approve #1 is ShowCard with member choices
-        self.assertEqual(actions[0]["type"], "Action.ShowCard")
-        self.assertIn("Approve #1 (Hemil)", actions[0]["title"])
-        sub1 = actions[0]["card"]["actions"]
-        self.assertTrue(any("Approve (Hemil)" in s["title"] for s in sub1))
-        self.assertTrue(any("Assign" in s["title"] for s in sub1))
+        # Approve All is native Action.Submit
+        self.assertEqual(actions[0]["type"], "Action.Submit")
+        self.assertIn("Approve All (3)", actions[0]["title"])
+        self.assertEqual(actions[0]["data"]["action"], "approve")
 
-        # Approve #2 is ShowCard with member choices
+        # Reject All is native Action.Submit
+        self.assertEqual(actions[1]["type"], "Action.Submit")
+        self.assertIn("Reject All (3)", actions[1]["title"])
+        self.assertEqual(actions[1]["data"]["action"], "decline")
+
+        # Individual actions available via ShowCard with Submit subactions
         self.assertEqual(actions[2]["type"], "Action.ShowCard")
-        self.assertIn("Approve #2 (Musaib)", actions[2]["title"])
-        sub2 = actions[2]["card"]["actions"]
-        self.assertTrue(any("Approve (Musaib)" in s["title"] for s in sub2))
-        self.assertTrue(any("Assign" in s["title"] for s in sub2))
+        sub_actions = actions[2]["card"]["actions"]
+        self.assertTrue(any("Approve #1" in s["title"] for s in sub_actions))
+        self.assertTrue(any("Reject #1" in s["title"] for s in sub_actions))
+        self.assertTrue(all(s["type"] == "Action.Submit" for s in sub_actions))
 
-        # More (1) / All is ShowCard
-        self.assertEqual(actions[4]["type"], "Action.ShowCard")
-        self.assertIn("More (1) / All", actions[4]["title"])
-        more_subactions = actions[4]["card"]["actions"]
-        more_titles = [s["title"] for s in more_subactions]
-        self.assertEqual(len(more_subactions), 2)
-        self.assertTrue(any("Approve #3" in t for t in more_titles))
-        self.assertTrue(any("Reject #3" in t for t in more_titles))
-        self.assertFalse(any("Dropdown #3" in t for t in more_titles))
-        self.assertFalse(any("🌐" in t for t in more_titles))
-        self.assertFalse(any("Assign All" in t for t in more_titles))
+        # Check body dropdowns for all 3 issues
+        card_json = json.dumps(card)
+        self.assertIn("selected_assignee_0", card_json)
+        self.assertIn("selected_assignee_1", card_json)
+        self.assertIn("selected_assignee_2", card_json)
+
+        # Strictly zero Action.OpenUrl
+        self.assertNotIn("Action.OpenUrl", card_json)
 
     def test_solution1_reactions_removed_and_no_auto_execution(self):
         """Solution 1: Verify reaction text is completely removed and no buttons have auto=1."""
@@ -216,16 +230,20 @@ class TestTicketConfirmationCard(unittest.TestCase):
         self.assertIsNotNone(hm_member)
         self.assertEqual(hm_member.get("role"), "HM")
 
-        tl_member = resolve_and_verify_approver("Nishi Sharma")
+        tl_member = resolve_and_verify_approver("Yash Kalkani")
         self.assertIsNotNone(tl_member)
         self.assertEqual(tl_member.get("role"), "TL")
 
         # Unauthorized roles
-        # Santosh is DEVELOPER (can_approve: False)
-        dev_member = resolve_and_verify_approver("Santosh Yadav")
+        # Nishi Sharma is DEVELOPER (can_approve: False)
+        dev_member = resolve_and_verify_approver("Nishi Sharma")
         self.assertIsNone(dev_member)
 
-        # Dhruv dobariya is UNASSIGNED / CLIENT (can_approve: False)
+        # Santosh is CLIENT (can_approve: False)
+        santosh_member = resolve_and_verify_approver("Santosh Yadav")
+        self.assertIsNone(santosh_member)
+
+        # Dhruv dobariya is CLIENT (can_approve: False)
         client_member = resolve_and_verify_approver("Dhruv dobariya")
         self.assertIsNone(client_member)
 
@@ -334,10 +352,11 @@ class TestTicketConfirmationCard(unittest.TestCase):
 
         # 3. Chat authorization check: Client and Developer reactions are blocked, only TL/PM/HM can approve
         from src.services.sender_service import is_user_authorized_approver
-        self.assertFalse(is_user_authorized_approver(display_name="Dhruv dobariya"))  # Client / Unassigned -> False
-        self.assertFalse(is_user_authorized_approver(display_name="Santosh Yadav"))   # Developer -> False
+        self.assertFalse(is_user_authorized_approver(display_name="Dhruv dobariya"))  # Client -> False
+        self.assertFalse(is_user_authorized_approver(display_name="Santosh Yadav"))   # Client -> False
+        self.assertFalse(is_user_authorized_approver(display_name="Nishi Sharma"))    # Developer -> False
         self.assertTrue(is_user_authorized_approver(display_name="Musaib Khan"))     # PM -> True
-        self.assertTrue(is_user_authorized_approver(display_name="Nishi Sharma"))    # TL -> True
+        self.assertTrue(is_user_authorized_approver(display_name="Yash Kalkani"))     # TL -> True
         self.assertTrue(is_user_authorized_approver(display_name="Hemil Ghori"))     # HM -> True
 
 

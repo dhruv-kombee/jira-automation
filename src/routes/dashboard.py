@@ -2508,3 +2508,16 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception:
         ws_disconnect(websocket)
 
+
+@router.post("/api/teams/actions")
+@router.post("/api/messages")
+async def api_teams_card_action(request: Request):
+    """POST /api/teams/actions & /api/messages — Bot Framework / Teams native card action receiver."""
+    from src.routes.webhooks import handle_teams_card_action
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await handle_teams_card_action(body)
+
+
