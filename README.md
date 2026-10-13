@@ -42,18 +42,17 @@ See [docs/GET_ALL_ENV_CREDENTIALS.md](docs/GET_ALL_ENV_CREDENTIALS.md) for a com
 
 ### 4. Start (All-in-One Command) 🚀
 
-Run **one command** to start ngrok tunnel, verify/activate Graph subscription, launch the FastAPI engine, and open the real-time Dashboard:
+Run **one command** to start ngrok tunnel, verify/activate Microsoft Graph subscription automatically, and launch the FastAPI engine in headless service mode:
 
 ```bash
 py run.py
 ```
 
-Your browser will automatically open to [http://localhost:3000](http://localhost:3000) showing:
-- **Live System Health**: FastAPI status, public ngrok forwarding, SQLite WAL persistence.
-- **Interactive Subscription Monitor**: Real-time countdown timer with auto-renewal.
-- **Live Teams Message Feed**: Real-time incoming messages with role badges (Client / PM / Developer).
-- **Interactive Simulator**: Test message detection and role identification without opening Teams.
-- **Payload Inspector**: View normalized JSON payloads with one click.
+The system runs autonomously in headless mode:
+- **Automatic Webhook Tunnel**: Detects or starts ngrok and resolves the public HTTPS endpoint.
+- **Automatic Graph Subscription**: Establishes or renews Microsoft Graph change notifications on startup.
+- **Continuous Background Auto-Renewal**: Background worker auto-renews subscriptions and monitors for URL changes.
+- **Direct CLI Telemetry**: Status and subscription expiration are printed directly to the console.
 
 Alternatively, you can run the server directly:
 ```bash

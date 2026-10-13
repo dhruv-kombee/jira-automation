@@ -21,15 +21,14 @@ def setup_test_db(tmp_path, monkeypatch):
 
 
 def test_serve_settings_page():
-    """Verify that /settings and /admin serve the new Management Hub HTML."""
+    """Verify that /settings and /admin web console are disabled in favor of Member.xlsx."""
     res1 = client.get("/settings")
-    assert res1.status_code == 200
-    assert "Management Hub & System Settings" in res1.text
-    assert "settings.js" in res1.text
+    assert res1.status_code == 404
+    assert "Member.xlsx" in res1.json()["message"]
 
     res2 = client.get("/admin")
-    assert res2.status_code == 200
-    assert "Management Hub & System Settings" in res2.text
+    assert res2.status_code == 404
+    assert "Member.xlsx" in res2.json()["message"]
 
 
 def test_admin_overview():

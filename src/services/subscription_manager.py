@@ -18,6 +18,18 @@ def check_tunnel_reachable(url: Optional[str]) -> bool:
     if not url:
         return False
     clean_url = url.rstrip('/')
+
+    # Fast verification: verify ngrok API confirms this tunnel is active and local server is listening
+    try:
+        from src.tunnel import get_active_tunnel_url
+        active = get_active_tunnel_url()
+        if active and active.rstrip('/') == clean_url:
+            import socket
+            with socket.create_connection(("127.0.0.1", config.port), timeout=0.5):
+                return True
+    except Exception:
+        pass
+
     headers = {
         "ngrok-skip-browser-warning": "true",
         "User-Agent": "teams-automation-probe",
@@ -218,8 +230,20 @@ async def auto_renew_loop():
                 remaining = status.get("remainingSeconds", 0)
                 sub_id = status["id"]
 
+                # Verify subscription is pointing to the current active tunnel URL
+                tunnel_url = get_active_tunnel_url() or config.webhook_public_url
+                expected_notification_url = f"{tunnel_url.rstrip('/')}/webhooks/teams" if tunnel_url else ""
+                current_sub_url = (status.get("notificationUrl") or "").rstrip('/')
+
+                if expected_notification_url and current_sub_url != expected_notification_url:
+                    logger.warning(
+                        f"Subscription notificationUrl mismatch detected ({current_sub_url} != {expected_notification_url}). "
+                        f"Re-creating subscription for active tunnel...",
+                        extra={"event": "SUBSCRIPTION_URL_MISMATCH"},
+                    )
+                    await asyncio.to_thread(ensure_subscription_online, tunnel_url)
                 # If remaining time is under 30 minutes, trigger auto-renew
-                if remaining <= AUTO_RENEW_THRESHOLD_SECONDS:
+                elif remaining <= AUTO_RENEW_THRESHOLD_SECONDS:
                     logger.info(
                         f"Auto-renew triggered for subscription {sub_id} ({remaining}s remaining)...",
                         extra={"event": "AUTO_RENEW_TRIGGER", "remainingSeconds": remaining},
@@ -255,7 +279,7 @@ async def auto_renew_loop():
                         # Only attempt recreate if remaining time is critically low (< 5 min)
                         if remaining <= 300:
                             logger.info("Subscription critically low (<5m), ensuring online fresh...")
-                            ensure_subscription_online()
+                            await asyncio.to_thread(ensure_subscription_online)
             else:
                 # If no active subscription or expired, verify tunnel is live before attempting create
                 tunnel_url = get_active_tunnel_url() or config.webhook_public_url
@@ -264,7 +288,7 @@ async def auto_renew_loop():
                         "No active subscription detected by auto-renewer loop. Ensuring online...",
                         extra={"event": "AUTO_RECREATE_TRIGGER"},
                     )
-                    ensure_subscription_online(public_url=tunnel_url)
+                    await asyncio.to_thread(ensure_subscription_online, tunnel_url)
                 else:
                     logger.debug("Auto-renewer loop waiting: public webhook tunnel is offline.")
 
