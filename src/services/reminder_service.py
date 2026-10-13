@@ -24,7 +24,12 @@ _reminder_task: Optional[asyncio.Task] = None
 REMINDER_CHECK_INTERVAL = 30  # Run check every 30 seconds
 
 
-from src.services.member_sync_service import get_active_pm_from_excel, get_member_by_id_or_name
+from src.services.member_sync_service import (
+    get_active_pm_from_excel,
+    get_member_by_id_or_name,
+    get_sla_timelines,
+    is_within_business_hours,
+)
 
 
 def get_active_pm() -> Dict[str, str]:
@@ -399,6 +404,20 @@ async def check_and_send_message_reminder(
                 )
             return {"skipped": True, "reason": reason}
 
+    # Check business hours policy (can be overridden with force=True)
+    if not force and not is_within_business_hours():
+        return {"skipped": True, "reason": "Outside business hours (SLA follow-up paused)"}
+
+    # Fetch dynamic SLA configuration from Member.xlsx (SLA & Settings tab)
+    sla = get_sla_timelines()
+    stage1_tl_timeout = sla.get("stage1_tl_minutes", 10)
+    stage1_enabled = sla.get("stage1_enabled", True)
+    stage2_pm_timeout = sla.get("stage2_pm_minutes", 20)
+    stage2_enabled = sla.get("stage2_enabled", True)
+    stage3_hm_email_timeout = sla.get("stage3_hm_email_minutes", 25)
+    stage3_enabled = sla.get("stage3_enabled", True)
+    backlog_cutoff_hours = sla.get("backlog_cutoff_hours", 24)
+
     # Calculate elapsed time
     ts_str = msg.get("received_at") or msg.get("created_at")
     msg_dt = parse_timestamp_to_utc(ts_str)
@@ -409,16 +428,13 @@ async def check_and_send_message_reminder(
         elapsed = (now_utc - msg_dt).total_seconds() / 60.0
         elapsed_minutes = max(1, int(elapsed))
 
-        # Guard: suppress ancient backlog (>24h)
-        if not force and elapsed > 1440:
+        # Guard: suppress ancient backlog based on Excel setting (default 24h)
+        cutoff_minutes = backlog_cutoff_hours * 60
+        if not force and elapsed > cutoff_minutes:
             if msg.get("reminder_email_status") is None:
                 db = get_db()
                 db.execute("UPDATE messages SET reminder_email_status = 'SUPPRESSED_BACKLOG' WHERE message_id = ?", (msg_id,))
-            return {"skipped": True, "reason": "Message is older than 24 hours (ancient backlog suppressed)"}
-
-    # Verified SLA timeline: 10m TL -> 20m PM -> HM Email
-    STAGE1_TL_TIMEOUT = 10
-    STAGE2_PM_TIMEOUT = 20
+            return {"skipped": True, "reason": f"Message is older than {backlog_cutoff_hours} hours (ancient backlog suppressed)"}
 
     try:
         reminder_count = int(msg.get("reminder_count") or 0)
@@ -426,33 +442,36 @@ async def check_and_send_message_reminder(
         reminder_count = 0
     has_sent_stage1 = bool(msg.get("reminder_sent_at"))
 
-    # STAGE 1: 10 minutes -> Level 1 (TL) Teams reminder
-    if not has_sent_stage1:
-        if not force and elapsed_minutes < STAGE1_TL_TIMEOUT:
+    # STAGE 1: Level 1 (TL) Teams reminder (configurable in Excel, default: 10m)
+    if not has_sent_stage1 and stage1_enabled:
+        if not force and elapsed_minutes < stage1_tl_timeout:
             return {
                 "skipped": True,
-                "reason": f"Under Stage 1 TL follow-up threshold ({elapsed_minutes}m < {STAGE1_TL_TIMEOUT}m)",
+                "reason": f"Under Stage 1 TL follow-up threshold ({elapsed_minutes}m < {stage1_tl_timeout}m)",
             }
         return await send_stage1_teams_followup_tl(msg, elapsed_minutes)
 
-    # STAGE 2: 20 minutes -> Level 2 (PM) Teams escalation
-    if reminder_count < 2:
-        if not force and elapsed_minutes < STAGE2_PM_TIMEOUT:
+    # STAGE 2: Level 2 (PM) Teams escalation (configurable in Excel, default: 20m)
+    if reminder_count < 2 and stage2_enabled:
+        if not force and elapsed_minutes < stage2_pm_timeout:
             return {
                 "skipped": True,
-                "reason": f"Under Stage 2 PM escalation threshold ({elapsed_minutes}m < {STAGE2_PM_TIMEOUT}m)",
+                "reason": f"Under Stage 2 PM escalation threshold ({elapsed_minutes}m < {stage2_pm_timeout}m)",
             }
         return await send_stage2_teams_followup_pm(msg, elapsed_minutes)
 
-    # STAGE 3: >20 minutes (both TL and PM unreplied) -> Level 3 (HM) Email alert only
+    # STAGE 3: Level 3 (HM) Email alert only (configurable in Excel, default: 25m)
     has_sent_email = msg.get("reminder_email_status") in ("SENT", "HM_SENT", "CANCELLED", "SUPPRESSED_BACKLOG")
 
-    if not has_sent_email:
+    if not has_sent_email and stage3_enabled:
+        if not force and elapsed_minutes < stage3_hm_email_timeout:
+            return {
+                "skipped": True,
+                "reason": f"Under Stage 3 HM email alert threshold ({elapsed_minutes}m < {stage3_hm_email_timeout}m)",
+            }
         return await send_stage3_email_escalation_hm(msg, elapsed_minutes)
 
     return {"skipped": True, "reason": "All 3 SLA escalation stages have already been executed"}
-
-    return {"skipped": True, "reason": "Both Teams follow-up and Email escalation already completed"}
 
 
 async def check_unanswered_client_issues():
@@ -499,7 +518,9 @@ async def reminder_monitor_loop():
         except Exception as loop_err:
             logger.warning(f"Error in SLA reminder monitor loop: {loop_err}")
 
-        await asyncio.sleep(REMINDER_CHECK_INTERVAL)
+        sla = get_sla_timelines()
+        poll_interval = sla.get("check_interval", REMINDER_CHECK_INTERVAL)
+        await asyncio.sleep(poll_interval)
 
 
 def start_reminder_monitor():

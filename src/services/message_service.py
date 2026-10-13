@@ -1268,17 +1268,20 @@ async def check_and_auto_create_jira_ticket(
         if has_disapproval:
             return await execute_jira_ticket_decline(target_msg_id, approver_name=approver_name)
         elif has_conf_approval:
-            # Per Specification: "Thumbs Up emoji -> Approves the step-2 confirmation card"
-            # If reacting on the original client message, require thumbs up (like / 👍)
-            # because ticket emoji 🎟️ was already used to start ticket creation in Step 1.
+            # Per Specification & Member.xlsx: Approves via configured approval reactions (🎟️, 🎫, 👍, like)
             if is_client_message:
-                from src.services.sender_service import is_user_authorized_approver
-                has_thumbs_up = any(
-                    (r.get("reactionType") or "").strip().lower() in {"like", "👍", ":thumbsup:", ":+1:"}
+                from src.services.sender_service import is_user_authorized_approver, is_ticket_approval_reaction
+                from src.services.member_sync_service import get_jira_default_settings
+                jira_settings = get_jira_default_settings()
+                allowed_approvals = {str(a).strip().lower() for a in jira_settings.get("approval_reactions", ["🎟️", "🎫", "👍", "like"])}
+                allowed_approvals.update({"like", "👍", ":thumbsup:", ":+1:", "🎟", "🎫", "🎟️"})
+
+                has_valid_approval = any(
+                    ((r.get("reactionType") or "").strip().lower() in allowed_approvals or is_ticket_approval_reaction(r.get("reactionType")))
                     and is_user_authorized_approver(user_id=r.get("userId"), display_name=r.get("displayName"))
                     for r in reactions
                 )
-                if not has_thumbs_up:
+                if not has_valid_approval:
                     return None
             return await execute_jira_ticket_creation(target_msg_id, approver_name=approver_name)
         return None

@@ -51,6 +51,167 @@ MEMBER_FILE_PATH = get_primary_excel_path()
 _cached_members: Optional[List[Dict[str, Any]]] = None
 _cached_mtime: float = 0.0
 
+_cached_settings: Optional[Dict[str, Any]] = None
+_cached_settings_mtime: float = 0.0
+
+DEFAULT_SYSTEM_SETTINGS: Dict[str, Any] = {
+    # SLA Timeline
+    "STAGE1_TL_MINUTES": 10,
+    "STAGE1_ENABLED": True,
+    "STAGE2_PM_MINUTES": 20,
+    "STAGE2_ENABLED": True,
+    "STAGE3_HM_EMAIL_MINUTES": 20,
+    "STAGE3_ENABLED": True,
+    "BACKLOG_CUTOFF_HOURS": 24,
+    "REMINDER_CHECK_INTERVAL": 30,
+
+    # Business Hours
+    "BUSINESS_HOURS_ONLY": False,
+    "BUSINESS_START_TIME": "09:00",
+    "BUSINESS_END_TIME": "19:00",
+    "EXCLUDE_WEEKENDS": True,
+    "TIMEZONE": "Asia/Kolkata",
+
+    # Jira Defaults
+    "DEFAULT_JIRA_PROJECT": "SCRUM",
+    "DEFAULT_ISSUE_TYPE": "Bug",
+    "DEFAULT_PRIORITY": "Medium",
+    "AUTO_APPROVE_FOR_TL_PM": False,
+    "REQUIRE_APPROVAL_REACTIONS": ["🎟️", "🎫", "👍", "like"],
+    "DISAPPROVAL_REACTIONS": ["❌", "decline", "thumbs_down"],
+
+    # AI & Triggers
+    "TRIGGER_KEYWORDS": ["#issue", "#bug", "#task", "bug", "issue", "error", "fail", "broken", "crash", "not working", "500 error"],
+    "IGNORE_KEYWORDS": ["fyi", "resolved", "fixed", "false alarm", "testing", "disregard"],
+}
+
+SETTINGS_METADATA_ROWS = [
+    # Category, Setting Name, Setting Key, Value, Unit/Options, Description
+    ("SLA Timeline", "Stage 1 TL Follow-up (Minutes)", "STAGE1_TL_MINUTES", 10, "Minutes (e.g. 10)", "Minutes of silence before tagging Team Lead on Teams"),
+    ("SLA Timeline", "Enable Stage 1 Follow-up", "STAGE1_ENABLED", True, "TRUE / FALSE", "Enable or disable Stage 1 Team Lead follow-up"),
+    ("SLA Timeline", "Stage 2 PM Escalation (Minutes)", "STAGE2_PM_MINUTES", 20, "Minutes (e.g. 20)", "Minutes of silence before escalating to Project Manager on Teams"),
+    ("SLA Timeline", "Enable Stage 2 Escalation", "STAGE2_ENABLED", True, "TRUE / FALSE", "Enable or disable Stage 2 PM escalation card"),
+    ("SLA Timeline", "Stage 3 HM Email Alert (Minutes)", "STAGE3_HM_EMAIL_MINUTES", 20, "Minutes (e.g. 20)", "Minutes of silence before sending urgent alert email to Higher Management"),
+    ("SLA Timeline", "Enable Stage 3 Email Alert", "STAGE3_ENABLED", True, "TRUE / FALSE", "Enable or disable Stage 3 Higher Management email alerts"),
+    ("SLA Timeline", "Ignore Ancient Backlog (Hours)", "BACKLOG_CUTOFF_HOURS", 24, "Hours (e.g. 24)", "Suppress reminders for unaddressed messages older than X hours"),
+    ("SLA Timeline", "SLA Monitor Check Interval (Sec)", "REMINDER_CHECK_INTERVAL", 30, "Seconds (e.g. 30)", "How frequently the background engine checks message SLAs"),
+
+    ("Business Hours", "Business Hours Only", "BUSINESS_HOURS_ONLY", False, "TRUE / FALSE", "If TRUE, reminders are only dispatched during working hours"),
+    ("Business Hours", "Workday Start Time", "BUSINESS_START_TIME", "09:00", "HH:MM (24-hour)", "Start of business hours (e.g. 09:00 AM)"),
+    ("Business Hours", "Workday End Time", "BUSINESS_END_TIME", "19:00", "HH:MM (24-hour)", "End of business hours (e.g. 07:00 PM)"),
+    ("Business Hours", "Exclude Weekends", "EXCLUDE_WEEKENDS", True, "TRUE / FALSE", "Pause follow-up reminders on Saturday and Sunday"),
+    ("Business Hours", "Timezone", "TIMEZONE", "Asia/Kolkata", "Timezone name", "Timezone for business hours evaluation"),
+
+    ("Jira Defaults", "Default Jira Project Key", "DEFAULT_JIRA_PROJECT", "SCRUM", "Project Key", "Fallback Jira Project Key for ticket creation"),
+    ("Jira Defaults", "Default Issue Type", "DEFAULT_ISSUE_TYPE", "Bug", "Bug / Task / Story", "Default Jira issue type"),
+    ("Jira Defaults", "Default Priority", "DEFAULT_PRIORITY", "Medium", "Lowest / Low / Medium / High / Highest", "Default Jira ticket priority"),
+    ("Jira Defaults", "Auto-Approve on TL/PM Reaction", "AUTO_APPROVE_FOR_TL_PM", False, "TRUE / FALSE", "If TRUE, reaction directly creates ticket without confirmation card"),
+    ("Jira Defaults", "Approval Reactions", "REQUIRE_APPROVAL_REACTIONS", "🎟️, 🎫, 👍, like", "Comma-separated", "Reaction emojis that authorize ticket confirmation"),
+    ("Jira Defaults", "Disapproval Reactions", "DISAPPROVAL_REACTIONS", "❌, decline, thumbs_down", "Comma-separated", "Reaction emojis that reject ticket creation"),
+
+    ("AI & Triggers", "Issue Trigger Keywords", "TRIGGER_KEYWORDS", "#issue, #bug, #task, bug, issue, error, fail, broken, crash, not working, 500 error", "Comma-separated", "Keywords that cause incoming client messages to be treated as bugs/tasks"),
+    ("AI & Triggers", "Ignored Keywords", "IGNORE_KEYWORDS", "fyi, resolved, fixed, false alarm, testing, disregard", "Comma-separated", "Keywords that suppress issue creation"),
+]
+
+
+def ensure_sla_settings_sheet_in_workbook(wb: openpyxl.Workbook) -> openpyxl.worksheet.worksheet.Worksheet:
+    """Ensure the 'SLA & Settings' sheet exists with standard layout, styling, and options."""
+    for s_name in wb.sheetnames:
+        if any(term in s_name.lower() for term in ("sla", "setting", "rule", "policy")):
+            return wb[s_name]
+
+    ws = wb.create_sheet("SLA & Settings")
+    ws.views.sheetView[0].showGridLines = True
+
+    # Title Banner
+    ws.merge_cells("A1:F1")
+    ws["A1"] = "Jira Automation — System SLA Timelines, Business Rules & Operational Policies"
+    ws["A1"].font = Font(name="Segoe UI", size=13, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 36
+
+    ws.merge_cells("A2:F2")
+    ws["A2"] = "Single Source of Truth for SLA Timing, Escalation Hierarchy, Working Hours & Jira Defaults (Auto-synced)"
+    ws["A2"].font = Font(name="Segoe UI", size=9.5, italic=True, color="94A3B8")
+    ws["A2"].fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[2].height = 20
+
+    # Headers
+    headers = ["Category", "Setting Name", "Setting Key", "Value", "Unit / Options", "Description & Guidance"]
+    ws.row_dimensions[3].height = 28
+    for col_idx, h in enumerate(headers, start=1):
+        cell = ws.cell(row=3, column=col_idx, value=h)
+        cell.font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+        cell.alignment = Alignment(horizontal="left" if col_idx != 4 else "center", vertical="center")
+
+    thin_border = Border(
+        left=Side(style="thin", color="E2E8F0"),
+        right=Side(style="thin", color="E2E8F0"),
+        top=Side(style="thin", color="E2E8F0"),
+        bottom=Side(style="thin", color="E2E8F0"),
+    )
+
+    from openpyxl.worksheet.datavalidation import DataValidation
+    dv_bool = DataValidation(type="list", formula1='"TRUE,FALSE"', allow_blank=False)
+    ws.add_data_validation(dv_bool)
+
+    cat_colors = {
+        "SLA Timeline": ("EEF2FF", "312E81"),
+        "Business Hours": ("ECFDF5", "065F46"),
+        "Jira Defaults": ("F0FDF4", "166534"),
+        "AI & Triggers": ("FAF5FF", "6B21A8"),
+    }
+
+    for idx, (cat, name, key, val, unit, desc) in enumerate(SETTINGS_METADATA_ROWS, start=4):
+        ws.row_dimensions[idx].height = 24
+        is_even = idx % 2 == 0
+        bg_color = "F8FAFC" if is_even else "FFFFFF"
+
+        ws.cell(row=idx, column=1, value=cat)
+        ws.cell(row=idx, column=2, value=name)
+        ws.cell(row=idx, column=3, value=key)
+        val_cell = ws.cell(row=idx, column=4, value=val)
+        ws.cell(row=idx, column=5, value=unit)
+        ws.cell(row=idx, column=6, value=desc)
+
+        if isinstance(val, bool):
+            dv_bool.add(val_cell)
+
+        c_bg, c_fg = cat_colors.get(cat, ("F1F5F9", "0F172A"))
+        for c in range(1, 7):
+            cell = ws.cell(row=idx, column=c)
+            cell.border = thin_border
+            cell.font = Font(name="Segoe UI", size=9.5)
+            if c == 1:
+                cell.fill = PatternFill(start_color=c_bg, end_color=c_bg, fill_type="solid")
+                cell.font = Font(name="Segoe UI", size=9.5, bold=True, color=c_fg)
+            elif c == 3:
+                cell.font = Font(name="Consolas", size=9.5, bold=True, color="0F172A")
+                cell.fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
+            elif c == 4:
+                cell.font = Font(name="Segoe UI", size=10, bold=True, color="0284C7" if isinstance(val, (int, float)) else ("16A34A" if val is True else ("DC2626" if val is False else "0F172A")))
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.fill = PatternFill(start_color="EFF6FF" if is_even else "F0F9FF", end_color="EFF6FF" if is_even else "F0F9FF", fill_type="solid")
+            elif c == 5:
+                cell.font = Font(name="Segoe UI", size=9, italic=True, color="64748B")
+                cell.fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
+            else:
+                cell.fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
+
+    for col in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            val_s = str(cell.value or "")
+            if len(val_s) > max_len and cell.row > 2:
+                max_len = len(val_s)
+        ws.column_dimensions[col_letter].width = max(max_len + 4, 14)
+
+    return ws
+
 
 def get_onedrive_download_url(share_url: str) -> str:
     """Transform a OneDrive sharing URL into a direct binary download URL."""
@@ -83,13 +244,22 @@ def download_onedrive_workbook(share_url: Optional[str] = None) -> Optional[byte
 _pending_excel_flushes: Optional[bytes] = None
 
 
-def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
+def save_workbook_to_all(wb: openpyxl.Workbook, custom_path: Optional[Path] = None) -> bytes:
     """Save workbook to both the live OneDrive sync path and local data folder."""
     buffer = io.BytesIO()
     wb.save(buffer)
     xlsx_bytes = buffer.getvalue()
 
     global _pending_excel_flushes
+
+    # 0. Optional custom output path (e.g., during testing or export)
+    if custom_path:
+        try:
+            custom_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(custom_path, "wb") as f:
+                f.write(xlsx_bytes)
+        except Exception as err:
+            logger.warning(f"Could not write to custom path {custom_path}: {err}")
 
     # 1. Primary OneDrive folder (instantly syncs to cloud & Teams)
     if ONEDRIVE_MEMBER_PATH.parent.exists():
@@ -115,9 +285,11 @@ def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
         logger.warning(f"Could not write to local path {LOCAL_MEMBER_PATH}: {err}")
 
     # Invalidate cache so next read uses fresh file
-    global _cached_members, _cached_mtime
+    global _cached_members, _cached_mtime, _cached_settings, _cached_settings_mtime
     _cached_members = None
     _cached_mtime = 0.0
+    _cached_settings = None
+    _cached_settings_mtime = 0.0
 
     return xlsx_bytes
 
@@ -211,7 +383,20 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
         except Exception as fb_err:
             logger.warning(f"Failed to load fallback Member.xlsx: {fb_err}")
             return []
-    ws = wb.active
+    # Select the Team Directory sheet specifically (avoiding SLA & Settings)
+    ws = None
+    for s_name in wb.sheetnames:
+        s_lower = s_name.lower()
+        if any(term in s_lower for term in ("team", "member", "directory", "roster")):
+            ws = wb[s_name]
+            break
+    if ws is None:
+        for s_name in wb.sheetnames:
+            if "sla" not in s_name.lower() and "setting" not in s_name.lower():
+                ws = wb[s_name]
+                break
+    if ws is None:
+        ws = wb.active
 
     # Find the header row (first row where a cell contains 'Full Name' or 'Name')
     header_row_idx = None
@@ -431,6 +616,202 @@ def get_all_members_from_excel() -> List[Dict[str, Any]]:
         _cached_mtime = mtime
 
     return _cached_members or []
+
+
+def get_system_settings_from_excel(force_refresh: bool = False) -> Dict[str, Any]:
+    """Read operational system settings and SLA policies from the 'SLA & Settings' tab in Member.xlsx.
+    Caches results in memory and automatically reloads if the Excel workbook is modified on disk.
+    Falls back cleanly to DEFAULT_SYSTEM_SETTINGS if the tab is not found or encounters an error.
+    """
+    global _cached_settings, _cached_settings_mtime
+
+    target = get_primary_excel_path()
+    if not target.exists() and target != LOCAL_MEMBER_PATH and LOCAL_MEMBER_PATH.exists():
+        target = LOCAL_MEMBER_PATH
+
+    current_mtime = 0.0
+    if target.exists():
+        try:
+            current_mtime = os.path.getmtime(target)
+        except Exception:
+            current_mtime = 0.0
+
+    if not force_refresh and _cached_settings is not None and current_mtime <= _cached_settings_mtime and current_mtime > 0.0:
+        return dict(_cached_settings)
+
+    settings = dict(DEFAULT_SYSTEM_SETTINGS)
+    wb = None
+    target_bytes = read_excel_file_bytes_safe(target) if target.exists() else None
+    if target_bytes and len(target_bytes) > 500:
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(target_bytes), data_only=True)
+        except Exception as load_err:
+            logger.debug(f"Failed to load workbook buffer for settings: {load_err}")
+
+    if wb is None and LOCAL_MEMBER_PATH.exists():
+        try:
+            wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH, data_only=True)
+        except Exception:
+            pass
+
+    if wb is None:
+        _cached_settings = settings
+        _cached_settings_mtime = current_mtime
+        return dict(settings)
+
+    # Locate the SLA & Settings sheet
+    ws = None
+    for s_name in wb.sheetnames:
+        s_lower = s_name.lower()
+        if any(term in s_lower for term in ("sla", "setting", "rule", "config", "policy")):
+            ws = wb[s_name]
+            break
+
+    if ws is None:
+        _cached_settings = settings
+        _cached_settings_mtime = current_mtime
+        return dict(settings)
+
+    # Find the header row containing "setting key" or "key" and "value"
+    key_col_idx = 3
+    val_col_idx = 4
+    header_row_idx = 3
+    header_found = False
+
+    for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        row_str = [str(c or "").strip().lower() for c in row]
+        if any("key" in c for c in row_str) and any("val" in c for c in row_str):
+            for c_idx, val in enumerate(row_str, start=1):
+                if "key" in val:
+                    key_col_idx = c_idx
+                elif "val" in val:
+                    val_col_idx = c_idx
+            header_found = True
+            header_row_idx = row_idx
+            break
+
+    # Iterate rows and extract settings
+    start_row = (header_row_idx + 1) if header_found else 4
+    for row in ws.iter_rows(min_row=start_row, values_only=True):
+        if not row:
+            continue
+        if len(row) < key_col_idx:
+            continue
+        raw_key = row[key_col_idx - 1]
+        if not raw_key:
+            continue
+        key_str = str(raw_key).strip().upper()
+        if not key_str or key_str in ("SETTING KEY", "KEY", "CATEGORY", "NONE"):
+            continue
+
+        raw_val = row[val_col_idx - 1] if len(row) >= val_col_idx else None
+
+        # Type conversion based on key naming convention or existing default type
+        if key_str.endswith("_ENABLED") or key_str.endswith("_ONLY") or key_str.endswith("_WEEKENDS") or "AUTO_APPROVE" in key_str:
+            if isinstance(raw_val, bool):
+                settings[key_str] = raw_val
+            elif raw_val is not None:
+                settings[key_str] = str(raw_val).strip().upper() in ("TRUE", "1", "YES", "T", "Y", "ENABLED")
+            else:
+                settings[key_str] = False
+        elif key_str.endswith("_MINUTES") or key_str.endswith("_HOURS") or key_str.endswith("_INTERVAL"):
+            try:
+                settings[key_str] = int(float(str(raw_val).strip()))
+            except (ValueError, TypeError):
+                pass
+        elif key_str in ("REQUIRE_APPROVAL_REACTIONS", "DISAPPROVAL_REACTIONS", "TRIGGER_KEYWORDS", "IGNORE_KEYWORDS"):
+            if isinstance(raw_val, str):
+                items = [it.strip() for it in raw_val.split(",") if it.strip()]
+                if items:
+                    settings[key_str] = items
+            elif isinstance(raw_val, list):
+                settings[key_str] = raw_val
+        else:
+            if raw_val is not None:
+                settings[key_str] = str(raw_val).strip()
+
+    _cached_settings = settings
+    _cached_settings_mtime = current_mtime
+    return dict(settings)
+
+
+def get_sla_timelines() -> Dict[str, Any]:
+    """Retrieve SLA timeline thresholds, stage enablement, and backlog cutoff hours from Excel."""
+    s = get_system_settings_from_excel()
+    return {
+        "stage1_tl_minutes": s.get("STAGE1_TL_MINUTES", 10),
+        "stage1_enabled": s.get("STAGE1_ENABLED", True),
+        "stage2_pm_minutes": s.get("STAGE2_PM_MINUTES", 20),
+        "stage2_enabled": s.get("STAGE2_ENABLED", True),
+        "stage3_hm_email_minutes": s.get("STAGE3_HM_EMAIL_MINUTES", 25),
+        "stage3_enabled": s.get("STAGE3_ENABLED", True),
+        "backlog_cutoff_hours": s.get("BACKLOG_CUTOFF_HOURS", 24),
+        "check_interval": s.get("REMINDER_CHECK_INTERVAL", 30),
+    }
+
+
+def is_within_business_hours(check_dt: Optional[datetime] = None) -> bool:
+    """Check if the given datetime (defaults to now UTC) falls within configured business hours.
+    If BUSINESS_HOURS_ONLY is False, returns True (24/7 coverage).
+    """
+    s = get_system_settings_from_excel()
+    if not s.get("BUSINESS_HOURS_ONLY", False):
+        return True
+
+    tz_name = s.get("TIMEZONE", "Asia/Kolkata")
+    dt = check_dt or datetime.now(timezone.utc)
+
+    # Localize or convert to target timezone
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local_dt = dt.astimezone(tz)
+    except Exception:
+        local_dt = dt
+
+    # Check weekend exclusion (Monday is 0, Sunday is 6)
+    if s.get("EXCLUDE_WEEKENDS", True) and local_dt.weekday() in (5, 6):
+        return False
+
+    # Check workday hours (HH:MM)
+    start_str = str(s.get("BUSINESS_START_TIME", "09:00")).strip()
+    end_str = str(s.get("BUSINESS_END_TIME", "19:00")).strip()
+
+    try:
+        s_h, s_m = [int(p) for p in start_str.split(":")[:2]]
+        e_h, e_m = [int(p) for p in end_str.split(":")[:2]]
+
+        cur_minutes = local_dt.hour * 60 + local_dt.minute
+        start_minutes = s_h * 60 + s_m
+        end_minutes = e_h * 60 + e_m
+
+        return start_minutes <= cur_minutes <= end_minutes
+    except Exception:
+        return True
+
+
+def get_jira_default_settings() -> Dict[str, Any]:
+    """Retrieve fallback Jira project key, issue type, priority, and reaction triggers from Excel."""
+    s = get_system_settings_from_excel()
+    return {
+        "project_key": s.get("DEFAULT_JIRA_PROJECT", config.jira.project_key or "SCRUM"),
+        "issue_type": s.get("DEFAULT_ISSUE_TYPE", "Bug"),
+        "priority": s.get("DEFAULT_PRIORITY", "Medium"),
+        "auto_approve": s.get("AUTO_APPROVE_FOR_TL_PM", False),
+        "approval_reactions": s.get("REQUIRE_APPROVAL_REACTIONS", ["🎟️", "🎫", "👍", "like"]),
+        "disapproval_reactions": s.get("DISAPPROVAL_REACTIONS", ["❌", "decline", "thumbs_down"]),
+    }
+
+
+def get_issue_keyword_filters() -> Dict[str, List[str]]:
+    """Retrieve issue detection trigger keywords and suppression keywords from Excel."""
+    s = get_system_settings_from_excel()
+    return {
+        "trigger_keywords": s.get("TRIGGER_KEYWORDS", []),
+        "ignore_keywords": s.get("IGNORE_KEYWORDS", []),
+    }
 
 
 def get_member_by_id_or_name(user_id: Optional[str] = None, display_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -670,7 +1051,14 @@ def feed_member_to_excel(
     except (PermissionError, OSError):
         logger.warning(f"File {target_path} is locked by another process. Reading from local copy {LOCAL_MEMBER_PATH}")
         wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH)
-    ws = wb.active
+    ws = None
+    for s_name in wb.sheetnames:
+        s_lower = s_name.lower()
+        if any(term in s_lower for term in ("team", "member", "directory", "roster")):
+            ws = wb[s_name]
+            break
+    if ws is None:
+        ws = wb.active
 
     # Find header row and column mapping
     header_row_idx = 4
@@ -887,7 +1275,14 @@ def remove_member_from_excel(
             return False
         wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH)
 
-    ws = wb.active
+    ws = None
+    for s_name in wb.sheetnames:
+        s_lower = s_name.lower()
+        if any(term in s_lower for term in ("team", "member", "directory", "roster")):
+            ws = wb[s_name]
+            break
+    if ws is None:
+        ws = wb.active
 
     header_row_idx = 4
     col_map = {"name": 1, "user_id": 5}
@@ -961,9 +1356,32 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
                ELSE 6 END, id ASC"""
     ).fetchall()
 
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Team Directory"
+    if target_path.exists():
+        try:
+            wb = openpyxl.load_workbook(target_path)
+            # Find or create Team Directory sheet
+            ws = None
+            for s_name in wb.sheetnames:
+                if any(k in s_name.lower() for k in ("team", "member", "directory", "roster")):
+                    ws = wb[s_name]
+                    break
+            if ws is not None:
+                idx = wb.sheetnames.index(ws.title)
+                wb.remove(ws)
+                ws = wb.create_sheet("Team Directory", idx)
+            else:
+                ws = wb.create_sheet("Team Directory", 0)
+        except Exception:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Team Directory"
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Team Directory"
+
+    # Always ensure SLA & Settings sheet exists in the workbook
+    ensure_sla_settings_sheet_in_workbook(wb)
     ws.views.sheetView[0].showGridLines = True
 
     # Title block
@@ -1119,7 +1537,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
     ws.add_data_validation(status_dv)
     status_dv.add("I5:I500")
 
-    return save_workbook_to_all(wb)
+    return save_workbook_to_all(wb, custom_path=target_path)
 
 
 def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str] = None) -> Dict[str, Any]:
@@ -1328,6 +1746,9 @@ async def _excel_file_watcher_loop():
                         _cached_members = updated_members
                         _cached_mtime = current_mtime
 
+                        # Also reload SLA & Settings policies from Excel
+                        await loop.run_in_executor(None, get_system_settings_from_excel, True)
+
                         # Proactively broadcast ROSTER_UPDATED to all connected dashboards via WebSocket
                         try:
                             from src.services.broadcaster import broadcast_message
@@ -1375,6 +1796,7 @@ async def _excel_file_watcher_loop():
                             _cached_members = updated_members
                             if target.exists():
                                 _cached_mtime = os.path.getmtime(target)
+                            await loop.run_in_executor(None, get_system_settings_from_excel, True)
 
                             try:
                                 from src.services.broadcaster import broadcast_message
