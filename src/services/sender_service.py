@@ -104,9 +104,10 @@ def is_user_authorized_approver(
     display_name: Optional[str] = None,
     allow_client: Optional[bool] = None,
 ) -> bool:
-    """Check if a specific user has approval permissions based directly on Member.xlsx.
-    Strictly: only active management levels (Level 1 TL, Level 2 PM, Level 3 HM) are authorized approvers.
-    Clients, developers, and unassigned senders cannot approve under any circumstances.
+    """Check if a specific user has approval permissions based directly on Member.xlsx (SSOT).
+    Strictly decided by the sheet:
+      1. 'Can Approve (1/0)': 1 = Authorized, 0 = Blocked
+      2. 'Level': Level 1 (TL), Level 2 (PM), Level 3 (HM) = Authorized; Level 0 / '-' = Blocked
     """
     member = get_member_by_id_or_name(user_id=user_id, display_name=display_name)
     if member:
@@ -114,24 +115,31 @@ def is_user_authorized_approver(
         if not member.get("is_active", True):
             return False
 
-        role = (member.get("role") or "").upper().strip()
-        level = str(member.get("level") or "").upper().strip()
-
-        # Block DEVELOPER, UNASSIGNED, and CLIENT users from approving under any circumstances
-        if role in ("DEVELOPER", "UNASSIGNED", "CLIENT"):
-            return False
-
-        # Strictly management tiers: Level 1 (TL), Level 2 (PM), Level 3 (HM)
-        is_mgmt_role = role in ("PM", "TL", "HM") or level in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3", "L1", "L2", "L3")
-        if not is_mgmt_role:
-            return False
-
-        # Check explicit can_approve permission flag
         can_approve_flag = member.get("can_approve")
-        if can_approve_flag is not None and not bool(can_approve_flag):
+        level = str(member.get("level") or "").upper().strip()
+        role = (member.get("role") or "").upper().strip()
+
+        # 1. Primary Decision: The sheet's 'Can Approve (1/0)' flag directly decides
+        if can_approve_flag is not None:
+            if not bool(can_approve_flag):
+                return False
+            if bool(can_approve_flag):
+                return True
+
+        # 2. Secondary Decision: Hierarchy Level in sheet
+        # Level 1 (TL), Level 2 (PM), Level 3 (HM) are authorized
+        if level in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3", "L1", "L2", "L3"):
+            return True
+
+        # Level 0, 0, or '-' are not authorized
+        if level in ("LEVEL 0", "0", "L0", "-"):
             return False
 
-        return True
+        # 3. Role fallback
+        if role in ("TL", "PM", "HM"):
+            return True
+
+        return False
 
     # Fallback configured PM GUID only if not identified as a non-management user
     u_id_clean = (user_id or "").lower().strip()

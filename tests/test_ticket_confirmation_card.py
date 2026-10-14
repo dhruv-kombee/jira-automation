@@ -221,13 +221,14 @@ class TestTicketConfirmationCard(unittest.TestCase):
         self.assertEqual(tl_member.get("role"), "TL")
 
         # Unauthorized roles
-        # Santosh is DEVELOPER (can_approve: False)
+        # Santosh is CLIENT / DEVELOPER (can_approve: False, Level 0 / -)
         dev_member = resolve_and_verify_approver("Santosh Yadav")
         self.assertIsNone(dev_member)
 
-        # Dhruv dobariya is UNASSIGNED / CLIENT (can_approve: False)
-        client_member = resolve_and_verify_approver("Dhruv dobariya")
-        self.assertIsNone(client_member)
+        # Dhruv dobariya is PM (Level 2, can_approve: True) in Member.xlsx
+        dhruv_member = resolve_and_verify_approver("Dhruv dobariya")
+        self.assertIsNotNone(dhruv_member)
+        self.assertEqual(dhruv_member.get("role"), "PM")
 
         # Non-existent member
         unknown_member = resolve_and_verify_approver("Random Person")
@@ -241,7 +242,7 @@ class TestTicketConfirmationCard(unittest.TestCase):
         """Verify that web modal checks role authority and displays warning for Client / Developer."""
         from src.routes.dashboard import render_assignee_dropdown_html
 
-        # 1. When default reviewer is Client (Dhruv dobariya) -> No Authority banner and disabled button
+        # 1. When default reviewer is Client / Developer (Santosh Yadav) -> No Authority banner and disabled button
         resp_client = render_assignee_dropdown_html(
             message_id="msg-101",
             summary="Bug summary",
@@ -249,7 +250,7 @@ class TestTicketConfirmationCard(unittest.TestCase):
             suggested_assignee="Santosh Yadav",
             members=[{"name": "Santosh Yadav", "specialty": "Dev"}],
             approver="PM Musaib Khan",
-            default_reviewer="Dhruv dobariya",
+            default_reviewer="Santosh Yadav",
         )
         html_client = resp_client.body.decode("utf-8")
         self.assertIn('name="assignee"', html_client)
@@ -280,23 +281,15 @@ class TestTicketConfirmationCard(unittest.TestCase):
 
         client = TestClient(app)
 
-        # 1. POST confirm-approval with Client reviewer -> 403 Forbidden
+        # 1. POST confirm-approval with unauthorized reviewer -> 403 Forbidden
         res_client = client.post(
             "/api/jira/confirm-approval/test-msg-flow",
-            data={"assignee": "Santosh Yadav", "reviewer": "Dhruv dobariya"}
+            data={"assignee": "Santosh Yadav", "reviewer": "Santosh Yadav"}
         )
         self.assertEqual(res_client.status_code, 403)
         self.assertIn("No Authority to Confirm", res_client.text)
 
-        # 2. POST confirm-approval with Developer reviewer -> 403 Forbidden
-        res_dev = client.post(
-            "/api/jira/confirm-approval/test-msg-flow",
-            data={"assignee": "Santosh Yadav", "reviewer": "Santosh Yadav"}
-        )
-        self.assertEqual(res_dev.status_code, 403)
-        self.assertIn("No Authority to Confirm", res_dev.text)
-
-        # 3. POST confirm-approval without reviewer -> 403 Forbidden
+        # 2. POST confirm-approval without reviewer -> 403 Forbidden
         res_none = client.post(
             "/api/jira/confirm-approval/test-msg-flow",
             data={"assignee": "Santosh Yadav"}
@@ -304,7 +297,7 @@ class TestTicketConfirmationCard(unittest.TestCase):
         self.assertEqual(res_none.status_code, 403)
         self.assertIn("No Authority to Confirm", res_none.text)
 
-        # 4. POST confirm-approval with authorized PM -> 200 OK
+        # 3. POST confirm-approval with authorized PM Musaib -> 200 OK
         with patch("src.services.message_service.execute_jira_ticket_creation", new=AsyncMock(return_value={"success": True, "key": "SCRUM-202"})) as mock_create:
             res_pm = client.post(
                 "/api/jira/confirm-approval/test-msg-flow",
@@ -314,10 +307,20 @@ class TestTicketConfirmationCard(unittest.TestCase):
             mock_create.assert_called_once()
             self.assertIn("PM Musaib", mock_create.call_args[1].get("approver_name"))
 
-        # 5. POST decline-approval with Client reviewer -> 403 Forbidden
+        # 4. POST confirm-approval with authorized PM Dhruv -> 200 OK
+        with patch("src.services.message_service.execute_jira_ticket_creation", new=AsyncMock(return_value={"success": True, "key": "SCRUM-203"})) as mock_create:
+            res_dhruv = client.post(
+                "/api/jira/confirm-approval/test-msg-flow",
+                data={"assignee": "Santosh Yadav", "reviewer": "Dhruv dobariya"}
+            )
+            self.assertEqual(res_dhruv.status_code, 200)
+            mock_create.assert_called_once()
+            self.assertIn("PM Dhruv", mock_create.call_args[1].get("approver_name"))
+
+        # 5. POST decline-approval with unauthorized reviewer -> 403 Forbidden
         res_dec_client = client.post(
             "/api/jira/decline-approval/test-msg-flow",
-            data={"reviewer": "Dhruv dobariya"}
+            data={"reviewer": "Santosh Yadav"}
         )
         self.assertEqual(res_dec_client.status_code, 403)
         self.assertIn("No Authority to Reject", res_dec_client.text)
@@ -332,10 +335,10 @@ class TestTicketConfirmationCard(unittest.TestCase):
             mock_decline.assert_called_once()
             self.assertIn("Ticket Creation Rejected", res_dec_pm.text)
 
-        # 3. Chat authorization check: Client and Developer reactions are blocked, only TL/PM/HM can approve
+        # 7. Chat authorization check: Santosh (Client/Dev, Level 0, Can Approve 0) is blocked, PM/TL/HM can approve
         from src.services.sender_service import is_user_authorized_approver
-        self.assertFalse(is_user_authorized_approver(display_name="Dhruv dobariya"))  # Client / Unassigned -> False
-        self.assertFalse(is_user_authorized_approver(display_name="Santosh Yadav"))   # Developer -> False
+        self.assertFalse(is_user_authorized_approver(display_name="Santosh Yadav"))   # Developer/Client -> False
+        self.assertTrue(is_user_authorized_approver(display_name="Dhruv dobariya"))  # PM (Level 2, Can Approve: 1) -> True
         self.assertTrue(is_user_authorized_approver(display_name="Musaib Khan"))     # PM -> True
         self.assertTrue(is_user_authorized_approver(display_name="Nishi Sharma"))    # TL -> True
         self.assertTrue(is_user_authorized_approver(display_name="Hemil Ghori"))     # HM -> True

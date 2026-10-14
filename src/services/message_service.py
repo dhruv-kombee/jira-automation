@@ -608,9 +608,9 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
                         feed_member_to_excel(
                             display_name=am_name,
                             user_id=am_id,
-                            role="UNASSIGNED",
-                            level="-",
-                            can_approve=False,
+                            role=None,
+                            level=None,
+                            can_approve=None,
                         )
                         logger.info(f"✨ Member added to Teams processed via eventDetail: {am_name or am_id}")
                     except Exception as ev_err:
@@ -622,6 +622,7 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
                 pass
 
     # Feed new members directly into shared Member.xlsx first (Single Source of Truth)
+    # Existing members strictly preserve their configured roles and permissions.
     sender_id = normalized["sender"].get("userId")
     sender_name = normalized["sender"].get("displayName")
     if sender_name and sender_name.strip() and sender_name.lower() != "unknown":
@@ -630,9 +631,9 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
             feed_member_to_excel(
                 display_name=sender_name,
                 user_id=sender_id,
-                role="UNASSIGNED",
-                level="-",
-                can_approve=False,
+                role=None,
+                level=None,
+                can_approve=None,
             )
         except Exception as reg_err:
             logger.debug(f"Excel member feed check: {reg_err}")

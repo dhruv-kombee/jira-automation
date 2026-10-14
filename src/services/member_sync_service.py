@@ -468,28 +468,41 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
             # FR-03: Anyone with an unknown role is treated as UNASSIGNED
             role = "UNASSIGNED"
 
-        level = str(get_col("level", "")).strip()
+        raw_level = str(get_col("level", "")).strip()
+        raw_approve = str(get_col("can_approve", "")).strip().lower()
 
-        # Infer or normalize hierarchy level and approval permissions
-        if role in ("PM", "TL", "HM"):
-            if not level or level in ("-", "none", "null"):
-                if role == "TL":
-                    level = "Level 1"
-                elif role == "PM":
-                    level = "Level 2"
-                elif role in ("HM", "HIGHER MANAGEMENT"):
-                    level = "Level 3"
-            specialty = str(get_col("specialty", "")).strip()
-            user_id = str(get_col("user_id", "")).strip()
-            raw_approve = str(get_col("can_approve", "1")).strip().lower()
-            can_approve = raw_approve not in ("0", "false", "no", "n")
+        # Normalize hierarchy level: sheet explicitly determines Level (Level 0, 1, 2, 3 or -)
+        if raw_level.lower() in ("0", "level 0", "l0"):
+            level = "Level 0"
+        elif raw_level.lower() in ("1", "level 1", "l1"):
+            level = "Level 1"
+        elif raw_level.lower() in ("2", "level 2", "l2"):
+            level = "Level 2"
+        elif raw_level.lower() in ("3", "level 3", "l3"):
+            level = "Level 3"
+        elif raw_level and raw_level.lower() not in ("-", "none", "null"):
+            level = raw_level
         else:
-            # DEVELOPER, CLIENT, and UNASSIGNED users are strictly non-management:
-            # They cannot approve/decline tickets and have level '-'
-            level = "-"
-            specialty = str(get_col("specialty", "")).strip()
-            user_id = str(get_col("user_id", "")).strip()
+            if role == "TL":
+                level = "Level 1"
+            elif role == "PM":
+                level = "Level 2"
+            elif role in ("HM", "HIGHER MANAGEMENT"):
+                level = "Level 3"
+            else:
+                level = "-"
+
+        specialty = str(get_col("specialty", "")).strip()
+        user_id = str(get_col("user_id", "")).strip()
+
+        # Approval authority: strictly decided by sheet's Can Approve (1/0) or Level
+        if raw_approve in ("1", "true", "yes", "y"):
+            can_approve = True
+        elif raw_approve in ("0", "false", "no", "n"):
             can_approve = False
+        else:
+            # If not explicitly specified, decide upon level (Level >= 1 -> True, Level 0 or '-' -> False)
+            can_approve = level in ("Level 1", "Level 2", "Level 3", "1", "2", "3") or role in ("PM", "TL", "HM")
 
         project = str(get_col("project", config.jira.project_key or "SCRUM")).strip()
         status = str(get_col("status", "Active")).strip()
@@ -977,6 +990,7 @@ def feed_member_to_excel(
     if not name_clean:
         return {"success": False, "reason": "Empty display name"}
 
+    explicit_can_approve = can_approve is not None
     user_id_clean = (user_id or "").strip()
     email_clean = (email or "").strip().lower()
 
@@ -1165,21 +1179,45 @@ def feed_member_to_excel(
         if specialty and (not ws.cell(row=row_idx, column=col_map["specialty"]).value or ws.cell(row=row_idx, column=col_map["specialty"]).value == "Software Engineer"):
             ws.cell(row=row_idx, column=col_map["specialty"]).value = specialty
             changed = True
-        if role and ws.cell(row=row_idx, column=col_map["role"]).value != assigned_role:
+
+        existing_role = str(ws.cell(row=row_idx, column=col_map["role"]).value or "").strip().upper()
+        if role and assigned_role and assigned_role != existing_role:
+            # Preserve existing valid roles: never overwrite an established role with UNASSIGNED
+            if not (assigned_role == "UNASSIGNED" and existing_role in ("TL", "PM", "HM", "DEVELOPER", "CLIENT", "ADMIN")):
+                ws.cell(row=row_idx, column=col_map["role"]).value = assigned_role
+                changed = True
+        elif not existing_role and assigned_role:
             ws.cell(row=row_idx, column=col_map["role"]).value = assigned_role
             changed = True
-        if "level" in col_map and level and ws.cell(row=row_idx, column=col_map["level"]).value != assigned_level:
+
+        existing_level = str(ws.cell(row=row_idx, column=col_map.get("level", 4)).value or "").strip()
+        if "level" in col_map and level and assigned_level and assigned_level != existing_level:
+            # Preserve existing valid hierarchy levels: never overwrite an established level with "-"
+            if not (assigned_level == "-" and existing_level in ("Level 1", "Level 2", "Level 3")):
+                ws.cell(row=row_idx, column=col_map["level"]).value = assigned_level
+                changed = True
+        elif "level" in col_map and not existing_level and assigned_level:
             ws.cell(row=row_idx, column=col_map["level"]).value = assigned_level
             changed = True
+
+        if "can_approve" in col_map and explicit_can_approve:
+            existing_can_approve = str(ws.cell(row=row_idx, column=col_map["can_approve"]).value or "").strip().lower()
+            target_approve_val = "1" if can_approve else "0"
+            if existing_can_approve != target_approve_val:
+                ws.cell(row=row_idx, column=col_map["can_approve"]).value = target_approve_val
+                changed = True
+
+        final_role = str(ws.cell(row=row_idx, column=col_map["role"]).value or assigned_role).strip().upper()
+        final_level = str(ws.cell(row=row_idx, column=col_map.get("level", 4)).value or assigned_level).strip()
 
         if changed:
             ws.cell(row=row_idx, column=col_map["updated"]).value = now_str
             save_workbook_to_all(wb)
             sync_db_from_excel()
-            logger.info(f"Updated member row in Member.xlsx: {name_clean}")
-            return {"success": True, "action": "updated", "name": name_clean, "role": assigned_role, "level": assigned_level}
+            logger.info(f"Updated member row in Member.xlsx: {name_clean} (role={final_role}, level={final_level})")
+            return {"success": True, "action": "updated", "name": name_clean, "role": final_role, "level": final_level}
 
-        return {"success": True, "action": "unchanged", "name": name_clean, "role": assigned_role, "level": assigned_level}
+        return {"success": True, "action": "unchanged", "name": name_clean, "role": final_role, "level": final_level}
 
     # Append new row to Member.xlsx
     new_row_idx = max_row + 1

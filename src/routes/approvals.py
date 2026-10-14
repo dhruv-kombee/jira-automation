@@ -294,16 +294,13 @@ def render_identity_gateway_html(
     except Exception:
         roster = []
 
-    # Strictly filter for authorized management approvers (TL, PM, HM) only!
+    # Strictly filter for authorized approvers based on Member.xlsx (SSOT)
     mgmt_members = []
     mgmt_names = []
+    from src.services.sender_service import is_user_authorized_approver
     for m in roster:
         m_name = re.sub(r"\s+", " ", m.get("display_name", "")).strip()
-        m_role = (m.get("role") or "").upper().strip()
-        m_lvl = str(m.get("level") or "").strip()
-        can_appr = m.get("can_approve")
-        is_mgmt = (m_role in ("TL", "PM", "HM") or m_lvl in ("Level 1", "Level 2", "Level 3", "1", "2", "3")) and bool(can_appr)
-        if is_mgmt and m_role not in ("DEVELOPER", "CLIENT", "UNASSIGNED"):
+        if is_user_authorized_approver(user_id=m.get("user_id"), display_name=m_name):
             mgmt_members.append(m)
             mgmt_names.append(m_name)
 
@@ -660,6 +657,7 @@ def render_assignee_dropdown_html(
 ) -> HTMLResponse:
     """Render a dedicated, responsive Assignee Selection & Role-Verified Approval modal dialog."""
     import re
+    from src.services.sender_service import is_user_authorized_approver
     if all_roster_members is None:
         from src.services.member_sync_service import get_all_members_from_excel
         try:
@@ -706,7 +704,7 @@ def render_assignee_dropdown_html(
         rm_lvl = rm.get("level", "").strip()
         lvl_str = f" - {rm_lvl}" if rm_lvl and rm_lvl != "-" else ""
         rm_id = rm.get("user_id") or rm_name
-        can_appr = bool(rm.get("can_approve")) and rm_role in ("TL", "PM", "HM")
+        can_appr = is_user_authorized_approver(user_id=rm.get("user_id"), display_name=rm_name)
         can_appr_attr = "1" if can_appr else "0"
 
         is_sel = (init_member and (rm.get("user_id") == init_member.get("user_id") or rm_name.lower() == re.sub(r"\s+", " ", init_member.get("display_name", "")).strip().lower()))
@@ -722,7 +720,7 @@ def render_assignee_dropdown_html(
     # Initial server-side state for banner, button, and reject link
     init_role = (init_member.get("role") if init_member else "").upper().strip()
     init_name = re.sub(r"\s+", " ", init_member.get("display_name", "")).strip() if init_member else "Reviewer"
-    init_can_approve = bool(init_member.get("can_approve")) and init_role in ("TL", "PM", "HM") if init_member else False
+    init_can_approve = is_user_authorized_approver(user_id=init_member.get("user_id"), display_name=init_name) if init_member else False
 
     issue_label = f"Issue #{issue_idx + 1}" if issue_idx is not None else "Jira Ticket"
     action_url = f"/api/jira/confirm-issue/{message_id}/{issue_idx}" if issue_idx is not None else f"/api/jira/confirm-approval/{message_id}"
