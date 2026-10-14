@@ -14,18 +14,24 @@ def store_message(normalized_message: Dict[str, Any]) -> Dict[str, Any]:
     db = get_db()
     cursor = db.cursor()
 
+    jira_key = normalized_message.get("jira_issue_key") or normalized_message.get("jiraIssueKey")
+    jira_url = normalized_message.get("jira_issue_url") or normalized_message.get("jiraIssueUrl")
+    conf_status = normalized_message.get("confirmation_status") or normalized_message.get("confirmationStatus")
+
     sql = """
         INSERT INTO messages (
             message_id, chat_id, team_id, channel_id,
             sender_user_id, sender_display_name,
             message_text, message_url,
             reply_to_id, attachments, reactions, ai_ticket,
+            jira_issue_key, jira_issue_url, confirmation_status,
             created_at, modified_at, received_at
         ) VALUES (
             ?, ?, ?, ?,
             ?, ?,
             ?, ?,
             ?, ?, ?, ?,
+            ?, ?, ?,
             ?, ?, datetime('now')
         )
     """
@@ -53,6 +59,9 @@ def store_message(normalized_message: Dict[str, Any]) -> Dict[str, Any]:
         attachments_json,
         reactions_json,
         ai_ticket_json,
+        jira_key,
+        jira_url,
+        conf_status,
         message_data.get("createdAt"),
         message_data.get("modifiedAt"),
     )
@@ -98,17 +107,20 @@ def store_message(normalized_message: Dict[str, Any]) -> Dict[str, Any]:
 
                 text_changed = bool(message_data.get("text") and message_data.get("text") != prev_text)
 
-                if reactions_changed or text_changed:
+                if reactions_changed or text_changed or jira_key:
                     cursor.execute(
                         """
                         UPDATE messages
                         SET reactions = COALESCE(?, reactions),
                             message_text = COALESCE(?, message_text),
                             ai_ticket = COALESCE(?, ai_ticket),
+                            jira_issue_key = COALESCE(?, jira_issue_key),
+                            jira_issue_url = COALESCE(?, jira_issue_url),
+                            confirmation_status = COALESCE(?, confirmation_status),
                             modified_at = COALESCE(?, modified_at)
                         WHERE message_id = ?
                         """,
-                        (reactions_json, message_data.get("text"), ai_ticket_json, message_data.get("modifiedAt"), msg_id),
+                        (reactions_json, message_data.get("text"), ai_ticket_json, jira_key, jira_url, conf_status, message_data.get("modifiedAt"), msg_id),
                     )
                     logger.info(
                         "Message updated with latest reactions/edits",

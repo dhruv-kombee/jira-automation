@@ -305,6 +305,21 @@ def normalize_message(
 
     inline_images = extract_inline_images(raw_body)
 
+    # Auto-detect Ticket Created notification messages from Teams bot/webhook
+    jira_key = None
+    jira_url = None
+    conf_status = None
+    combined_body = f"{text_content} {raw_body}".strip()
+    if any(phrase in combined_body.lower() for phrase in ("ticket created", "scrum link", "topic details:")):
+        import re
+        key_match = re.search(r'\b([A-Z][A-Z0-9]+-\d+)\b', combined_body)
+        if key_match:
+            jira_key = key_match.group(1)
+            conf_status = "APPROVED"
+            url_match = re.search(r'https?://[^\s<>"\']+/browse/' + re.escape(jira_key), combined_body)
+            if url_match:
+                jira_url = url_match.group(0)
+
     return {
         "messageId": graph_msg.get("id"),
         "chatId": chat_id,
@@ -324,7 +339,84 @@ def normalize_message(
         "attachments": attachments,
         "inlineImages": inline_images,
         "reactions": reactions,
+        "jira_issue_key": jira_key,
+        "jira_issue_url": jira_url,
+        "confirmation_status": conf_status,
     }
+
+
+def is_bot_or_ticket_created_message(
+    normalized_message: Dict[str, Any],
+    row: Optional[Any] = None,
+) -> bool:
+    """Check if a message is an automated bot notification, an Adaptive Card,
+    or an already confirmed/created ticket notification that should never trigger Jira ticket creation.
+    """
+    if not normalized_message:
+        return False
+
+    # 1. Existing Jira key or completed confirmation status
+    if normalized_message.get("jira_issue_key") or normalized_message.get("jiraIssueKey"):
+        return True
+    if row and row["jira_issue_key"]:
+        return True
+    if (normalized_message.get("confirmation_status") or "").upper() in ("APPROVED", "RESOLVED"):
+        return True
+    if row and (row["confirmation_status"] or "").upper() in ("APPROVED", "RESOLVED"):
+        return True
+
+    msg_obj = normalized_message.get("message") or {}
+    text = ((msg_obj.get("text") or "") if isinstance(msg_obj, dict) else "").strip()
+    if not text and row and row["message_text"]:
+        text = str(row["message_text"]).strip()
+
+    text_lower = text.lower()
+
+    # 2. Match text patterns characteristic of Ticket Created / Bot notification cards
+    if any(phrase in text_lower for phrase in (
+        "ticket created",
+        "scrum link",
+        "topic details:",
+        "ticket confirmation",
+        "approved & confirmed by",
+        "potential duplicate of",
+    )):
+        return True
+
+    # 3. Match Jira issue key pattern alongside ticket keywords
+    import re
+    if re.search(r'\b[A-Z][A-Z0-9]+-\d+\b', text) and any(kw in text_lower for kw in ("ticket", "issue", "scrum", "browse", "assigned")):
+        return True
+
+    # 4. Check for pure Adaptive Card payloads (sent by bot/webhook without human chat text)
+    attachments = normalized_message.get("attachments") or []
+    has_adaptive_card = any(
+        (att.get("contentType") or "").lower() == "application/vnd.microsoft.card.adaptive"
+        for att in attachments
+    )
+    if has_adaptive_card and not text:
+        return True
+
+    # 5. Check sender: bots, webhooks, or empty sender identity with no human text
+    sender = normalized_message.get("sender") or {}
+    sender_name = (sender.get("displayName") or (row["sender_display_name"] if row else "") or "").strip().lower()
+    sender_id = sender.get("userId") or (row["sender_user_id"] if row else None)
+
+    bot_names = ("webhook", "jira bot", "jira automation", "workflow bot", "power automate", "flow", "connector")
+    if any(b in sender_name for b in bot_names):
+        return True
+    if not sender_id and not sender_name and not text:
+        return True
+
+    # 6. Check if thread parent already has an active Jira ticket
+    reply_to_id = normalized_message.get("replyToId") or (row["reply_to_id"] if row else None)
+    if reply_to_id:
+        from src.repositories.message_repository import get_parent_message
+        parent_msg = get_parent_message(reply_to_id)
+        if parent_msg and parent_msg.get("jira_issue_key"):
+            return True
+
+    return False
 
 
 def print_message_summary(normalized: Dict[str, Any], sender_role: str) -> None:
@@ -414,10 +506,10 @@ async def _schedule_deferred_reaction_check(
             from src.database import get_db
             db = get_db()
             row = db.execute(
-                "SELECT confirmation_status, jira_issue_key FROM messages WHERE message_id = ?",
+                "SELECT confirmation_status, jira_issue_key, reply_to_id, sender_user_id, sender_display_name, message_text FROM messages WHERE message_id = ?",
                 (message_id,),
             ).fetchone()
-            if row and not row["jira_issue_key"]:
+            if not is_bot_or_ticket_created_message(normalized, row) and row and not row["jira_issue_key"]:
                 if not row["confirmation_status"] or row["confirmation_status"] in ("AWAITING_FINAL_CONFIRMATION", "DECLINED"):
                     await check_and_auto_create_jira_ticket(normalized, sender_role)
 
@@ -721,11 +813,13 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     from src.database import get_db
     db = get_db()
     row = db.execute(
-        "SELECT confirmation_status, jira_issue_key FROM messages WHERE message_id = ?",
+        "SELECT confirmation_status, jira_issue_key, reply_to_id, sender_user_id, sender_display_name, message_text FROM messages WHERE message_id = ?",
         (normalized.get("messageId"),),
     ).fetchone()
 
-    if row and not row["jira_issue_key"]:
+    if is_bot_or_ticket_created_message(normalized, row):
+        should_triage = False
+    elif row and not row["jira_issue_key"]:
         if not row["confirmation_status"]:
             if (change_type != "created" and result.get("reactions_changed", False)) or has_approval_rx:
                 should_triage = True
@@ -779,7 +873,7 @@ async def execute_jira_ticket_creation(
             pm_info = get_active_pm_from_excel()
             approver_name = f"PM {pm_info.get('name', 'Project Manager')}"
         from src.database import get_db
-        from src.services.jira_service import create_jira_issue, upload_jira_attachment
+        from src.services.jira_service import create_jira_issue, upload_jira_attachment, add_jira_comment
         from src.services.teams_notifier import send_ticket_created_notification, get_current_timestamp_str
 
         db = get_db()
@@ -869,7 +963,14 @@ async def execute_jira_ticket_creation(
                 }
             issues_to_process = pending_issues
 
-        reporter = row["sender_display_name"] or "Client"
+        reporter = row["sender_display_name"]
+        if not reporter and row["sender_user_id"]:
+            from src.services.member_sync_service import get_member_by_id_or_name
+            m = get_member_by_id_or_name(user_id=row["sender_user_id"])
+            if m and m.get("display_name"):
+                reporter = m["display_name"]
+        if not reporter:
+            reporter = "Client"
         created_keys = []
         created_urls = []
         created_results = []
@@ -892,6 +993,8 @@ async def execute_jira_ticket_creation(
             ticket_data.setdefault("reporter_name", reporter)
             ticket_data.setdefault("reporter_role", identify_sender_role(row["sender_user_id"], row["sender_display_name"]))
             ticket_data.setdefault("raw_message", row["message_text"] or "")
+            if approver_name:
+                ticket_data["approved_by"] = approver_name
 
             res = await create_jira_issue(
                 summary=item_summary,
@@ -902,6 +1005,7 @@ async def execute_jira_ticket_creation(
                 message_id=message_id,
                 assignee_name=item_assignee,
                 ticket_data=ticket_data,
+                reporter_name=reporter,
             )
 
             if res.get("success"):
@@ -922,6 +1026,17 @@ async def execute_jira_ticket_creation(
                     extra={"event": "PM_CONFIRMATION_JIRA_CREATED", "issueKey": k, "messageId": message_id},
                 )
 
+                # Post audit comment on the Jira ticket
+                if approver_name:
+                    try:
+                        rep_role = ticket_data.get("reporter_role", "CLIENT")
+                        await add_jira_comment(
+                            k,
+                            f"📋 Ticket authorized and approved for creation via Microsoft Teams by {approver_name}. Original reporter: {reporter} ({rep_role}).",
+                        )
+                    except Exception as c_err:
+                        logger.debug(f"Audit comment skipped ({c_err})")
+
                 # Upload cached attachments
                 if message_id in _message_attachment_cache:
                     for att in _message_attachment_cache[message_id]:
@@ -936,7 +1051,7 @@ async def execute_jira_ticket_creation(
                             logger.warning(f"Could not upload attachment to Jira {k}: {up_err}")
 
                 # Send Jira ticket created card to Teams
-                await send_ticket_created_notification(
+                notify_res = await send_ticket_created_notification(
                     ticket_key=k,
                     ticket_url=u,
                     summary=res.get("summary") or item_summary,
@@ -954,6 +1069,16 @@ async def execute_jira_ticket_creation(
                     evidence=item_evidence,
                     status=res.get("status") or item.get("jira_status") or "To Do",
                 )
+                if isinstance(notify_res, dict):
+                    created_notif_id = (notify_res.get("result") or {}).get("id") if isinstance(notify_res.get("result"), dict) else None
+                    if created_notif_id:
+                        try:
+                            db.execute(
+                                "UPDATE messages SET jira_issue_key = ?, jira_issue_url = ?, confirmation_status = 'APPROVED' WHERE message_id = ?",
+                                (k, u, str(created_notif_id)),
+                            )
+                        except Exception:
+                            pass
 
         if created_keys:
             prev_keys = [k.strip() for k in (row["jira_issue_key"] or "").split(",") if k.strip()]
@@ -1197,6 +1322,23 @@ async def check_and_auto_create_jira_ticket(
         # Already created in Jira
         return {"key": row["jira_issue_key"], "url": row["jira_issue_url"], "already_existed": True}
 
+    if is_bot_or_ticket_created_message(normalized_message, row):
+        logger.info(
+            f"Message {msg_id} is a bot or ticket-created notification card; ignoring reaction to prevent duplicate tickets.",
+            extra={"event": "TICKET_NOTIFICATION_REACTION_IGNORED", "messageId": msg_id},
+        )
+        existing_k = row["jira_issue_key"] if row and row["jira_issue_key"] else None
+        if not existing_k:
+            reply_to_id = normalized_message.get("replyToId") or (row["reply_to_id"] if row else None)
+            if reply_to_id:
+                from src.repositories.message_repository import get_parent_message
+                p_msg = get_parent_message(reply_to_id)
+                if p_msg and p_msg.get("jira_issue_key"):
+                    existing_k = p_msg["jira_issue_key"]
+        if existing_k:
+            return {"key": existing_k, "already_existed": True}
+        return None
+
     confirmation_status = row["confirmation_status"] or ""
 
     # Determine approver name from reactions dynamically using Member.xlsx
@@ -1261,6 +1403,9 @@ async def check_and_auto_create_jira_ticket(
             row = pending_row
             target_msg_id = pending_row["message_id"]
             confirmation_status = pending_row["confirmation_status"] or ""
+        else:
+            logger.debug(f"Card reaction on {msg_id} could not be mapped to any pending confirmation; ignoring.")
+            return None
 
     # =========================================================================
     # STEP 2: Final confirmation resolution (if already awaiting confirmation)
@@ -1310,14 +1455,24 @@ async def check_and_auto_create_jira_ticket(
     reporter_name = normalized_message.get("sender", {}).get("displayName") or row["sender_display_name"] or "Client"
 
     # Context enrichment: If message is a reply in a thread, pull parent message context
-    reply_to_id = normalized_message.get("replyToId") or row["reply_to_id"]
+    reply_to_id = normalized_message.get("replyToId") or (row["reply_to_id"] if row else None)
     if reply_to_id:
         from src.repositories.message_repository import get_parent_message
         parent_msg = get_parent_message(reply_to_id)
+        if parent_msg and parent_msg.get("jira_issue_key"):
+            logger.info(
+                f"Thread parent {reply_to_id} already has Jira ticket {parent_msg['jira_issue_key']}; skipping creation.",
+                extra={"event": "THREAD_PARENT_ALREADY_HAS_TICKET", "parentMessageId": reply_to_id, "ticket": parent_msg["jira_issue_key"]},
+            )
+            return {"key": parent_msg["jira_issue_key"], "already_existed": True}
         if parent_msg and parent_msg.get("message_text"):
             raw_text = f"[In reply to thread: \"{parent_msg.get('message_text')}\"]\n\n{raw_text}"
             if msg_id not in _message_attachment_cache and reply_to_id in _message_attachment_cache:
                 _message_attachment_cache[msg_id] = _message_attachment_cache[reply_to_id]
+
+    if not is_client_message or not raw_text.strip():
+        logger.debug(f"Message {msg_id} is not a client message or has empty text; skipping Step 1 triage.")
+        return None
 
     if not ai_ticket or not ai_ticket.get("summary"):
         from src.services.ai_service import extract_jira_ticket
@@ -1509,10 +1664,10 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
             from src.database import get_db
             db = get_db()
             m_row = db.execute(
-                "SELECT confirmation_status, jira_issue_key FROM messages WHERE message_id = ?",
+                "SELECT confirmation_status, jira_issue_key, reply_to_id, sender_user_id, sender_display_name, message_text FROM messages WHERE message_id = ?",
                 (msg_id,),
             ).fetchone()
-            if m_row and not m_row["jira_issue_key"]:
+            if not is_bot_or_ticket_created_message(normalized, m_row) and m_row and not m_row["jira_issue_key"]:
                 if not m_row["confirmation_status"]:
                     logger.info(
                         f"Sync detected untriaged message {msg_id} with PM reaction; triggering triage",

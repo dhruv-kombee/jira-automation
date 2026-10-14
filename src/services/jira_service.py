@@ -50,6 +50,7 @@ def build_jira_adf(
     suggested_assignee: Optional[str] = None,
     raw_message: Optional[str] = None,
     fallback_text: Optional[str] = None,
+    approved_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Construct an Atlassian Document Format (ADF) document for Jira Cloud API v3.
     Produces a professional defect/task ticket with an info callout panel, level 3 headings,
@@ -66,11 +67,21 @@ def build_jira_adf(
     panel_text_elements = [
         {"type": "text", "text": "Reporter: ", "marks": [{"type": "strong"}]},
         {"type": "text", "text": f"{rep_name} ({rep_role})\n"},
+    ]
+
+    if approved_by:
+        clean_approver = strip_markdown_asterisks(approved_by)
+        panel_text_elements.extend([
+            {"type": "text", "text": "Approved By: ", "marks": [{"type": "strong"}]},
+            {"type": "text", "text": f"{clean_approver}\n"},
+        ])
+
+    panel_text_elements.extend([
         {"type": "text", "text": "Module: ", "marks": [{"type": "strong"}]},
         {"type": "text", "text": f"{mod_name}\n"},
         {"type": "text", "text": "Priority: ", "marks": [{"type": "strong"}]},
         {"type": "text", "text": f"{safe_priority}\n"},
-    ]
+    ])
 
     if suggested_assignee:
         clean_assignee = strip_markdown_asterisks(suggested_assignee)
@@ -410,6 +421,9 @@ async def resolve_jira_assignee(name_or_query: Optional[str], project_key: Optio
     return None
 
 
+resolve_jira_user = resolve_jira_assignee
+
+
 async def test_jira_connection() -> Dict[str, Any]:
     """Test Jira credentials and project accessibility."""
     if not config.jira.is_configured:
@@ -508,10 +522,11 @@ async def create_jira_issue(
     message_id: Optional[str] = None,
     assignee_name: Optional[str] = None,
     ticket_data: Optional[Dict[str, Any]] = None,
+    reporter_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create an issue in Jira Cloud from extracted ticket data.
     Uses Jira API v3 with Atlassian Document Format (ADF) to render clean,
-    professional tickets without raw asterisks, and resolves developer assignees.
+    professional tickets without raw asterisks, and resolves developer assignees and reporters.
     """
     if not config.jira.is_configured:
         return {
@@ -545,7 +560,7 @@ async def create_jira_issue(
         adf_description = build_jira_adf(
             summary=clean_summary,
             priority=safe_priority,
-            reporter_name=ticket_data.get("reporter_name") or ticket_data.get("sender_name"),
+            reporter_name=ticket_data.get("reporter_name") or ticket_data.get("sender_name") or reporter_name,
             reporter_role=ticket_data.get("reporter_role") or ticket_data.get("sender_role"),
             module=ticket_data.get("affected_module"),
             observed_behavior=ticket_data.get("observed_behavior"),
@@ -556,6 +571,7 @@ async def create_jira_issue(
             suggested_assignee=assignee_name or ticket_data.get("suggested_assignee"),
             raw_message=ticket_data.get("raw_message") or ticket_data.get("message_text"),
             fallback_text=description or ticket_data.get("description"),
+            approved_by=ticket_data.get("approved_by"),
         )
     else:
         adf_description = text_to_adf(description or "Issue reported from Microsoft Teams")
@@ -568,6 +584,20 @@ async def create_jira_issue(
             resolved_account_id = await resolve_jira_assignee(target_assignee, project_key)
         except Exception as ass_err:
             logger.debug(f"Assignee resolution skipped ({ass_err})")
+
+    # Resolve reporter accountId if provided (dynamically sets native Jira issue reporter)
+    target_reporter = (
+        reporter_name
+        or (ticket_data.get("reporter_name") if ticket_data else None)
+        or (ticket_data.get("sender_name") if ticket_data else None)
+        or (ticket_data.get("reporter") if ticket_data else None)
+    )
+    resolved_reporter_id = None
+    if target_reporter:
+        try:
+            resolved_reporter_id = await resolve_jira_assignee(target_reporter, project_key)
+        except Exception as rep_err:
+            logger.debug(f"Reporter resolution skipped ({rep_err})")
 
     # Primary: Jira Cloud REST API v3 (Native ADF document support)
     v3_payload = {
@@ -582,6 +612,8 @@ async def create_jira_issue(
     }
     if resolved_account_id:
         v3_payload["fields"]["assignee"] = {"accountId": resolved_account_id}
+    if resolved_reporter_id:
+        v3_payload["fields"]["reporter"] = {"accountId": resolved_reporter_id}
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         res = None
@@ -619,16 +651,34 @@ async def create_jira_issue(
                     headers=headers,
                 )
 
-        # If assignee rejected (e.g. user cannot be assigned or permission issue), retry without assignee
-        if res.status_code == 400 and "assignee" in res.text.lower() and "assignee" in v3_payload["fields"]:
-            logger.warning("Assignee assignment rejected by Jira, retrying as unassigned...")
-            del v3_payload["fields"]["assignee"]
-            res = await client.post(
-                f"{base_url}/rest/api/3/issue",
-                json=v3_payload,
-                auth=auth,
-                headers=headers,
-            )
+        # Retry logic if Jira rejects assignee or reporter fields (HTTP 400)
+        for _ in range(2):
+            if res.status_code == 400:
+                resp_lower = res.text.lower()
+                modified = False
+                if "reporter" in resp_lower and "reporter" in v3_payload.get("fields", {}):
+                    logger.warning(
+                        f"Reporter '{target_reporter}' rejected by Jira, retrying with default token reporter..."
+                    )
+                    del v3_payload["fields"]["reporter"]
+                    modified = True
+                if "assignee" in resp_lower and "assignee" in v3_payload.get("fields", {}):
+                    logger.warning(
+                        f"Assignee '{target_assignee}' rejected by Jira, retrying as unassigned..."
+                    )
+                    del v3_payload["fields"]["assignee"]
+                    modified = True
+                if modified:
+                    res = await client.post(
+                        f"{base_url}/rest/api/3/issue",
+                        json=v3_payload,
+                        auth=auth,
+                        headers=headers,
+                    )
+                else:
+                    break
+            else:
+                break
 
         # Fallback to API v2 if API v3 is not supported on host
         if res.status_code == 404:
@@ -644,6 +694,10 @@ async def create_jira_issue(
                     "labels": sanitized_labels,
                 }
             }
+            if resolved_account_id:
+                v2_payload["fields"]["assignee"] = {"accountId": resolved_account_id}
+            if resolved_reporter_id:
+                v2_payload["fields"]["reporter"] = {"accountId": resolved_reporter_id}
             res = await client.post(
                 f"{base_url}/rest/api/2/issue",
                 json=v2_payload,
@@ -738,3 +792,37 @@ async def upload_jira_attachment(
     except Exception as err:
         logger.error(f"Error uploading attachment to Jira: {err}")
         return {"success": False, "error": str(err)}
+
+
+async def add_jira_comment(issue_key: str, comment_text: str) -> bool:
+    """Add an audit or informational comment to an existing Jira issue."""
+    if not config.jira.is_configured or not issue_key or not comment_text:
+        return False
+    base_url = config.jira.base_url
+    auth = _get_auth()
+    headers = _get_headers()
+    payload = {
+        "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": comment_text}],
+                }
+            ],
+        }
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.post(
+                f"{base_url}/rest/api/3/issue/{issue_key}/comment",
+                json=payload,
+                auth=auth,
+                headers=headers,
+            )
+            return res.status_code in (200, 201)
+    except Exception as err:
+        logger.warning(f"Could not post Jira comment to {issue_key}: {err}")
+        return False
+
