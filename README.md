@@ -432,7 +432,7 @@ Open `.env` in your editor and configure the following variables:
 | `GEMINI_API_KEY_2` | Optional | Secondary Failover Key (active on 429) | `AIzaSyB2...` |
 | `GEMINI_API_KEY_3` | Optional | Tertiary Failover Key (emergency backup) | `AIzaSyC3...` |
 | `GEMINI_API_KEY` | Optional | Single fallback key or comma-separated list | `AIzaSy...` |
-| `GEMINI_MODEL` | Optional | Gemini Model version (Default: `gemini-3.5-flash-lite`) | `gemini-3.5-flash-lite` |
+| `GEMINI_MODEL` | Optional | Gemini Model version (Default: `gemini-3.1-flash-lite`) | `gemini-3.1-flash-lite` |
 
 #### Atlassian Jira Cloud Integration
 | Variable | Required | Description | Example |

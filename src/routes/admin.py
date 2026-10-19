@@ -103,7 +103,7 @@ class TestJiraRequest(BaseModel):
 
 class TestGeminiRequest(BaseModel):
     api_key: str
-    model: Optional[str] = "gemini-3.5-flash-lite"
+    model: Optional[str] = "gemini-3.1-flash-lite"
 
 
 class TestTeamsRequest(BaseModel):

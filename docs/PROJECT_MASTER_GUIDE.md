@@ -220,7 +220,7 @@ DATABASE_PATH=C:/Users/Admin/.jira_automation/messages.db     # SQLite database 
 # ============================================
 GEMINI_API_KEY_1=AQ.Ab8RN6JW...                               # Primary Gemini API key
 GEMINI_API_KEY_2=                                             # Failover key (if key 1 throttled)
-GEMINI_MODEL=gemini-3.5-flash-lite                            # Low-latency multimodal model
+GEMINI_MODEL=gemini-3.1-flash-lite                            # Low-latency multimodal model
 
 # ============================================
 # Atlassian Jira Cloud Integration

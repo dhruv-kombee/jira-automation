@@ -177,12 +177,12 @@ async def test_live_testers_mocked():
     with patch("src.routes.admin.test_gemini_credentials", new_callable=AsyncMock) as mock_gemini:
         mock_gemini.return_value = {
             "success": True,
-            "model": "gemini-3.5-flash-lite",
+            "model": "gemini-3.1-flash-lite",
             "message": "Gemini API responding",
         }
         res = client.post(
             "/api/admin/test/gemini",
-            json={"api_key": "test_key", "model": "gemini-3.5-flash-lite"},
+            json={"api_key": "test_key", "model": "gemini-3.1-flash-lite"},
         )
         assert res.status_code == 200
         assert res.json()["success"] is True
