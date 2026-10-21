@@ -803,6 +803,7 @@ class TestNoReaction:
                          reactions=[DEV_REACTION("🎟️")])
 
         with patch("src.config.JiraConfig.is_configured", new_callable=PropertyMock, return_value=True), \
+             patch("src.services.teams_notifier.send_pending_approval_notification", AsyncMock()), \
              patch.object(pytest.importorskip("src.config").config.roles, "allow_self_approval", False):
             result = await check_and_auto_create_jira_ticket(msg, "CLIENT")
             assert result is None
