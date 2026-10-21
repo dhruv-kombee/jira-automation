@@ -205,7 +205,7 @@ async def test_jira_credentials(
         return {"success": False, "error": f"Connection error: {str(err)}"}
 
 
-async def test_gemini_credentials(api_key: str, model: str = "gemini-3.5-flash-lite") -> Dict[str, Any]:
+async def test_gemini_credentials(api_key: str, model: str = "gemini-3.1-flash-lite") -> Dict[str, Any]:
     """Test a Google Gemini API key live."""
     if not api_key:
         return {"success": False, "error": "No Gemini API key provided."}

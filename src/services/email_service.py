@@ -149,9 +149,6 @@ def build_pm_followup_email_html(
                     <a href="{base_dash}/api/jira/confirm-issue/{message_id}" style="background-color: #16a34a; color: #ffffff; text-decoration: none; padding: 10px 18px; border-radius: 6px; font-size: 13px; font-weight: 600; display: inline-block; margin-right: 10px;">🎟️ Approve All in Jira</a>
                     <a href="{base_dash}/api/jira/decline-issue/{message_id}" style="background-color: #ef4444; color: #ffffff; text-decoration: none; padding: 10px 18px; border-radius: 6px; font-size: 13px; font-weight: 600; display: inline-block;">❌ Decline</a>
                 </div>
-                <div style="margin-top: 14px;">
-                    <a href="{base_dash}" style="color: #2563eb; font-size: 12px; text-decoration: none;">View Live Operations Dashboard &rarr;</a>
-                </div>
             </div>
 
         </div>

@@ -51,6 +51,167 @@ MEMBER_FILE_PATH = get_primary_excel_path()
 _cached_members: Optional[List[Dict[str, Any]]] = None
 _cached_mtime: float = 0.0
 
+_cached_settings: Optional[Dict[str, Any]] = None
+_cached_settings_mtime: float = 0.0
+
+DEFAULT_SYSTEM_SETTINGS: Dict[str, Any] = {
+    # SLA Timeline
+    "STAGE1_TL_MINUTES": 10,
+    "STAGE1_ENABLED": True,
+    "STAGE2_PM_MINUTES": 20,
+    "STAGE2_ENABLED": True,
+    "STAGE3_HM_EMAIL_MINUTES": 20,
+    "STAGE3_ENABLED": True,
+    "BACKLOG_CUTOFF_HOURS": 24,
+    "REMINDER_CHECK_INTERVAL": 30,
+
+    # Business Hours
+    "BUSINESS_HOURS_ONLY": False,
+    "BUSINESS_START_TIME": "09:00",
+    "BUSINESS_END_TIME": "19:00",
+    "EXCLUDE_WEEKENDS": True,
+    "TIMEZONE": "Asia/Kolkata",
+
+    # Jira Defaults
+    "DEFAULT_JIRA_PROJECT": "SCRUM",
+    "DEFAULT_ISSUE_TYPE": "Bug",
+    "DEFAULT_PRIORITY": "Medium",
+    "AUTO_APPROVE_FOR_TL_PM": False,
+    "REQUIRE_APPROVAL_REACTIONS": ["🎟️", "🎫", "👍", "like"],
+    "DISAPPROVAL_REACTIONS": ["❌", "decline", "thumbs_down"],
+
+    # AI & Triggers
+    "TRIGGER_KEYWORDS": ["#issue", "#bug", "#task", "bug", "issue", "error", "fail", "broken", "crash", "not working", "500 error"],
+    "IGNORE_KEYWORDS": ["fyi", "resolved", "fixed", "false alarm", "testing", "disregard"],
+}
+
+SETTINGS_METADATA_ROWS = [
+    # Category, Setting Name, Setting Key, Value, Unit/Options, Description
+    ("SLA Timeline", "Stage 1 TL Follow-up (Minutes)", "STAGE1_TL_MINUTES", 10, "Minutes (e.g. 10)", "Minutes of silence before tagging Team Lead on Teams"),
+    ("SLA Timeline", "Enable Stage 1 Follow-up", "STAGE1_ENABLED", True, "TRUE / FALSE", "Enable or disable Stage 1 Team Lead follow-up"),
+    ("SLA Timeline", "Stage 2 PM Escalation (Minutes)", "STAGE2_PM_MINUTES", 20, "Minutes (e.g. 20)", "Minutes of silence before escalating to Project Manager on Teams"),
+    ("SLA Timeline", "Enable Stage 2 Escalation", "STAGE2_ENABLED", True, "TRUE / FALSE", "Enable or disable Stage 2 PM escalation card"),
+    ("SLA Timeline", "Stage 3 HM Email Alert (Minutes)", "STAGE3_HM_EMAIL_MINUTES", 20, "Minutes (e.g. 20)", "Minutes of silence before sending urgent alert email to Higher Management"),
+    ("SLA Timeline", "Enable Stage 3 Email Alert", "STAGE3_ENABLED", True, "TRUE / FALSE", "Enable or disable Stage 3 Higher Management email alerts"),
+    ("SLA Timeline", "Ignore Ancient Backlog (Hours)", "BACKLOG_CUTOFF_HOURS", 24, "Hours (e.g. 24)", "Suppress reminders for unaddressed messages older than X hours"),
+    ("SLA Timeline", "SLA Monitor Check Interval (Sec)", "REMINDER_CHECK_INTERVAL", 30, "Seconds (e.g. 30)", "How frequently the background engine checks message SLAs"),
+
+    ("Business Hours", "Business Hours Only", "BUSINESS_HOURS_ONLY", False, "TRUE / FALSE", "If TRUE, reminders are only dispatched during working hours"),
+    ("Business Hours", "Workday Start Time", "BUSINESS_START_TIME", "09:00", "HH:MM (24-hour)", "Start of business hours (e.g. 09:00 AM)"),
+    ("Business Hours", "Workday End Time", "BUSINESS_END_TIME", "19:00", "HH:MM (24-hour)", "End of business hours (e.g. 07:00 PM)"),
+    ("Business Hours", "Exclude Weekends", "EXCLUDE_WEEKENDS", True, "TRUE / FALSE", "Pause follow-up reminders on Saturday and Sunday"),
+    ("Business Hours", "Timezone", "TIMEZONE", "Asia/Kolkata", "Timezone name", "Timezone for business hours evaluation"),
+
+    ("Jira Defaults", "Default Jira Project Key", "DEFAULT_JIRA_PROJECT", "SCRUM", "Project Key", "Fallback Jira Project Key for ticket creation"),
+    ("Jira Defaults", "Default Issue Type", "DEFAULT_ISSUE_TYPE", "Bug", "Bug / Task / Story", "Default Jira issue type"),
+    ("Jira Defaults", "Default Priority", "DEFAULT_PRIORITY", "Medium", "Lowest / Low / Medium / High / Highest", "Default Jira ticket priority"),
+    ("Jira Defaults", "Auto-Approve on TL/PM Reaction", "AUTO_APPROVE_FOR_TL_PM", False, "TRUE / FALSE", "If TRUE, reaction directly creates ticket without confirmation card"),
+    ("Jira Defaults", "Approval Reactions", "REQUIRE_APPROVAL_REACTIONS", "🎟️, 🎫, 👍, like", "Comma-separated", "Reaction emojis that authorize ticket confirmation"),
+    ("Jira Defaults", "Disapproval Reactions", "DISAPPROVAL_REACTIONS", "❌, decline, thumbs_down", "Comma-separated", "Reaction emojis that reject ticket creation"),
+
+    ("AI & Triggers", "Issue Trigger Keywords", "TRIGGER_KEYWORDS", "#issue, #bug, #task, bug, issue, error, fail, broken, crash, not working, 500 error", "Comma-separated", "Keywords that cause incoming client messages to be treated as bugs/tasks"),
+    ("AI & Triggers", "Ignored Keywords", "IGNORE_KEYWORDS", "fyi, resolved, fixed, false alarm, testing, disregard", "Comma-separated", "Keywords that suppress issue creation"),
+]
+
+
+def ensure_sla_settings_sheet_in_workbook(wb: openpyxl.Workbook) -> openpyxl.worksheet.worksheet.Worksheet:
+    """Ensure the 'SLA & Settings' sheet exists with standard layout, styling, and options."""
+    for s_name in wb.sheetnames:
+        if any(term in s_name.lower() for term in ("sla", "setting", "rule", "policy")):
+            return wb[s_name]
+
+    ws = wb.create_sheet("SLA & Settings")
+    ws.views.sheetView[0].showGridLines = True
+
+    # Title Banner
+    ws.merge_cells("A1:F1")
+    ws["A1"] = "Jira Automation — System SLA Timelines, Business Rules & Operational Policies"
+    ws["A1"].font = Font(name="Segoe UI", size=13, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 36
+
+    ws.merge_cells("A2:F2")
+    ws["A2"] = "Single Source of Truth for SLA Timing, Escalation Hierarchy, Working Hours & Jira Defaults (Auto-synced)"
+    ws["A2"].font = Font(name="Segoe UI", size=9.5, italic=True, color="94A3B8")
+    ws["A2"].fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[2].height = 20
+
+    # Headers
+    headers = ["Category", "Setting Name", "Setting Key", "Value", "Unit / Options", "Description & Guidance"]
+    ws.row_dimensions[3].height = 28
+    for col_idx, h in enumerate(headers, start=1):
+        cell = ws.cell(row=3, column=col_idx, value=h)
+        cell.font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+        cell.alignment = Alignment(horizontal="left" if col_idx != 4 else "center", vertical="center")
+
+    thin_border = Border(
+        left=Side(style="thin", color="E2E8F0"),
+        right=Side(style="thin", color="E2E8F0"),
+        top=Side(style="thin", color="E2E8F0"),
+        bottom=Side(style="thin", color="E2E8F0"),
+    )
+
+    from openpyxl.worksheet.datavalidation import DataValidation
+    dv_bool = DataValidation(type="list", formula1='"TRUE,FALSE"', allow_blank=False)
+    ws.add_data_validation(dv_bool)
+
+    cat_colors = {
+        "SLA Timeline": ("EEF2FF", "312E81"),
+        "Business Hours": ("ECFDF5", "065F46"),
+        "Jira Defaults": ("F0FDF4", "166534"),
+        "AI & Triggers": ("FAF5FF", "6B21A8"),
+    }
+
+    for idx, (cat, name, key, val, unit, desc) in enumerate(SETTINGS_METADATA_ROWS, start=4):
+        ws.row_dimensions[idx].height = 24
+        is_even = idx % 2 == 0
+        bg_color = "F8FAFC" if is_even else "FFFFFF"
+
+        ws.cell(row=idx, column=1, value=cat)
+        ws.cell(row=idx, column=2, value=name)
+        ws.cell(row=idx, column=3, value=key)
+        val_cell = ws.cell(row=idx, column=4, value=val)
+        ws.cell(row=idx, column=5, value=unit)
+        ws.cell(row=idx, column=6, value=desc)
+
+        if isinstance(val, bool):
+            dv_bool.add(val_cell)
+
+        c_bg, c_fg = cat_colors.get(cat, ("F1F5F9", "0F172A"))
+        for c in range(1, 7):
+            cell = ws.cell(row=idx, column=c)
+            cell.border = thin_border
+            cell.font = Font(name="Segoe UI", size=9.5)
+            if c == 1:
+                cell.fill = PatternFill(start_color=c_bg, end_color=c_bg, fill_type="solid")
+                cell.font = Font(name="Segoe UI", size=9.5, bold=True, color=c_fg)
+            elif c == 3:
+                cell.font = Font(name="Consolas", size=9.5, bold=True, color="0F172A")
+                cell.fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
+            elif c == 4:
+                cell.font = Font(name="Segoe UI", size=10, bold=True, color="0284C7" if isinstance(val, (int, float)) else ("16A34A" if val is True else ("DC2626" if val is False else "0F172A")))
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.fill = PatternFill(start_color="EFF6FF" if is_even else "F0F9FF", end_color="EFF6FF" if is_even else "F0F9FF", fill_type="solid")
+            elif c == 5:
+                cell.font = Font(name="Segoe UI", size=9, italic=True, color="64748B")
+                cell.fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
+            else:
+                cell.fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
+
+    for col in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            val_s = str(cell.value or "")
+            if len(val_s) > max_len and cell.row > 2:
+                max_len = len(val_s)
+        ws.column_dimensions[col_letter].width = max(max_len + 4, 14)
+
+    return ws
+
 
 def get_onedrive_download_url(share_url: str) -> str:
     """Transform a OneDrive sharing URL into a direct binary download URL."""
@@ -80,11 +241,25 @@ def download_onedrive_workbook(share_url: Optional[str] = None) -> Optional[byte
     return None
 
 
-def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
+_pending_excel_flushes: Optional[bytes] = None
+
+
+def save_workbook_to_all(wb: openpyxl.Workbook, custom_path: Optional[Path] = None) -> bytes:
     """Save workbook to both the live OneDrive sync path and local data folder."""
     buffer = io.BytesIO()
     wb.save(buffer)
     xlsx_bytes = buffer.getvalue()
+
+    global _pending_excel_flushes
+
+    # 0. Optional custom output path (e.g., during testing or export)
+    if custom_path:
+        try:
+            custom_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(custom_path, "wb") as f:
+                f.write(xlsx_bytes)
+        except Exception as err:
+            logger.warning(f"Could not write to custom path {custom_path}: {err}")
 
     # 1. Primary OneDrive folder (instantly syncs to cloud & Teams)
     if ONEDRIVE_MEMBER_PATH.parent.exists():
@@ -92,9 +267,11 @@ def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
             with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
                 f.write(xlsx_bytes)
             logger.info(f"Saved Member.xlsx to OneDrive sync folder: {ONEDRIVE_MEMBER_PATH}")
+            _pending_excel_flushes = None
         except PermissionError:
+            _pending_excel_flushes = xlsx_bytes
             logger.warning(
-                f"Notice: Member.xlsx is currently open in Microsoft Excel desktop. Changes saved to local cache; please close Excel or click Save to update OneDrive file: {ONEDRIVE_MEMBER_PATH}"
+                f"Notice: Member.xlsx is currently open in Microsoft Excel desktop. Changes saved to local cache; queued for OneDrive sync when Excel file lock is released: {ONEDRIVE_MEMBER_PATH}"
             )
         except Exception as err:
             logger.warning(f"Could not write to OneDrive path {ONEDRIVE_MEMBER_PATH}: {err}")
@@ -108,16 +285,73 @@ def save_workbook_to_all(wb: openpyxl.Workbook) -> bytes:
         logger.warning(f"Could not write to local path {LOCAL_MEMBER_PATH}: {err}")
 
     # Invalidate cache so next read uses fresh file
-    global _cached_members, _cached_mtime
+    global _cached_members, _cached_mtime, _cached_settings, _cached_settings_mtime
     _cached_members = None
     _cached_mtime = 0.0
+    _cached_settings = None
+    _cached_settings_mtime = 0.0
 
     return xlsx_bytes
 
 
+def read_excel_file_bytes_safe(file_path: Path) -> Optional[bytes]:
+    """Read binary file bytes on Windows even when exclusively open in Microsoft Excel desktop.
+    Uses Win32 CreateFileW with FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE on Windows.
+    Falls back to standard open() on other platforms or if Win32 API is unavailable.
+    """
+    if not file_path.exists():
+        return None
+
+    import sys
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.windll.kernel32
+            GENERIC_READ = 0x80000000
+            FILE_SHARE_READ = 0x00000001
+            FILE_SHARE_WRITE = 0x00000002
+            FILE_SHARE_DELETE = 0x00000004
+            OPEN_EXISTING = 3
+            FILE_ATTRIBUTE_NORMAL = 0x80
+
+            p_str = str(file_path.resolve())
+            handle = kernel32.CreateFileW(
+                p_str,
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+            if handle != -1 and handle != 0xFFFFFFFFFFFFFFFF:
+                try:
+                    high = wintypes.DWORD()
+                    low = kernel32.GetFileSize(handle, ctypes.byref(high))
+                    file_size = (high.value << 32) + low
+                    if file_size > 0:
+                        buf = ctypes.create_string_buffer(file_size)
+                        bytes_read = wintypes.DWORD()
+                        if kernel32.ReadFile(handle, buf, file_size, ctypes.byref(bytes_read), None):
+                            return buf.raw[:bytes_read.value]
+                finally:
+                    kernel32.CloseHandle(handle)
+        except Exception as win_err:
+            logger.debug(f"Win32 CreateFile read notice: {win_err}")
+
+    # Standard fallback
+    try:
+        with open(file_path, "rb") as f:
+            return f.read()
+    except Exception as std_err:
+        logger.debug(f"Standard open read notice: {std_err}")
+        return None
+
+
 def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, Any]]:
     """Read all members directly from Member.xlsx (The Single Source of Truth).
-    Returns list of member dicts.
+    Returns list of member dicts including role and level.
     """
     target = file_path or get_primary_excel_path()
     if not target.exists() and target != LOCAL_MEMBER_PATH and LOCAL_MEMBER_PATH.exists():
@@ -127,12 +361,42 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
         logger.warning(f"Member.xlsx does not exist at {target}. Creating initial sheet...")
         export_members_to_excel(target)
 
-    try:
-        wb = openpyxl.load_workbook(target, data_only=True)
-    except (PermissionError, OSError):
-        logger.warning(f"File {target} is locked by another process (e.g. Excel). Falling back to {LOCAL_MEMBER_PATH}")
-        wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH, data_only=True)
-    ws = wb.active
+    wb = None
+    target_bytes = read_excel_file_bytes_safe(target)
+    if target_bytes and len(target_bytes) > 500:
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(target_bytes), data_only=True)
+            # Synchronize to local fallback
+            if target != LOCAL_MEMBER_PATH:
+                try:
+                    LOCAL_MEMBER_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    with open(LOCAL_MEMBER_PATH, "wb") as lf:
+                        lf.write(target_bytes)
+                except Exception:
+                    pass
+        except Exception as load_err:
+            logger.debug(f"openpyxl load from memory buffer notice: {load_err}")
+
+    if wb is None:
+        try:
+            wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH, data_only=True)
+        except Exception as fb_err:
+            logger.warning(f"Failed to load fallback Member.xlsx: {fb_err}")
+            return []
+    # Select the Team Directory sheet specifically (avoiding SLA & Settings)
+    ws = None
+    for s_name in wb.sheetnames:
+        s_lower = s_name.lower()
+        if any(term in s_lower for term in ("team", "member", "directory", "roster")):
+            ws = wb[s_name]
+            break
+    if ws is None:
+        for s_name in wb.sheetnames:
+            if "sla" not in s_name.lower() and "setting" not in s_name.lower():
+                ws = wb[s_name]
+                break
+    if ws is None:
+        ws = wb.active
 
     # Find the header row (first row where a cell contains 'Full Name' or 'Name')
     header_row_idx = None
@@ -149,6 +413,8 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
                     col_map["email"] = col_idx
                 elif "role" in cell_val:
                     col_map["role"] = col_idx
+                elif "level" in cell_val or "tier" in cell_val:
+                    col_map["level"] = col_idx
                 elif "specialty" in cell_val or "focus" in cell_val:
                     col_map["specialty"] = col_idx
                 elif "id" in cell_val or "graph" in cell_val:
@@ -157,7 +423,7 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
                     col_map["can_approve"] = col_idx
                 elif "project" in cell_val or "jira" in cell_val:
                     col_map["project"] = col_idx
-                elif "status" in cell_val:
+                elif "status" in cell_val or "active" in cell_val:
                     col_map["status"] = col_idx
                 elif "updated" in cell_val:
                     col_map["updated_at"] = col_idx
@@ -187,20 +453,67 @@ def read_members_from_excel(file_path: Optional[Path] = None) -> List[Dict[str, 
             continue
 
         email = str(get_col("email", "")).strip().lower()
-        role = str(get_col("role", "DEVELOPER")).strip().upper() or "DEVELOPER"
+        raw_role = str(get_col("role", "UNASSIGNED")).strip().upper()
+        if raw_role in ("TL", "PM", "HM", "DEVELOPER", "CLIENT", "UNASSIGNED"):
+            role = raw_role
+        elif raw_role in ("HIGHER MANAGEMENT", "MANAGEMENT", "DIRECTOR", "VP"):
+            role = "HM"
+        elif raw_role in ("PROJECT MANAGER",):
+            role = "PM"
+        elif raw_role in ("TEAM LEAD", "LEAD"):
+            role = "TL"
+        elif raw_role in ("DEV", "SOFTWARE ENGINEER", "ENGINEER"):
+            role = "DEVELOPER"
+        else:
+            # FR-03: Anyone with an unknown role is treated as UNASSIGNED
+            role = "UNASSIGNED"
+
+        raw_level = str(get_col("level", "")).strip()
+        raw_approve = str(get_col("can_approve", "")).strip().lower()
+
+        # Normalize hierarchy level: sheet explicitly determines Level (Level 0, 1, 2, 3 or -)
+        if raw_level.lower() in ("0", "level 0", "l0"):
+            level = "Level 0"
+        elif raw_level.lower() in ("1", "level 1", "l1"):
+            level = "Level 1"
+        elif raw_level.lower() in ("2", "level 2", "l2"):
+            level = "Level 2"
+        elif raw_level.lower() in ("3", "level 3", "l3"):
+            level = "Level 3"
+        elif raw_level and raw_level.lower() not in ("-", "none", "null"):
+            level = raw_level
+        else:
+            if role == "TL":
+                level = "Level 1"
+            elif role == "PM":
+                level = "Level 2"
+            elif role in ("HM", "HIGHER MANAGEMENT"):
+                level = "Level 3"
+            else:
+                level = "-"
+
         specialty = str(get_col("specialty", "")).strip()
         user_id = str(get_col("user_id", "")).strip()
-        raw_approve = str(get_col("can_approve", "0")).strip().lower()
-        can_approve = raw_approve in ("1", "true", "yes", "y") or (role in ("PM", "CLIENT") and raw_approve not in ("0", "false", "no"))
+
+        # Approval authority: strictly decided by sheet's Can Approve (1/0) or Level
+        if raw_approve in ("1", "true", "yes", "y"):
+            can_approve = True
+        elif raw_approve in ("0", "false", "no", "n"):
+            can_approve = False
+        else:
+            # If not explicitly specified, decide upon level (Level >= 1 -> True, Level 0 or '-' -> False)
+            can_approve = level in ("Level 1", "Level 2", "Level 3", "1", "2", "3") or role in ("PM", "TL", "HM")
+
         project = str(get_col("project", config.jira.project_key or "SCRUM")).strip()
         status = str(get_col("status", "Active")).strip()
-        is_active = status.lower() not in ("inactive", "disabled", "0", "false")
+        is_active = status.lower() not in ("inactive", "disabled", "0", "false", "no", "n")
         updated_at = str(get_col("updated_at", "")).strip()
 
         members.append({
             "display_name": name,
             "email": email,
             "role": role,
+            "level": level,
             "specialty": specialty,
             "user_id": user_id,
             "can_approve": can_approve,
@@ -230,6 +543,7 @@ def sync_db_from_excel() -> List[Dict[str, Any]]:
         email = m["email"]
         user_id = m["user_id"]
         role = m["role"]
+        level = m.get("level") or "-"
         specialty = m["specialty"]
         can_approve = 1 if m["can_approve"] else 0
         is_active = 1 if m["is_active"] else 0
@@ -256,29 +570,41 @@ def sync_db_from_excel() -> List[Dict[str, Any]]:
                     email = COALESCE(NULLIF(?, ''), email),
                     user_id = COALESCE(NULLIF(?, ''), user_id),
                     role = ?,
+                    level = ?,
                     specialty = ?,
                     can_approve = ?,
                     is_active = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (name, email, user_id, role, specialty, can_approve, is_active, existing["id"]),
+                (name, email, user_id, role, level, specialty, can_approve, is_active, existing["id"]),
             )
-            active_ids.append(existing["id"])
+            member_id = existing["id"]
         else:
             cursor.execute(
                 """
-                INSERT INTO team_members (user_id, display_name, email, role, specialty, can_approve, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO team_members (user_id, display_name, email, role, level, specialty, can_approve, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, name, email, role, specialty, can_approve, is_active),
+                (user_id, name, email, role, level, specialty, can_approve, is_active),
             )
-            active_ids.append(cursor.lastrowid)
+            member_id = cursor.lastrowid
+        active_ids.append(member_id)
+        m["id"] = member_id
 
     # Clean up any removed members from SQLite table so it strictly mirrors Member.xlsx
     if active_ids:
         placeholders = ",".join("?" * len(active_ids))
         cursor.execute(f"DELETE FROM team_members WHERE id NOT IN ({placeholders})", active_ids)
+
+    global _cached_members, _cached_mtime
+    _cached_members = members
+    target = get_primary_excel_path()
+    if target.exists():
+        try:
+            _cached_mtime = os.path.getmtime(target)
+        except Exception:
+            pass
 
     logger.info(f"Synchronized database cache from Member.xlsx ({len(members)} members)")
     return members
@@ -303,6 +629,202 @@ def get_all_members_from_excel() -> List[Dict[str, Any]]:
         _cached_mtime = mtime
 
     return _cached_members or []
+
+
+def get_system_settings_from_excel(force_refresh: bool = False) -> Dict[str, Any]:
+    """Read operational system settings and SLA policies from the 'SLA & Settings' tab in Member.xlsx.
+    Caches results in memory and automatically reloads if the Excel workbook is modified on disk.
+    Falls back cleanly to DEFAULT_SYSTEM_SETTINGS if the tab is not found or encounters an error.
+    """
+    global _cached_settings, _cached_settings_mtime
+
+    target = get_primary_excel_path()
+    if not target.exists() and target != LOCAL_MEMBER_PATH and LOCAL_MEMBER_PATH.exists():
+        target = LOCAL_MEMBER_PATH
+
+    current_mtime = 0.0
+    if target.exists():
+        try:
+            current_mtime = os.path.getmtime(target)
+        except Exception:
+            current_mtime = 0.0
+
+    if not force_refresh and _cached_settings is not None and current_mtime <= _cached_settings_mtime and current_mtime > 0.0:
+        return dict(_cached_settings)
+
+    settings = dict(DEFAULT_SYSTEM_SETTINGS)
+    wb = None
+    target_bytes = read_excel_file_bytes_safe(target) if target.exists() else None
+    if target_bytes and len(target_bytes) > 500:
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(target_bytes), data_only=True)
+        except Exception as load_err:
+            logger.debug(f"Failed to load workbook buffer for settings: {load_err}")
+
+    if wb is None and LOCAL_MEMBER_PATH.exists():
+        try:
+            wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH, data_only=True)
+        except Exception:
+            pass
+
+    if wb is None:
+        _cached_settings = settings
+        _cached_settings_mtime = current_mtime
+        return dict(settings)
+
+    # Locate the SLA & Settings sheet
+    ws = None
+    for s_name in wb.sheetnames:
+        s_lower = s_name.lower()
+        if any(term in s_lower for term in ("sla", "setting", "rule", "config", "policy")):
+            ws = wb[s_name]
+            break
+
+    if ws is None:
+        _cached_settings = settings
+        _cached_settings_mtime = current_mtime
+        return dict(settings)
+
+    # Find the header row containing "setting key" or "key" and "value"
+    key_col_idx = 3
+    val_col_idx = 4
+    header_row_idx = 3
+    header_found = False
+
+    for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        row_str = [str(c or "").strip().lower() for c in row]
+        if any("key" in c for c in row_str) and any("val" in c for c in row_str):
+            for c_idx, val in enumerate(row_str, start=1):
+                if "key" in val:
+                    key_col_idx = c_idx
+                elif "val" in val:
+                    val_col_idx = c_idx
+            header_found = True
+            header_row_idx = row_idx
+            break
+
+    # Iterate rows and extract settings
+    start_row = (header_row_idx + 1) if header_found else 4
+    for row in ws.iter_rows(min_row=start_row, values_only=True):
+        if not row:
+            continue
+        if len(row) < key_col_idx:
+            continue
+        raw_key = row[key_col_idx - 1]
+        if not raw_key:
+            continue
+        key_str = str(raw_key).strip().upper()
+        if not key_str or key_str in ("SETTING KEY", "KEY", "CATEGORY", "NONE"):
+            continue
+
+        raw_val = row[val_col_idx - 1] if len(row) >= val_col_idx else None
+
+        # Type conversion based on key naming convention or existing default type
+        if key_str.endswith("_ENABLED") or key_str.endswith("_ONLY") or key_str.endswith("_WEEKENDS") or "AUTO_APPROVE" in key_str:
+            if isinstance(raw_val, bool):
+                settings[key_str] = raw_val
+            elif raw_val is not None:
+                settings[key_str] = str(raw_val).strip().upper() in ("TRUE", "1", "YES", "T", "Y", "ENABLED")
+            else:
+                settings[key_str] = False
+        elif key_str.endswith("_MINUTES") or key_str.endswith("_HOURS") or key_str.endswith("_INTERVAL"):
+            try:
+                settings[key_str] = int(float(str(raw_val).strip()))
+            except (ValueError, TypeError):
+                pass
+        elif key_str in ("REQUIRE_APPROVAL_REACTIONS", "DISAPPROVAL_REACTIONS", "TRIGGER_KEYWORDS", "IGNORE_KEYWORDS"):
+            if isinstance(raw_val, str):
+                items = [it.strip() for it in raw_val.split(",") if it.strip()]
+                if items:
+                    settings[key_str] = items
+            elif isinstance(raw_val, list):
+                settings[key_str] = raw_val
+        else:
+            if raw_val is not None:
+                settings[key_str] = str(raw_val).strip()
+
+    _cached_settings = settings
+    _cached_settings_mtime = current_mtime
+    return dict(settings)
+
+
+def get_sla_timelines() -> Dict[str, Any]:
+    """Retrieve SLA timeline thresholds, stage enablement, and backlog cutoff hours from Excel."""
+    s = get_system_settings_from_excel()
+    return {
+        "stage1_tl_minutes": s.get("STAGE1_TL_MINUTES", 10),
+        "stage1_enabled": s.get("STAGE1_ENABLED", True),
+        "stage2_pm_minutes": s.get("STAGE2_PM_MINUTES", 20),
+        "stage2_enabled": s.get("STAGE2_ENABLED", True),
+        "stage3_hm_email_minutes": s.get("STAGE3_HM_EMAIL_MINUTES", 25),
+        "stage3_enabled": s.get("STAGE3_ENABLED", True),
+        "backlog_cutoff_hours": s.get("BACKLOG_CUTOFF_HOURS", 24),
+        "check_interval": s.get("REMINDER_CHECK_INTERVAL", 30),
+    }
+
+
+def is_within_business_hours(check_dt: Optional[datetime] = None) -> bool:
+    """Check if the given datetime (defaults to now UTC) falls within configured business hours.
+    If BUSINESS_HOURS_ONLY is False, returns True (24/7 coverage).
+    """
+    s = get_system_settings_from_excel()
+    if not s.get("BUSINESS_HOURS_ONLY", False):
+        return True
+
+    tz_name = s.get("TIMEZONE", "Asia/Kolkata")
+    dt = check_dt or datetime.now(timezone.utc)
+
+    # Localize or convert to target timezone
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local_dt = dt.astimezone(tz)
+    except Exception:
+        local_dt = dt
+
+    # Check weekend exclusion (Monday is 0, Sunday is 6)
+    if s.get("EXCLUDE_WEEKENDS", True) and local_dt.weekday() in (5, 6):
+        return False
+
+    # Check workday hours (HH:MM)
+    start_str = str(s.get("BUSINESS_START_TIME", "09:00")).strip()
+    end_str = str(s.get("BUSINESS_END_TIME", "19:00")).strip()
+
+    try:
+        s_h, s_m = [int(p) for p in start_str.split(":")[:2]]
+        e_h, e_m = [int(p) for p in end_str.split(":")[:2]]
+
+        cur_minutes = local_dt.hour * 60 + local_dt.minute
+        start_minutes = s_h * 60 + s_m
+        end_minutes = e_h * 60 + e_m
+
+        return start_minutes <= cur_minutes <= end_minutes
+    except Exception:
+        return True
+
+
+def get_jira_default_settings() -> Dict[str, Any]:
+    """Retrieve fallback Jira project key, issue type, priority, and reaction triggers from Excel."""
+    s = get_system_settings_from_excel()
+    return {
+        "project_key": s.get("DEFAULT_JIRA_PROJECT", config.jira.project_key or "SCRUM"),
+        "issue_type": s.get("DEFAULT_ISSUE_TYPE", "Bug"),
+        "priority": s.get("DEFAULT_PRIORITY", "Medium"),
+        "auto_approve": s.get("AUTO_APPROVE_FOR_TL_PM", False),
+        "approval_reactions": s.get("REQUIRE_APPROVAL_REACTIONS", ["🎟️", "🎫", "👍", "like"]),
+        "disapproval_reactions": s.get("DISAPPROVAL_REACTIONS", ["❌", "decline", "thumbs_down"]),
+    }
+
+
+def get_issue_keyword_filters() -> Dict[str, List[str]]:
+    """Retrieve issue detection trigger keywords and suppression keywords from Excel."""
+    s = get_system_settings_from_excel()
+    return {
+        "trigger_keywords": s.get("TRIGGER_KEYWORDS", []),
+        "ignore_keywords": s.get("IGNORE_KEYWORDS", []),
+    }
 
 
 def get_member_by_id_or_name(user_id: Optional[str] = None, display_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -337,28 +859,107 @@ def get_member_by_id_or_name(user_id: Optional[str] = None, display_name: Option
     return None
 
 
-def get_active_pm_from_excel() -> Dict[str, str]:
-    """Retrieve active Project Manager (PM) directly from Member.xlsx data.
-    Never relies on hardcoded names.
+def get_active_pms() -> List[Dict[str, Any]]:
+    """Retrieve all active Project Managers (Level 2) directly from Member.xlsx."""
+    members = get_all_members_from_excel()
+    return [
+        m for m in members
+        if m.get("is_active") and (
+            (m.get("role") or "").upper() == "PM" or
+            (m.get("level") or "").upper() in ("LEVEL 2", "2", "L2")
+        )
+    ]
+
+
+def get_active_tls() -> List[Dict[str, Any]]:
+    """Retrieve all active Team Leads (Level 1) directly from Member.xlsx."""
+    members = get_all_members_from_excel()
+    return [
+        m for m in members
+        if m.get("is_active") and (
+            (m.get("role") or "").upper() == "TL" or
+            (m.get("level") or "").upper() in ("LEVEL 1", "1", "L1")
+        )
+    ]
+
+
+def get_active_hms() -> List[Dict[str, Any]]:
+    """Retrieve all active Higher Management members (Level 3) directly from Member.xlsx."""
+    members = get_all_members_from_excel()
+    return [
+        m for m in members
+        if m.get("is_active") and (
+            (m.get("role") or "").upper() in ("HM", "HIGHER MANAGEMENT") or
+            (m.get("level") or "").upper() in ("LEVEL 3", "3", "L3")
+        )
+    ]
+
+
+def get_active_authorized_approvers() -> List[Dict[str, Any]]:
+    """Retrieve all active members authorized to approve/decline tickets from Member.xlsx.
+    Includes management tiers: Level 1 (TL), Level 2 (PM), Level 3 (HM), or members with explicit can_approve=True.
+    Strictly excludes DEVELOPER, UNASSIGNED, and CLIENT (unless can_approve=True).
     """
     members = get_all_members_from_excel()
-
-    # 1. Look for explicit role 'PM'
+    approvers = []
+    seen = set()
     for m in members:
-        if m.get("is_active") and (m.get("role") or "").upper() == "PM":
-            return {
-                "name": m.get("display_name") or "Project Manager",
-                "email": m.get("email") or "",
-                "user_id": m.get("user_id") or "",
-            }
+        if not m.get("is_active"):
+            continue
+        role = (m.get("role") or "").upper().strip()
+        level = str(m.get("level") or "").upper().strip()
+        can_approve = bool(m.get("can_approve"))
+
+        if role in ("DEVELOPER", "UNASSIGNED", "CLIENT") and not can_approve:
+            continue
+
+        if role in ("PM", "TL", "HM") or level in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3", "L1", "L2", "L3") or can_approve:
+            uid = m.get("user_id") or m.get("display_name")
+            if uid and uid not in seen:
+                seen.add(uid)
+                approvers.append(m)
+    return approvers
+
+
+def get_members_by_level(level: str) -> List[Dict[str, Any]]:
+    """Retrieve all active members assigned to a specific hierarchy level."""
+    clean_lvl = (level or "").strip().upper()
+    if clean_lvl in ("1", "LEVEL 1", "L1", "TL"):
+        return get_active_tls()
+    elif clean_lvl in ("2", "LEVEL 2", "L2", "PM"):
+        return get_active_pms()
+    elif clean_lvl in ("3", "LEVEL 3", "L3", "HM"):
+        return get_active_hms()
+    members = get_all_members_from_excel()
+    return [
+        m for m in members
+        if m.get("is_active") and (m.get("level") or "").strip().upper() == clean_lvl
+    ]
+
+
+def get_active_pm_from_excel() -> Dict[str, str]:
+    """Retrieve primary active Project Manager (PM) directly from Member.xlsx data.
+    Never relies on hardcoded names. Supports multiple PMs by returning primary/first.
+    """
+    pms = get_active_pms()
+    if pms:
+        first = pms[0]
+        return {
+            "name": first.get("display_name") or "Project Manager",
+            "email": first.get("email") or "",
+            "user_id": first.get("user_id") or "",
+            "level": first.get("level") or "Level 2",
+        }
 
     # 2. Look for approver if no PM specified
+    members = get_all_members_from_excel()
     for m in members:
         if m.get("is_active") and m.get("can_approve"):
             return {
                 "name": m.get("display_name") or "Approver",
                 "email": m.get("email") or "",
                 "user_id": m.get("user_id") or "",
+                "level": m.get("level") or "-",
             }
 
     # 3. Fallback
@@ -366,6 +967,7 @@ def get_active_pm_from_excel() -> Dict[str, str]:
         "name": "Project Manager",
         "email": "",
         "user_id": "",
+        "level": "Level 2",
     }
 
 
@@ -374,6 +976,7 @@ def feed_member_to_excel(
     user_id: Optional[str] = None,
     email: Optional[str] = None,
     role: Optional[str] = None,
+    level: Optional[str] = None,
     specialty: Optional[str] = None,
     can_approve: Optional[bool] = None,
     jira_project: Optional[str] = None,
@@ -387,6 +990,7 @@ def feed_member_to_excel(
     if not name_clean:
         return {"success": False, "reason": "Empty display name"}
 
+    explicit_can_approve = can_approve is not None
     user_id_clean = (user_id or "").strip()
     email_clean = (email or "").strip().lower()
 
@@ -405,38 +1009,52 @@ def feed_member_to_excel(
         except Exception:
             pass
 
-    # Determine role
+    # Determine role dynamically without hardcoding names
     assigned_role = role
     if not assigned_role:
-        name_lower = name_clean.lower()
         spec_lower = (specialty or "").lower()
-        if "dhruv" in name_lower or "client" in spec_lower or "product owner" in spec_lower:
+        if "client" in spec_lower or "product owner" in spec_lower:
             assigned_role = "CLIENT"
-        elif "hemil" in name_lower or "pm" in spec_lower or "project manager" in spec_lower or "scrum" in spec_lower:
+        elif "pm" in spec_lower or "project manager" in spec_lower or "scrum" in spec_lower:
             assigned_role = "PM"
-        elif "santosh" in name_lower or "musaib" in name_lower or "musain" in name_lower or "nishi" in name_lower or "developer" in spec_lower or "engineer" in spec_lower:
+        elif "tl" in spec_lower or "team lead" in spec_lower:
+            assigned_role = "TL"
+        elif "developer" in spec_lower or "engineer" in spec_lower:
             assigned_role = "DEVELOPER"
         else:
-            assigned_role = "DEVELOPER"
+            # Per FR-03: newly discovered or unassigned chat members default to UNASSIGNED
+            assigned_role = "UNASSIGNED"
     assigned_role = assigned_role.upper()
+
+    # Determine hierarchy level
+    assigned_level = level
+    if not assigned_level or assigned_level in ("-", "none", "null"):
+        if assigned_role == "TL":
+            assigned_level = "Level 1"
+        elif assigned_role == "PM":
+            assigned_level = "Level 2"
+        elif assigned_role in ("HM", "HIGHER MANAGEMENT"):
+            assigned_level = "Level 3"
+        else:
+            assigned_level = "-"
 
     # Specialty
     if not specialty:
         if assigned_role == "CLIENT":
-            specialty = "Client Product Owner"
+            specialty = "Client / Product Owner"
         elif assigned_role == "PM":
             specialty = "Project Manager / Scrum Master"
+        elif assigned_role == "TL":
+            specialty = "Technical Team Lead"
+        elif assigned_role in ("HM", "HIGHER MANAGEMENT"):
+            specialty = "Higher Management"
+        elif assigned_role == "DEVELOPER":
+            specialty = "Software Engineer"
         else:
-            name_lower = name_clean.lower()
-            if "musaib" in name_lower:
-                specialty = "Frontend & UI Lead"
-            elif "santosh" in name_lower:
-                specialty = "Backend & API Lead"
-            else:
-                specialty = "Software Engineer"
+            specialty = "Pending Role Assignment"
 
     if can_approve is None:
-        can_approve = assigned_role in ("PM", "CLIENT")
+        can_approve = assigned_role in ("PM", "TL", "HM") or assigned_level in ("Level 1", "Level 2", "Level 3")
 
     target_path = get_primary_excel_path()
     if not target_path.exists():
@@ -447,7 +1065,14 @@ def feed_member_to_excel(
     except (PermissionError, OSError):
         logger.warning(f"File {target_path} is locked by another process. Reading from local copy {LOCAL_MEMBER_PATH}")
         wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH)
-    ws = wb.active
+    ws = None
+    for s_name in wb.sheetnames:
+        s_lower = s_name.lower()
+        if any(term in s_lower for term in ("team", "member", "directory", "roster")):
+            ws = wb[s_name]
+            break
+    if ws is None:
+        ws = wb.active
 
     # Find header row and column mapping
     header_row_idx = 4
@@ -455,14 +1080,16 @@ def feed_member_to_excel(
         "name": 1,
         "email": 2,
         "role": 3,
-        "specialty": 4,
-        "user_id": 5,
-        "can_approve": 6,
-        "project": 7,
-        "status": 8,
-        "updated": 9,
+        "level": 4,
+        "specialty": 5,
+        "user_id": 6,
+        "can_approve": 7,
+        "project": 8,
+        "status": 9,
+        "updated": 10,
     }
 
+    has_level_col = False
     for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
         row_str = [str(c or "").strip().lower() for c in row]
         if any("name" in c for c in row_str):
@@ -474,6 +1101,9 @@ def feed_member_to_excel(
                     col_map["email"] = c_idx
                 elif "role" in val:
                     col_map["role"] = c_idx
+                elif "level" in val or "tier" in val:
+                    col_map["level"] = c_idx
+                    has_level_col = True
                 elif "specialty" in val or "focus" in val:
                     col_map["specialty"] = c_idx
                 elif "id" in val or "graph" in val:
@@ -487,6 +1117,16 @@ def feed_member_to_excel(
                 elif "updated" in val:
                     col_map["updated"] = c_idx
             break
+
+    # If sheet lacks Level column, re-export standard 10-column layout
+    if not has_level_col:
+        export_members_to_excel(target_path)
+        wb = openpyxl.load_workbook(target_path)
+        ws = wb.active
+        col_map = {
+            "name": 1, "email": 2, "role": 3, "level": 4, "specialty": 5,
+            "user_id": 6, "can_approve": 7, "project": 8, "status": 9, "updated": 10
+        }
 
     # Look for existing member row
     existing_row_idx = None
@@ -517,7 +1157,10 @@ def feed_member_to_excel(
     role_colors = {
         "CLIENT": ("EFF6FF", "1D4ED8"),
         "PM": ("FEF3C7", "B45309"),
+        "TL": ("F0FDF4", "15803D"),
+        "HM": ("FDF2F8", "BE185D"),
         "DEVELOPER": ("ECFDF5", "047857"),
+        "UNASSIGNED": ("F1F5F9", "64748B"),
         "ADMIN": ("F5F3FF", "6D28D9"),
     }
 
@@ -536,18 +1179,45 @@ def feed_member_to_excel(
         if specialty and (not ws.cell(row=row_idx, column=col_map["specialty"]).value or ws.cell(row=row_idx, column=col_map["specialty"]).value == "Software Engineer"):
             ws.cell(row=row_idx, column=col_map["specialty"]).value = specialty
             changed = True
-        if role and ws.cell(row=row_idx, column=col_map["role"]).value != assigned_role:
+
+        existing_role = str(ws.cell(row=row_idx, column=col_map["role"]).value or "").strip().upper()
+        if role and assigned_role and assigned_role != existing_role:
+            # Preserve existing valid roles: never overwrite an established role with UNASSIGNED
+            if not (assigned_role == "UNASSIGNED" and existing_role in ("TL", "PM", "HM", "DEVELOPER", "CLIENT", "ADMIN")):
+                ws.cell(row=row_idx, column=col_map["role"]).value = assigned_role
+                changed = True
+        elif not existing_role and assigned_role:
             ws.cell(row=row_idx, column=col_map["role"]).value = assigned_role
             changed = True
+
+        existing_level = str(ws.cell(row=row_idx, column=col_map.get("level", 4)).value or "").strip()
+        if "level" in col_map and level and assigned_level and assigned_level != existing_level:
+            # Preserve existing valid hierarchy levels: never overwrite an established level with "-"
+            if not (assigned_level == "-" and existing_level in ("Level 1", "Level 2", "Level 3")):
+                ws.cell(row=row_idx, column=col_map["level"]).value = assigned_level
+                changed = True
+        elif "level" in col_map and not existing_level and assigned_level:
+            ws.cell(row=row_idx, column=col_map["level"]).value = assigned_level
+            changed = True
+
+        if "can_approve" in col_map and explicit_can_approve:
+            existing_can_approve = str(ws.cell(row=row_idx, column=col_map["can_approve"]).value or "").strip().lower()
+            target_approve_val = "1" if can_approve else "0"
+            if existing_can_approve != target_approve_val:
+                ws.cell(row=row_idx, column=col_map["can_approve"]).value = target_approve_val
+                changed = True
+
+        final_role = str(ws.cell(row=row_idx, column=col_map["role"]).value or assigned_role).strip().upper()
+        final_level = str(ws.cell(row=row_idx, column=col_map.get("level", 4)).value or assigned_level).strip()
 
         if changed:
             ws.cell(row=row_idx, column=col_map["updated"]).value = now_str
             save_workbook_to_all(wb)
             sync_db_from_excel()
-            logger.info(f"Updated member row in Member.xlsx: {name_clean}")
-            return {"success": True, "action": "updated", "name": name_clean, "role": assigned_role}
+            logger.info(f"Updated member row in Member.xlsx: {name_clean} (role={final_role}, level={final_level})")
+            return {"success": True, "action": "updated", "name": name_clean, "role": final_role, "level": final_level}
 
-        return {"success": True, "action": "unchanged", "name": name_clean, "role": assigned_role}
+        return {"success": True, "action": "unchanged", "name": name_clean, "role": final_role, "level": final_level}
 
     # Append new row to Member.xlsx
     new_row_idx = max_row + 1
@@ -561,6 +1231,8 @@ def feed_member_to_excel(
     ws.cell(row=new_row_idx, column=col_map["name"], value=name_clean)
     ws.cell(row=new_row_idx, column=col_map["email"], value=email_clean)
     ws.cell(row=new_row_idx, column=col_map["role"], value=assigned_role)
+    if "level" in col_map:
+        ws.cell(row=new_row_idx, column=col_map["level"], value=assigned_level)
     ws.cell(row=new_row_idx, column=col_map["specialty"], value=specialty)
     ws.cell(row=new_row_idx, column=col_map["user_id"], value=user_id_clean)
     ws.cell(row=new_row_idx, column=col_map["can_approve"], value="1" if can_approve else "0")
@@ -570,7 +1242,8 @@ def feed_member_to_excel(
 
     # Style cells
     bg_color, fg_color = role_colors.get(assigned_role, ("F8FAFC", "334155"))
-    for col_i in range(1, 10):
+    total_cols = max(col_map.values())
+    for col_i in range(1, total_cols + 1):
         c = ws.cell(row=new_row_idx, column=col_i)
         c.font = Font(name="Segoe UI", size=9.5)
         c.border = thin_border
@@ -585,31 +1258,14 @@ def feed_member_to_excel(
     # Update subtitle timestamp
     ws.cell(row=2, column=1).value = f"Single Source of Truth for Team Members, Roles & Permissions | Last Updated: {now_str}"
 
-    # Ensure in-cell dropdown data validations exist
-    try:
-        from openpyxl.worksheet.datavalidation import DataValidation
-        has_role_dv = any("C" in str(getattr(v, "sqref", "")) for v in getattr(ws.data_validations, "dataValidation", []))
-        if not has_role_dv:
-            role_dv = DataValidation(type="list", formula1='"CLIENT, PM, DEVELOPER"', allow_blank=True)
-            ws.add_data_validation(role_dv)
-            role_dv.add("C5:C500")
-            approve_dv = DataValidation(type="list", formula1='"1, 0"', allow_blank=True)
-            ws.add_data_validation(approve_dv)
-            approve_dv.add("F5:F500")
-            status_dv = DataValidation(type="list", formula1='"Active, Inactive"', allow_blank=True)
-            ws.add_data_validation(status_dv)
-            status_dv.add("H5:H500")
-    except Exception:
-        pass
-
     save_workbook_to_all(wb)
     sync_db_from_excel()
 
     logger.info(
-        f"Fed new member '{name_clean}' into Member.xlsx as {assigned_role}",
-        extra={"event": "MEMBER_FED_TO_EXCEL", "member_name": name_clean, "role": assigned_role},
+        f"Fed member '{name_clean}' into Member.xlsx as {assigned_role} ({assigned_level})",
+        extra={"event": "MEMBER_FED_TO_EXCEL", "member_name": name_clean, "role": assigned_role, "level": assigned_level},
     )
-    return {"success": True, "action": "created", "name": name_clean, "role": assigned_role}
+    return {"success": True, "action": "created", "name": name_clean, "role": assigned_role, "level": assigned_level}
 
 
 def auto_register_member(
@@ -617,6 +1273,7 @@ def auto_register_member(
     user_id: Optional[str] = None,
     email: Optional[str] = None,
     role: Optional[str] = None,
+    level: Optional[str] = None,
     specialty: Optional[str] = None,
     can_approve: Optional[bool] = None,
 ) -> Dict[str, Any]:
@@ -626,6 +1283,7 @@ def auto_register_member(
         user_id=user_id,
         email=email,
         role=role,
+        level=level,
         specialty=specialty,
         can_approve=can_approve,
     )
@@ -655,7 +1313,14 @@ def remove_member_from_excel(
             return False
         wb = openpyxl.load_workbook(LOCAL_MEMBER_PATH)
 
-    ws = wb.active
+    ws = None
+    for s_name in wb.sheetnames:
+        s_lower = s_name.lower()
+        if any(term in s_lower for term in ("team", "member", "directory", "roster")):
+            ws = wb[s_name]
+            break
+    if ws is None:
+        ws = wb.active
 
     header_row_idx = 4
     col_map = {"name": 1, "user_id": 5}
@@ -711,7 +1376,7 @@ def remove_member_from_excel(
 
 
 def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
-    """Generate or refresh a clean, styled Member.xlsx workbook.
+    """Generate or refresh a clean, styled Member.xlsx workbook with 10 columns (including Level).
     Writes to both OneDrive sync folder and local project folder.
     """
     target_path = output_path or get_primary_excel_path()
@@ -719,16 +1384,46 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
 
     db = get_db()
     rows = db.execute(
-        "SELECT * FROM team_members ORDER BY CASE role WHEN 'CLIENT' THEN 1 WHEN 'PM' THEN 2 WHEN 'ADMIN' THEN 3 ELSE 4 END, id ASC"
+        """SELECT * FROM team_members
+           ORDER BY CASE role
+               WHEN 'HM' THEN 1
+               WHEN 'PM' THEN 2
+               WHEN 'TL' THEN 3
+               WHEN 'CLIENT' THEN 4
+               WHEN 'DEVELOPER' THEN 5
+               ELSE 6 END, id ASC"""
     ).fetchall()
 
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Team Directory"
+    if target_path.exists():
+        try:
+            wb = openpyxl.load_workbook(target_path)
+            # Find or create Team Directory sheet
+            ws = None
+            for s_name in wb.sheetnames:
+                if any(k in s_name.lower() for k in ("team", "member", "directory", "roster")):
+                    ws = wb[s_name]
+                    break
+            if ws is not None:
+                idx = wb.sheetnames.index(ws.title)
+                wb.remove(ws)
+                ws = wb.create_sheet("Team Directory", idx)
+            else:
+                ws = wb.create_sheet("Team Directory", 0)
+        except Exception:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Team Directory"
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Team Directory"
+
+    # Always ensure SLA & Settings sheet exists in the workbook
+    ensure_sla_settings_sheet_in_workbook(wb)
     ws.views.sheetView[0].showGridLines = True
 
     # Title block
-    ws.merge_cells("A1:I1")
+    ws.merge_cells("A1:J1")
     title_cell = ws.cell(row=1, column=1)
     title_cell.value = f"JIRA AUTOMATION HUB - TEAM ROSTER & ROLES DIRECTORY (Target: {config.jira.project_key or 'SCRUM'})"
     title_cell.font = Font(name="Segoe UI", size=13, bold=True, color="FFFFFF")
@@ -737,9 +1432,9 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
     ws.row_dimensions[1].height = 28
 
     # Subtitle with timestamp
-    ws.merge_cells("A2:I2")
+    ws.merge_cells("A2:J2")
     sub_cell = ws.cell(row=2, column=1)
-    sub_cell.value = f"Single Source of Truth for Team Members, Roles & Permissions | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    sub_cell.value = f"Single Source of Truth for Team Members, Roles, Hierarchy Levels & Permissions | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     sub_cell.font = Font(name="Segoe UI", size=9, italic=True, color="94A3B8")
     sub_cell.fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
     sub_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -750,6 +1445,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
         "Full Name",
         "Email Address",
         "Assigned Role",
+        "Level",
         "Specialty / Focus Area",
         "Teams Graph User ID",
         "Can Approve (1/0)",
@@ -780,13 +1476,23 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
     role_colors = {
         "CLIENT": ("EFF6FF", "1D4ED8"),
         "PM": ("FEF3C7", "B45309"),
+        "TL": ("F0FDF4", "15803D"),
+        "HM": ("FDF2F8", "BE185D"),
         "DEVELOPER": ("ECFDF5", "047857"),
+        "UNASSIGNED": ("F1F5F9", "64748B"),
         "ADMIN": ("F5F3FF", "6D28D9"),
     }
 
     current_row = 5
     for r in rows:
-        role = (r["role"] or "DEVELOPER").upper()
+        role = (r["role"] or "UNASSIGNED").upper()
+        level = r["level"] or (
+            "Level 1" if role == "TL" else (
+                "Level 2" if role == "PM" else (
+                    "Level 3" if role in ("HM", "HIGHER MANAGEMENT") else "-"
+                )
+            )
+        )
         bg_color, fg_color = role_colors.get(role, ("F8FAFC", "334155"))
         row_fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
 
@@ -794,6 +1500,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
             r["display_name"] or "",
             r["email"] or "",
             role,
+            level,
             r["specialty"] or "General",
             r["user_id"] or "",
             "1" if r["can_approve"] else "0",
@@ -810,7 +1517,7 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
             cell.font = Font(name="Segoe UI", size=9.5)
             cell.border = thin_border
 
-            if col_idx in (1, 2, 4):
+            if col_idx in (1, 2, 5):
                 cell.alignment = Alignment(horizontal="left", vertical="center")
             else:
                 cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -818,6 +1525,8 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
             if col_idx == 3:
                 cell.fill = row_fill
                 cell.font = Font(name="Segoe UI", size=9.5, bold=True, color=fg_color)
+            elif col_idx == 4:
+                cell.font = Font(name="Segoe UI", size=9.5, bold=True)
 
         current_row += 1
 
@@ -833,36 +1542,47 @@ def export_members_to_excel(output_path: Optional[Path] = None) -> bytes:
                 max_len = len(val)
         ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
 
-    # Add In-Cell Dropdown Data Validations
+    # In-Cell Dropdown Data Validations
     from openpyxl.worksheet.datavalidation import DataValidation
 
-    # 1. Assigned Role Dropdown (CLIENT, PM, DEVELOPER) for column C
-    role_dv = DataValidation(type="list", formula1='"CLIENT, PM, DEVELOPER"', allow_blank=True)
-    role_dv.error = "Please choose a valid role: CLIENT, PM, or DEVELOPER"
+    # 1. Role Dropdown (TL, Client, PM, Developer, HM, Unassigned) for Column C
+    role_dv = DataValidation(type="list", formula1='"TL, Client, PM, Developer, HM, Unassigned"', allow_blank=True)
+    role_dv.error = "Please choose a valid role: TL, Client, PM, Developer, HM, or Unassigned"
     role_dv.errorTitle = "Invalid Role"
-    role_dv.prompt = "Choose role from dropdown: CLIENT, PM, or DEVELOPER"
+    role_dv.prompt = "Choose role: TL, Client, PM, Developer, HM, or Unassigned"
     role_dv.promptTitle = "Role Selection"
     ws.add_data_validation(role_dv)
     role_dv.add("C5:C500")
 
-    # 2. Can Approve Dropdown (1, 0) for column F
+    # 2. Level Dropdown (Level 1, Level 2, Level 3, -) for Column D
+    level_dv = DataValidation(type="list", formula1='"Level 1, Level 2, Level 3, -"', allow_blank=True)
+    level_dv.error = "Please choose a valid level: Level 1, Level 2, Level 3, or -"
+    level_dv.errorTitle = "Invalid Level"
+    level_dv.prompt = "Choose hierarchy level: Level 1 (TL), Level 2 (PM), Level 3 (HM), or -"
+    level_dv.promptTitle = "Level Selection"
+    ws.add_data_validation(level_dv)
+    level_dv.add("D5:D500")
+
+    # 3. Can Approve Dropdown (1, 0) for Column G
     approve_dv = DataValidation(type="list", formula1='"1, 0"', allow_blank=True)
     approve_dv.error = "Enter 1 for approval permissions, or 0"
     approve_dv.errorTitle = "Invalid Permission"
     ws.add_data_validation(approve_dv)
-    approve_dv.add("F5:F500")
+    approve_dv.add("G5:G500")
 
-    # 3. Status Dropdown (Active, Inactive) for column H
+    # 4. Status Dropdown (Active, Inactive) for Column I
     status_dv = DataValidation(type="list", formula1='"Active, Inactive"', allow_blank=True)
     ws.add_data_validation(status_dv)
-    status_dv.add("H5:H500")
+    status_dv.add("I5:I500")
 
-    return save_workbook_to_all(wb)
+    return save_workbook_to_all(wb, custom_path=target_path)
 
 
 def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str] = None) -> Dict[str, Any]:
     """Poll Microsoft Graph API for all members in the Teams chat and team/channel roster
     and feed newly arrived or updated members directly into Member.xlsx first!
+    New members default to Role: 'Unassigned', Level: '-', can_approve: False.
+    Departed members are removed immediately from Member.xlsx and database.
     """
     token = get_access_token()
     if not token:
@@ -911,19 +1631,23 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str]
         if not email and "@" in str(m.get("userPrincipalName", "")):
             email = m.get("userPrincipalName")
 
+        # Per verified requirement: newly joined members default to UNASSIGNED / '-',
+        # while existing members preserve their configured role and hierarchy level.
         res_feed = feed_member_to_excel(
             display_name=d_name,
             user_id=u_id,
             email=email,
+            role=None,
+            level=None,
+            can_approve=None,
         )
         if res_feed.get("action") == "created":
             discovered_count += 1
-            logger.info(f"✨ New member discovered and added to Member.xlsx: {d_name or u_id}")
+            logger.info(f"✨ New member discovered in Teams chat and added to Member.xlsx as Unassigned: {d_name or u_id}")
         elif res_feed.get("action") == "updated":
             updated_count += 1
 
-    # Auto-prune departed members from Member.xlsx:
-    # If all_roster_members was fetched from Graph, remove any Excel member who is no longer in Teams chat
+    # Auto-prune departed members from Member.xlsx immediately:
     removed_count = 0
     if all_roster_members:
         roster_uids = {
@@ -949,7 +1673,7 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str]
                 in_roster = True
 
             if not in_roster:
-                logger.info(f"🗑️ Detected departed member '{em.get('display_name')}' (no longer in Teams chat roster); removing from Member.xlsx")
+                logger.info(f"🗑️ Detected departed member '{em.get('display_name')}' (no longer in Teams chat roster); removing from Member.xlsx immediately")
                 if remove_member_from_excel(user_id=em.get("user_id"), display_name=em.get("display_name")):
                     removed_count += 1
 
@@ -967,13 +1691,13 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str]
     }
 
 
-# Background periodic monitor for roster auto-discovery
+# Background periodic monitor for roster auto-discovery (every 15s)
 _roster_monitor_task: Optional[asyncio.Task] = None
-ROSTER_MONITOR_INTERVAL_SECONDS = 60  # Poll Teams roster every 60 seconds
+ROSTER_MONITOR_INTERVAL_SECONDS = 15  # Rapid 15s interval for accurate join/leave tracking
 
 
 async def _roster_monitor_loop():
-    """Background loop that polls Teams roster every 60s to ensure newly added members are placed in Member.xlsx."""
+    """Background loop that polls Teams roster every 15s to ensure joins and leaves are reflected in Member.xlsx."""
     logger.info(
         f"Teams roster background monitor started (polling every {ROSTER_MONITOR_INTERVAL_SECONDS}s)",
         extra={"event": "ROSTER_MONITOR_START"},
@@ -981,7 +1705,6 @@ async def _roster_monitor_loop():
     while True:
         try:
             await asyncio.sleep(ROSTER_MONITOR_INTERVAL_SECONDS)
-            # Run sync in background executor to avoid blocking event loop
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, sync_teams_chat_roster)
         except asyncio.CancelledError:
@@ -1009,42 +1732,183 @@ def stop_roster_monitor():
         _roster_monitor_task = None
 
 
+# Proactive background file watcher for instant manual Excel edits
+_excel_watcher_task: Optional[asyncio.Task] = None
+EXCEL_WATCHER_INTERVAL_SECONDS = 3  # Check disk every 3 seconds for manual sheet edits
+
+
+async def _excel_file_watcher_loop():
+    """Background loop that polls Member.xlsx on disk every 3s and cloud OneDrive every 15s:
+    1. Detects manual changes (role/level/member changes) in Excel desktop or Excel Online.
+    2. Instantly syncs SQLite team_members database cache.
+    3. Automatically flushes any deferred writes waiting for Excel file lock release.
+    """
+    logger.info(
+        f"Proactive Member.xlsx file watcher started (polling disk every {EXCEL_WATCHER_INTERVAL_SECONDS}s, cloud every 15s)",
+        extra={"event": "EXCEL_WATCHER_START"},
+    )
+    global _cached_mtime, _pending_excel_flushes
+
+    cloud_poll_ticks = 0
+    last_cloud_bytes_hash = None
+
+    while True:
+        try:
+            await asyncio.sleep(EXCEL_WATCHER_INTERVAL_SECONDS)
+            cloud_poll_ticks += 1
+
+            # 1. Flush any pending writes if Excel was previously locked
+            if _pending_excel_flushes is not None and ONEDRIVE_MEMBER_PATH.parent.exists():
+                try:
+                    with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
+                        f.write(_pending_excel_flushes)
+                    logger.info(f"✅ Successfully flushed queued Member.xlsx changes to OneDrive: {ONEDRIVE_MEMBER_PATH}")
+                    _pending_excel_flushes = None
+                except PermissionError:
+                    pass  # Excel still open
+                except Exception as ex:
+                    logger.debug(f"Pending flush check: {ex}")
+
+            # 2. Check file modification time on disk
+            target = get_primary_excel_path()
+            if target.exists():
+                try:
+                    current_mtime = os.path.getmtime(target)
+                    if _cached_mtime > 0.0 and current_mtime > _cached_mtime:
+                        logger.info(
+                            f"⚡ Detected manual modification in {target.name}; synchronizing system permissions & database cache immediately",
+                            extra={"event": "MANUAL_SHEET_EDIT_DETECTED", "file": str(target)},
+                        )
+                        loop = asyncio.get_running_loop()
+                        updated_members = await loop.run_in_executor(None, sync_db_from_excel)
+                        _cached_members = updated_members
+                        _cached_mtime = current_mtime
+
+                        # Also reload SLA & Settings policies from Excel
+                        await loop.run_in_executor(None, get_system_settings_from_excel, True)
+
+                        # Proactively broadcast ROSTER_UPDATED to all connected dashboards via WebSocket
+                        try:
+                            from src.services.broadcaster import broadcast_message
+                            await broadcast_message({
+                                "type": "ROSTER_UPDATED",
+                                "message": f"Team roster synchronized from Member.xlsx ({len(updated_members)} members)",
+                                "members": updated_members,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+                        except Exception as b_err:
+                            logger.debug(f"Broadcast roster error notice: {b_err}")
+                    elif _cached_mtime == 0.0:
+                        _cached_mtime = current_mtime
+                except Exception as watch_err:
+                    logger.debug(f"Excel file watcher check notice: {watch_err}")
+
+            # 3. Periodically poll OneDrive Cloud URL (every 15s) to catch live Excel Online edits
+            if cloud_poll_ticks >= 5:
+                cloud_poll_ticks = 0
+                try:
+                    loop = asyncio.get_running_loop()
+                    cloud_bytes = await loop.run_in_executor(None, download_onedrive_workbook, DEFAULT_ONEDRIVE_URL)
+                    if cloud_bytes and len(cloud_bytes) > 500:
+                        import hashlib
+                        current_hash = hashlib.md5(cloud_bytes).hexdigest()
+                        if last_cloud_bytes_hash is None:
+                            last_cloud_bytes_hash = current_hash
+                        elif current_hash != last_cloud_bytes_hash:
+                            last_cloud_bytes_hash = current_hash
+                            logger.info("☁️ Detected change in live Excel Online (cloud sheet); syncing local files & database")
+                            if ONEDRIVE_MEMBER_PATH.parent.exists():
+                                try:
+                                    with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
+                                        f.write(cloud_bytes)
+                                except Exception:
+                                    pass
+                            try:
+                                LOCAL_MEMBER_PATH.parent.mkdir(parents=True, exist_ok=True)
+                                with open(LOCAL_MEMBER_PATH, "wb") as f:
+                                    f.write(cloud_bytes)
+                            except Exception:
+                                pass
+
+                            updated_members = await loop.run_in_executor(None, sync_db_from_excel)
+                            _cached_members = updated_members
+                            if target.exists():
+                                _cached_mtime = os.path.getmtime(target)
+                            await loop.run_in_executor(None, get_system_settings_from_excel, True)
+
+                            try:
+                                from src.services.broadcaster import broadcast_message
+                                await broadcast_message({
+                                    "type": "ROSTER_UPDATED",
+                                    "message": f"Team roster synchronized from live Excel Online ({len(updated_members)} members)",
+                                    "members": updated_members,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                })
+                            except Exception:
+                                pass
+                except Exception as cloud_err:
+                    logger.debug(f"Cloud poll check notice: {cloud_err}")
+
+        except asyncio.CancelledError:
+            break
+        except Exception as err:
+            logger.debug(f"Excel file watcher loop error: {err}")
+
+
+def start_excel_watcher():
+    """Start the proactive background Member.xlsx file watcher."""
+    global _excel_watcher_task
+    if _excel_watcher_task is None or _excel_watcher_task.done():
+        try:
+            loop = asyncio.get_running_loop()
+            _excel_watcher_task = loop.create_task(_excel_file_watcher_loop())
+        except RuntimeError:
+            pass
+
+
+def stop_excel_watcher():
+    """Stop the background Member.xlsx file watcher."""
+    global _excel_watcher_task
+    if _excel_watcher_task and not _excel_watcher_task.done():
+        _excel_watcher_task.cancel()
+        _excel_watcher_task = None
+
+
 def sync_from_onedrive_sheet(url: Optional[str] = None) -> Dict[str, Any]:
-    """Sync database from shared OneDrive Excel sheet, or download from URL."""
+    """Sync database from shared OneDrive Excel sheet, downloading live cloud workbook."""
     target_url = url or DEFAULT_ONEDRIVE_URL
 
-    # If the local OneDrive sync folder exists on disk, read directly from it!
-    if ONEDRIVE_MEMBER_PATH.exists():
+    # 1. Download fresh live copy directly from cloud OneDrive URL
+    file_bytes = download_onedrive_workbook(target_url) if target_url else None
+    if file_bytes and len(file_bytes) > 500:
+        if ONEDRIVE_MEMBER_PATH.parent.exists():
+            try:
+                with open(ONEDRIVE_MEMBER_PATH, "wb") as f:
+                    f.write(file_bytes)
+            except Exception as e:
+                logger.debug(f"Could not overwrite ONEDRIVE_MEMBER_PATH with cloud copy: {e}")
+        try:
+            LOCAL_MEMBER_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(LOCAL_MEMBER_PATH, "wb") as f:
+                f.write(file_bytes)
+        except Exception as e:
+            logger.debug(f"Could not write cloud sheet to LOCAL_MEMBER_PATH: {e}")
+
         members = sync_db_from_excel()
         return {
             "success": True,
-            "source": "onedrive_local_sync",
-            "message": f"Synchronized from local OneDrive file ({len(members)} members)",
-            "excel_file": str(ONEDRIVE_MEMBER_PATH),
+            "source": "onedrive_cloud_download",
+            "message": f"Downloaded and synchronized from live OneDrive Cloud ({len(members)} members)",
+            "excel_file": str(ONEDRIVE_MEMBER_PATH if ONEDRIVE_MEMBER_PATH.parent.exists() else LOCAL_MEMBER_PATH),
             "total_members": len(members),
         }
 
-    # Otherwise download from cloud URL
-    file_bytes = download_onedrive_workbook(target_url)
-    if not file_bytes:
-        members = sync_db_from_excel()
-        return {
-            "success": True,
-            "source": "local_fallback",
-            "message": "OneDrive sheet could not be downloaded; refreshed local Member.xlsx",
-            "excel_file": str(LOCAL_MEMBER_PATH),
-            "total_members": len(members),
-        }
-
-    # Save downloaded bytes
-    with open(LOCAL_MEMBER_PATH, "wb") as f:
-        f.write(file_bytes)
-
+    # 2. Fallback to local file on disk if cloud download is unavailable (e.g. offline)
     members = sync_db_from_excel()
     return {
         "success": True,
-        "source": "onedrive_download",
-        "message": f"Downloaded and synchronized from OneDrive URL ({len(members)} members)",
-        "excel_file": str(LOCAL_MEMBER_PATH),
+        "source": "onedrive_local_sync" if ONEDRIVE_MEMBER_PATH.exists() else "local_fallback",
+        "message": f"Synchronized from local file cache ({len(members)} members)",
+        "excel_file": str(get_primary_excel_path()),
         "total_members": len(members),
     }

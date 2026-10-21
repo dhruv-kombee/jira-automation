@@ -57,15 +57,17 @@ class GeminiConfig:
         self.api_keys = all_keys
         self.api_key = self.api_keys[0] if self.api_keys else None
 
-        # Default to gemini-3.5-flash-lite, normalizing user string variations
-        raw_model = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash-lite').strip()
+        # Default to gemini-3.1-flash-lite, normalizing user string variations
+        raw_model = os.getenv('GEMINI_MODEL', 'gemini-3.1-flash-lite').strip()
         cleaned_model = raw_model.lower().replace(" ", "-").replace("_", "-")
-        if "3.5" in cleaned_model and "lite" in cleaned_model:
+        if "3.1" in cleaned_model and "lite" in cleaned_model:
+            self.model = "gemini-3.1-flash-lite"
+        elif "3.5" in cleaned_model and "lite" in cleaned_model:
             self.model = "gemini-3.5-flash-lite"
         elif "2.5" in cleaned_model and "lite" in cleaned_model:
             self.model = "gemini-2.5-flash-lite"
-        elif cleaned_model in ("3.5-flash-lite", "flash-lite", "gemini-flash-lite"):
-            self.model = "gemini-3.5-flash-lite"
+        elif cleaned_model in ("3.1-flash-lite", "flash-lite", "gemini-flash-lite"):
+            self.model = "gemini-3.1-flash-lite"
         else:
             self.model = raw_model
 

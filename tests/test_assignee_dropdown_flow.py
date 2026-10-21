@@ -15,7 +15,7 @@ def setup_test_db(tmp_path):
     yield
     close_database()
 
-def test_assignee_dropdown_get_modal():
+def test_assignee_dropdown_get_direct_creation():
     db = get_db()
     db.execute('''
         INSERT INTO messages (message_id, sender_user_id, sender_display_name, message_text, confirmation_status, ai_ticket)
@@ -33,13 +33,14 @@ def test_assignee_dropdown_get_modal():
         })
     ))
     client = TestClient(app)
-    res = client.get('/api/jira/confirm-approval/test-msg-dropdown-1')
-    assert res.status_code == 200
-    assert 'assigneeSelect' in res.text
-    assert 'Santosh Yadav' in res.text
-    assert 'Musaib Khan' in res.text
-    assert 'Nishi Sharma' in res.text
-    assert 'Hemil Ghori' in res.text
+    with patch('src.services.jira_service.create_jira_issue', AsyncMock(return_value={'success': True, 'key': 'SCRUM-98', 'url': 'http://jira/SCRUM-98'})), \
+         patch('src.services.teams_notifier.send_ticket_created_notification', AsyncMock(return_value={'success': True})):
+        res = client.get('/api/jira/confirm-approval/test-msg-dropdown-1')
+        assert res.status_code == 200
+        assert 'SCRUM-98' in res.text
+        assert 'assigneeSelect' not in res.text
+        assert 'window.close()' in res.text
+
 
 def test_assignee_dropdown_auto_approval():
     db = get_db()
@@ -66,6 +67,7 @@ def test_assignee_dropdown_auto_approval():
         assert 'SCRUM-99' in res_auto.text
         assert mock_create.call_args.kwargs['assignee_name'] == 'Musaib Khan'
 
+
 def test_assignee_dropdown_post_form():
     db = get_db()
     db.execute('''
@@ -86,7 +88,7 @@ def test_assignee_dropdown_post_form():
     client = TestClient(app)
     with patch('src.services.jira_service.create_jira_issue', AsyncMock(return_value={'success': True, 'key': 'SCRUM-100', 'url': 'http://jira/SCRUM-100'})) as mock_post, \
          patch('src.services.teams_notifier.send_ticket_created_notification', AsyncMock(return_value={'success': True})):
-        res_post = client.post('/api/jira/confirm-approval/test-msg-dropdown-post', data={'assignee': 'Nishi Sharma'})
+        res_post = client.post('/api/jira/confirm-approval/test-msg-dropdown-post', data={'assignee': 'Nishi Sharma', 'reviewer': 'Musaib Khan'})
         assert res_post.status_code == 200
         assert 'SCRUM-100' in res_post.text
         assert mock_post.call_args.kwargs['assignee_name'] == 'Nishi Sharma'

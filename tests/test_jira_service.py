@@ -134,3 +134,58 @@ def test_text_to_adf_strips_asterisks():
     assert "heading" in types
     assert "bulletList" in types
 
+
+@pytest.mark.anyio
+async def test_create_jira_issue_dynamic_reporter():
+    from src.services.jira_service import create_jira_issue
+    with patch.object(config.jira, 'base_url', 'https://test-company.atlassian.net'), \
+         patch.object(config.jira, 'email', 'dhruv.d.kombee@gmail.com'), \
+         patch.object(config.jira, 'api_token', 'fake-token'), \
+         patch.object(config.jira, 'project_key', 'SCRUM'), \
+         patch("src.services.jira_service.resolve_jira_assignee") as mock_resolve:
+
+        # Let mock_resolve return a specific account ID for the reporter
+        mock_resolve.side_effect = lambda query, pk: "712020:test-reporter-id" if "Nishi" in query else None
+
+        mock_post_res = MagicMock()
+        mock_post_res.status_code = 201
+        mock_post_res.json.return_value = {
+            "id": "10099",
+            "key": "SCRUM-99",
+            "self": "https://test-company.atlassian.net/rest/api/3/issue/10099",
+        }
+
+        with patch("httpx.AsyncClient.post", return_value=mock_post_res) as mock_post:
+            res = await create_jira_issue(
+                summary="[UI] Modal dismiss button fails",
+                description="Clicking close does nothing",
+                reporter_name="Nishi Sharma",
+                ticket_data={"reporter_name": "Nishi Sharma", "approved_by": "PM Musaib Khan"},
+            )
+
+            assert res["success"] is True
+            assert res["key"] == "SCRUM-99"
+
+            # Verify that POST payload included the resolved reporter accountId
+            call_kwargs = mock_post.call_args.kwargs
+            sent_payload = call_kwargs.get("json")
+            assert sent_payload is not None
+            assert sent_payload["fields"]["reporter"] == {"accountId": "712020:test-reporter-id"}
+
+
+def test_build_jira_adf_with_approved_by():
+    import json
+    from src.services.jira_service import build_jira_adf
+    adf = build_jira_adf(
+        summary="Test Ticket",
+        reporter_name="Santosh Yadav",
+        reporter_role="CLIENT",
+        approved_by="PM Musaib Khan",
+    )
+    raw = json.dumps(adf)
+    assert "Reporter:" in raw
+    assert "Santosh Yadav (CLIENT)" in raw
+    assert "Approved By:" in raw
+    assert "PM Musaib Khan" in raw
+
+

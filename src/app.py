@@ -38,9 +38,39 @@ async def lifespan(app: FastAPI):
     tunnel_url = ensure_tunnel(port=config.port)
     if tunnel_url:
         logger.info(f"Public webhook tunnel ready: {tunnel_url}", extra={"event": "TUNNEL_READY", "url": tunnel_url})
-        # 4. Ensure Microsoft Graph subscription is online and points to active tunnel
-        sub_res = ensure_subscription_online(public_url=tunnel_url)
-        logger.info(f"Graph subscription status: {sub_res.get('status')}", extra={"event": "SUBSCRIPTION_STATUS", "details": sub_res})
+        # 4. Schedule automatic subscription verification once server port binds
+        async def _startup_subscription_init():
+            import asyncio
+            import socket
+            connected = False
+            for _ in range(30):
+                try:
+                    with socket.create_connection(("127.0.0.1", config.port), timeout=0.2):
+                        connected = True
+                        break
+                except (ConnectionRefusedError, OSError):
+                    await asyncio.sleep(0.2)
+
+            if not connected:
+                logger.warning(f"Server did not start listening on port {config.port} within timeout.")
+                return
+
+            active_tunnel = tunnel_url or ensure_tunnel(port=config.port) or config.webhook_public_url
+            if active_tunnel:
+                logger.info("Server port ready. Establishing Microsoft Graph subscription...")
+                sub_res = await asyncio.to_thread(ensure_subscription_online, active_tunnel)
+                status = sub_res.get("status")
+                logger.info(f"Graph subscription status: {status}", extra={"event": "SUBSCRIPTION_STATUS", "details": sub_res})
+                if status in ("created", "renewed", "active"):
+                    sub_data = sub_res.get("subscription") or {}
+                    sub_id = sub_data.get("id") or "active"
+                    exp = sub_data.get("expirationDateTime") or "active"
+                    print(f"\n[+] Microsoft Graph Subscription Online: {sub_id} (Expires: {exp})\n")
+            else:
+                logger.warning("Subscription initialization deferred: no active tunnel URL.")
+
+        import asyncio
+        asyncio.create_task(_startup_subscription_init())
     else:
         logger.warning("No tunnel available on startup. Run ngrok or set WEBHOOK_PUBLIC_URL.", extra={"event": "TUNNEL_WARNING"})
 
@@ -51,11 +81,18 @@ async def lifespan(app: FastAPI):
     from src.services.reminder_service import start_reminder_monitor, stop_reminder_monitor
     start_reminder_monitor()
 
-    # 7. Initial Teams roster check & sync with Member.xlsx and start monitor
+    # 7. Initial Teams roster check & sync with Member.xlsx, start roster monitor and file watcher
     try:
-        from src.services.member_sync_service import sync_teams_chat_roster, start_roster_monitor, stop_roster_monitor
+        from src.services.member_sync_service import (
+            sync_teams_chat_roster,
+            start_roster_monitor,
+            stop_roster_monitor,
+            start_excel_watcher,
+            stop_excel_watcher,
+        )
         sync_teams_chat_roster()
         start_roster_monitor()
+        start_excel_watcher()
     except Exception as roster_err:
         logger.debug(f"Initial roster sync notice: {roster_err}")
 
@@ -64,7 +101,7 @@ async def lifespan(app: FastAPI):
         extra={
             "event": "SERVER_START",
             "port": config.port,
-            "dashboard": f"http://localhost:{config.port}/",
+            "mode": "headless",
             "tunnel": tunnel_url,
         },
     )
@@ -75,8 +112,9 @@ async def lifespan(app: FastAPI):
     stop_auto_renew()
     stop_reminder_monitor()
     try:
-        from src.services.member_sync_service import stop_roster_monitor
+        from src.services.member_sync_service import stop_roster_monitor, stop_excel_watcher
         stop_roster_monitor()
+        stop_excel_watcher()
     except Exception:
         pass
     from src.tunnel import stop_tunnel
@@ -119,32 +157,46 @@ async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
 
-# Mount static assets
-if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
 from src.routes.admin import router as admin_router
+from src.routes.auth import router as auth_router
+from src.routes.approvals import router as approvals_router
 
-# Serve Dashboard at root and /dashboard
-@app.get("/", response_class=FileResponse)
-@app.get("/dashboard", response_class=FileResponse)
-def serve_dashboard():
-    index_file = STATIC_DIR / "index.html"
-    return FileResponse(str(index_file))
+# Headless root status info
+@app.get("/")
+def root_info():
+    return {
+        "status": "online",
+        "service": "JiraAutomation Teams Backend",
+        "mode": "headless",
+        "version": "0.1.0",
+        "message": "Teams to Jira Automation Hub is running in headless service mode.",
+    }
 
 
-# Serve Admin / Settings Management Hub at /settings and /admin
-@app.get("/settings", response_class=FileResponse)
-@app.get("/admin", response_class=FileResponse)
-def serve_settings():
-    settings_file = STATIC_DIR / "settings.html"
-    return FileResponse(str(settings_file))
+# Dashboard disabled endpoint
+@app.get("/dashboard")
+def dashboard_disabled():
+    return JSONResponse(
+        status_code=404,
+        content={"error": "Dashboard has been disabled. The service operates headlessly."},
+    )
+
+
+# Settings / Admin web console disabled (managed via Member.xlsx)
+@app.get("/settings")
+@app.get("/admin")
+def settings_disabled():
+    return JSONResponse(
+        status_code=404,
+        content={"message": "Web settings console disabled. Member details and roles are managed directly via Member.xlsx."},
+    )
 
 
 # Include routers
 app.include_router(health_router)
 app.include_router(webhooks_router)
+app.include_router(approvals_router)
 app.include_router(dashboard_router)
 app.include_router(admin_router)
+app.include_router(auth_router)
 

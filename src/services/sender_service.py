@@ -11,7 +11,10 @@ from src.services.member_sync_service import (
 class Roles:
     CLIENT = "CLIENT"
     PM = "PM"
+    TL = "TL"
+    HM = "HM"
     DEVELOPER = "DEVELOPER"
+    UNASSIGNED = "UNASSIGNED"
     ADMIN = "ADMIN"
     UNKNOWN = "UNKNOWN"
 
@@ -25,7 +28,7 @@ def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[s
         member = get_member_by_id_or_name(user_id=user_id, display_name=display_name)
         if member and member.get("role"):
             role = member["role"].strip().upper()
-            if role in (Roles.CLIENT, Roles.PM, Roles.DEVELOPER, Roles.ADMIN):
+            if role in (Roles.CLIENT, Roles.PM, Roles.TL, Roles.HM, Roles.DEVELOPER, Roles.UNASSIGNED, Roles.ADMIN):
                 return role
     except Exception as err:
         logger.debug(f"Error querying members from Excel: {err}")
@@ -41,15 +44,15 @@ def identify_sender_role(user_id: Optional[str] = None, display_name: Optional[s
             return Roles.DEVELOPER
 
     logger.info(
-        "Unknown sender",
+        "Unassigned / unlisted sender (treated as UNASSIGNED per FR-03)",
         extra={
-            "event": "UNKNOWN_SENDER",
+            "event": "UNASSIGNED_SENDER",
             "userId": user_id,
             "displayName": display_name,
         },
     )
 
-    return Roles.UNKNOWN
+    return Roles.UNASSIGNED
 
 
 TICKET_APPROVAL_NAMES = {
@@ -89,34 +92,62 @@ def is_ticket_approval_reaction(reaction_type: Optional[str]) -> bool:
     return False
 
 
+def is_role_authorized(role: Optional[str]) -> bool:
+    """Check if a role string is an authorized management role (TL, PM, HM)."""
+    if not role:
+        return False
+    return role.upper().strip() in ("TL", "PM", "HM")
+
+
 def is_user_authorized_approver(
     user_id: Optional[str] = None,
     display_name: Optional[str] = None,
     allow_client: Optional[bool] = None,
 ) -> bool:
-    """Check if a specific user has approval permissions based directly on Member.xlsx."""
-    allow_self = getattr(config.roles, "allow_self_approval", True) if allow_client is None else allow_client
-
+    """Check if a specific user has approval permissions based directly on Member.xlsx (SSOT).
+    Strictly decided by the sheet:
+      1. 'Can Approve (1/0)': 1 = Authorized, 0 = Blocked
+      2. 'Level': Level 1 (TL), Level 2 (PM), Level 3 (HM) = Authorized; Level 0 / '-' = Blocked
+    """
     member = get_member_by_id_or_name(user_id=user_id, display_name=display_name)
     if member:
-        role = (member.get("role") or "").upper()
-        can_approve = bool(member.get("can_approve"))
-        if role == "PM":
-            return True
-        if role == "CLIENT":
-            return bool(allow_self and can_approve)
-        if can_approve:
+        # Check active status: Only active members are authorized
+        if not member.get("is_active", True):
+            return False
+
+        can_approve_flag = member.get("can_approve")
+        level = str(member.get("level") or "").upper().strip()
+        role = (member.get("role") or "").upper().strip()
+
+        # 1. Primary Decision: The sheet's 'Can Approve (1/0)' flag directly decides
+        if can_approve_flag is not None:
+            if not bool(can_approve_flag):
+                return False
+            if bool(can_approve_flag):
+                return True
+
+        # 2. Secondary Decision: Hierarchy Level in sheet
+        # Level 1 (TL), Level 2 (PM), Level 3 (HM) are authorized
+        if level in ("LEVEL 1", "LEVEL 2", "LEVEL 3", "1", "2", "3", "L1", "L2", "L3"):
             return True
 
-    # Check fallback configured GUIDs
+        # Level 0, 0, or '-' are not authorized
+        if level in ("LEVEL 0", "0", "L0", "-"):
+            return False
+
+        # 3. Role fallback
+        if role in ("TL", "PM", "HM"):
+            return True
+
+        return False
+
+    # Fallback configured PM GUID only if not identified as a non-management user
     u_id_clean = (user_id or "").lower().strip()
-    if u_id_clean:
-        if config.roles.pm and config.roles.pm.lower().strip() == u_id_clean:
-            return True
-        if allow_self and config.roles.client and config.roles.client.lower().strip() == u_id_clean:
-            return True
+    if u_id_clean and config.roles.pm and config.roles.pm.lower().strip() == u_id_clean:
+        return True
 
     return False
+
 
 
 def is_pm_approval(reactions: Optional[list], allow_client: Optional[bool] = None) -> bool:
