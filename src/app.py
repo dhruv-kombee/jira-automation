@@ -34,10 +34,10 @@ async def lifespan(app: FastAPI):
     # 2. Database
     init_database()
 
-    # 3. Tunnel detection / startup
-    tunnel_url = ensure_tunnel(port=config.port)
-    if tunnel_url:
-        logger.info(f"Public webhook tunnel ready: {tunnel_url}", extra={"event": "TUNNEL_READY", "url": tunnel_url})
+    # 3. Ingress detection / startup (Cloud public URL or local ngrok tunnel)
+    public_url = config.webhook_public_url or ensure_tunnel(port=config.port)
+    if public_url:
+        logger.info(f"Public webhook URL ready: {public_url}", extra={"event": "PUBLIC_URL_READY", "url": public_url})
         # 4. Schedule automatic subscription verification once server port binds
         async def _startup_subscription_init():
             import asyncio
@@ -55,10 +55,10 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"Server did not start listening on port {config.port} within timeout.")
                 return
 
-            active_tunnel = tunnel_url or ensure_tunnel(port=config.port) or config.webhook_public_url
-            if active_tunnel:
+            active_url = config.webhook_public_url or public_url or ensure_tunnel(port=config.port)
+            if active_url:
                 logger.info("Server port ready. Establishing Microsoft Graph subscription...")
-                sub_res = await asyncio.to_thread(ensure_subscription_online, active_tunnel)
+                sub_res = await asyncio.to_thread(ensure_subscription_online, active_url)
                 status = sub_res.get("status")
                 logger.info(f"Graph subscription status: {status}", extra={"event": "SUBSCRIPTION_STATUS", "details": sub_res})
                 if status in ("created", "renewed", "active"):
@@ -67,12 +67,12 @@ async def lifespan(app: FastAPI):
                     exp = sub_data.get("expirationDateTime") or "active"
                     print(f"\n[+] Microsoft Graph Subscription Online: {sub_id} (Expires: {exp})\n")
             else:
-                logger.warning("Subscription initialization deferred: no active tunnel URL.")
+                logger.warning("Subscription initialization deferred: no active public webhook URL.")
 
         import asyncio
         asyncio.create_task(_startup_subscription_init())
     else:
-        logger.warning("No tunnel available on startup. Run ngrok or set WEBHOOK_PUBLIC_URL.", extra={"event": "TUNNEL_WARNING"})
+        logger.warning("No tunnel or WEBHOOK_PUBLIC_URL available on startup. Run ngrok or set WEBHOOK_PUBLIC_URL.", extra={"event": "TUNNEL_WARNING"})
 
     # 5. Start background auto-renewal loop
     start_auto_renew()
@@ -84,12 +84,15 @@ async def lifespan(app: FastAPI):
     # 7. Initial Teams roster check & sync with Member.xlsx, start roster monitor and file watcher
     try:
         from src.services.member_sync_service import (
+            sync_from_onedrive_sheet,
             sync_teams_chat_roster,
             start_roster_monitor,
             stop_roster_monitor,
             start_excel_watcher,
             stop_excel_watcher,
         )
+        # Seed local cache from live OneDrive Cloud URL first (vital for headless / container environments)
+        sync_from_onedrive_sheet()
         sync_teams_chat_roster()
         start_roster_monitor()
         start_excel_watcher()
@@ -102,7 +105,7 @@ async def lifespan(app: FastAPI):
             "event": "SERVER_START",
             "port": config.port,
             "mode": "headless",
-            "tunnel": tunnel_url,
+            "public_url": public_url,
         },
     )
 

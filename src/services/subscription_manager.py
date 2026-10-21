@@ -35,9 +35,9 @@ def check_tunnel_reachable(url: Optional[str]) -> bool:
         "User-Agent": "teams-automation-probe",
     }
     try:
-        # Check /health endpoint with short timeout
+        # Check /health endpoint with resilient timeout (accommodates cloud edge routers)
         health_url = f"{clean_url}/health"
-        res = httpx.get(health_url, headers=headers, timeout=3.5)
+        res = httpx.get(health_url, headers=headers, timeout=8.0)
         if res.status_code == 200:
             return True
     except Exception:
@@ -45,7 +45,7 @@ def check_tunnel_reachable(url: Optional[str]) -> bool:
 
     try:
         # Fallback check on root URL
-        res = httpx.get(clean_url, headers=headers, timeout=3.5)
+        res = httpx.get(clean_url, headers=headers, timeout=8.0)
         return res.status_code < 500 and res.status_code != 404
     except Exception:
         return False

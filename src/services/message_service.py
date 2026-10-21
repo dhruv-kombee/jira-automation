@@ -355,20 +355,30 @@ def is_bot_or_ticket_created_message(
     if not normalized_message:
         return False
 
+    def _row_val(row_obj: Any, key: str, default: Any = None) -> Any:
+        if not row_obj:
+            return default
+        if isinstance(row_obj, dict):
+            return row_obj.get(key, default)
+        try:
+            return row_obj[key]
+        except (IndexError, KeyError):
+            return default
+
     # 1. Existing Jira key or completed confirmation status
     if normalized_message.get("jira_issue_key") or normalized_message.get("jiraIssueKey"):
         return True
-    if row and row["jira_issue_key"]:
+    if row and _row_val(row, "jira_issue_key"):
         return True
     if (normalized_message.get("confirmation_status") or "").upper() in ("APPROVED", "RESOLVED"):
         return True
-    if row and (row["confirmation_status"] or "").upper() in ("APPROVED", "RESOLVED"):
+    if row and (_row_val(row, "confirmation_status") or "").upper() in ("APPROVED", "RESOLVED"):
         return True
 
     msg_obj = normalized_message.get("message") or {}
     text = ((msg_obj.get("text") or "") if isinstance(msg_obj, dict) else "").strip()
-    if not text and row and row["message_text"]:
-        text = str(row["message_text"]).strip()
+    if not text and row and _row_val(row, "message_text"):
+        text = str(_row_val(row, "message_text")).strip()
 
     text_lower = text.lower()
 
@@ -399,8 +409,8 @@ def is_bot_or_ticket_created_message(
 
     # 5. Check sender: bots, webhooks, or empty sender identity with no human text
     sender = normalized_message.get("sender") or {}
-    sender_name = (sender.get("displayName") or (row["sender_display_name"] if row else "") or "").strip().lower()
-    sender_id = sender.get("userId") or (row["sender_user_id"] if row else None)
+    sender_name = (sender.get("displayName") or (_row_val(row, "sender_display_name") if row else "") or "").strip().lower()
+    sender_id = sender.get("userId") or (_row_val(row, "sender_user_id") if row else None)
 
     bot_names = ("webhook", "jira bot", "jira automation", "workflow bot", "power automate", "flow", "connector")
     if any(b in sender_name for b in bot_names):
@@ -409,7 +419,7 @@ def is_bot_or_ticket_created_message(
         return True
 
     # 6. Check if thread parent already has an active Jira ticket
-    reply_to_id = normalized_message.get("replyToId") or (row["reply_to_id"] if row else None)
+    reply_to_id = normalized_message.get("replyToId") or (_row_val(row, "reply_to_id") if row else None)
     if reply_to_id:
         from src.repositories.message_repository import get_parent_message
         parent_msg = get_parent_message(reply_to_id)

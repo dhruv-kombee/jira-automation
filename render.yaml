@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: jira-automation-hub
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.app:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: LOG_LEVEL
+        value: INFO
+      - key: ALLOW_SELF_APPROVAL
+        value: "false"
+      - key: WEBHOOK_PUBLIC_URL
+        sync: false
+      - key: MICROSOFT_TENANT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: TEAMS_CHAT_ID
+        sync: false
+      - key: TEAMS_WEBHOOK_URL
+        sync: false
+      - key: MEMBER_SHEET_URL
+        sync: false
+      - key: GEMINI_API_KEY_1
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.1-flash-lite
+      - key: JIRA_BASE_URL
+        sync: false
+      - key: JIRA_EMAIL
+        sync: false
+      - key: JIRA_API_TOKEN
+        sync: false
+      - key: JIRA_PROJECT_KEY
+        value: SCRUM
+      - key: JIRA_DEFAULT_ISSUE_TYPE
+        value: Bug

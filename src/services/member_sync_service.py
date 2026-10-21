@@ -1814,6 +1814,14 @@ async def _excel_file_watcher_loop():
                         current_hash = hashlib.md5(cloud_bytes).hexdigest()
                         if last_cloud_bytes_hash is None:
                             last_cloud_bytes_hash = current_hash
+                            if not target.exists() or not LOCAL_MEMBER_PATH.exists():
+                                try:
+                                    LOCAL_MEMBER_PATH.parent.mkdir(parents=True, exist_ok=True)
+                                    with open(LOCAL_MEMBER_PATH, "wb") as f:
+                                        f.write(cloud_bytes)
+                                    await loop.run_in_executor(None, sync_db_from_excel)
+                                except Exception:
+                                    pass
                         elif current_hash != last_cloud_bytes_hash:
                             last_cloud_bytes_hash = current_hash
                             logger.info("☁️ Detected change in live Excel Online (cloud sheet); syncing local files & database")
