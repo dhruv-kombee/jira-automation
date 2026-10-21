@@ -486,7 +486,7 @@ async def check_unanswered_client_issues():
           AND (
               reminder_sent_at IS NULL
               OR reminder_email_status IS NULL
-              OR reminder_email_status NOT IN ('SENT', 'CANCELLED', 'SUPPRESSED_BACKLOG')
+              OR reminder_email_status NOT IN ('SENT', 'CANCELLED', 'SUPPRESSED_BACKLOG', 'HM_FAILED', 'FAILED')
           )
         ORDER BY id DESC
         LIMIT 25

@@ -21,6 +21,7 @@ from src.services.sender_service import identify_sender_role
 # In-memory cache for downloaded attachments per message_id (for Jira upload upon PM approval)
 _message_attachment_cache: Dict[str, List[Dict[str, Any]]] = {}
 _message_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_step1_triage_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def strip_html(html_str: str) -> str:
@@ -1453,139 +1454,181 @@ async def check_and_auto_create_jira_ticket(
         # Reaction was disapproval on a non-triaged message; ignore
         return None
 
-    # Retrieve or extract AI ticket draft
-    ai_ticket = normalized_message.get("aiTicket")
-    if not ai_ticket and row["ai_ticket"]:
-        try:
-            ai_ticket = json.loads(row["ai_ticket"]) if isinstance(row["ai_ticket"], str) else row["ai_ticket"]
-        except Exception:
-            ai_ticket = None
+    # Dedicated concurrency lock to ensure Step 1 triage and confirmation card sending is strictly idempotent
+    async with _step1_triage_locks[target_msg_id]:
+        # Fresh DB re-check inside the lock
+        fresh_row = db.execute(
+            "SELECT confirmation_status, jira_issue_key, ai_ticket, message_text, sender_display_name, sender_user_id, reply_to_id, chat_id, team_id, channel_id, created_at FROM messages WHERE message_id = ?",
+            (target_msg_id,),
+        ).fetchone()
 
-    raw_text = (normalized_message.get("message") or {}).get("text") or row["message_text"] or ""
-    reporter_name = normalized_message.get("sender", {}).get("displayName") or row["sender_display_name"] or "Client"
+        if fresh_row:
+            if fresh_row["jira_issue_key"]:
+                return {"key": fresh_row["jira_issue_key"], "already_existed": True}
+            if (fresh_row["confirmation_status"] or "").upper() in ("AWAITING_FINAL_CONFIRMATION", "APPROVED", "RESOLVED", "DECLINED"):
+                logger.info(
+                    f"Message {target_msg_id} is already in state '{fresh_row['confirmation_status']}'; suppressing duplicate Step 1 triage card.",
+                    extra={"event": "DUPLICATE_CONFIRMATION_CARD_SUPPRESSED", "messageId": target_msg_id, "status": fresh_row["confirmation_status"]},
+                )
+                return {"status": fresh_row["confirmation_status"], "already_existed": True}
 
-    # Context enrichment: If message is a reply in a thread, pull parent message context
-    reply_to_id = normalized_message.get("replyToId") or (row["reply_to_id"] if row else None)
-    if reply_to_id:
-        from src.repositories.message_repository import get_parent_message
-        parent_msg = get_parent_message(reply_to_id)
-        if parent_msg and parent_msg.get("jira_issue_key"):
-            logger.info(
-                f"Thread parent {reply_to_id} already has Jira ticket {parent_msg['jira_issue_key']}; skipping creation.",
-                extra={"event": "THREAD_PARENT_ALREADY_HAS_TICKET", "parentMessageId": reply_to_id, "ticket": parent_msg["jira_issue_key"]},
+        # Retrieve or extract AI ticket draft
+        ai_ticket = normalized_message.get("aiTicket")
+        if not ai_ticket and fresh_row and fresh_row["ai_ticket"]:
+            try:
+                ai_ticket = json.loads(fresh_row["ai_ticket"]) if isinstance(fresh_row["ai_ticket"], str) else fresh_row["ai_ticket"]
+            except Exception:
+                ai_ticket = None
+
+        raw_text = (normalized_message.get("message") or {}).get("text") or (fresh_row["message_text"] if fresh_row else "") or ""
+        reporter_name = normalized_message.get("sender", {}).get("displayName") or (fresh_row["sender_display_name"] if fresh_row else "") or "Client"
+
+        # Context enrichment: If message is a reply in a thread, pull parent message context
+        reply_to_id = normalized_message.get("replyToId") or (fresh_row["reply_to_id"] if fresh_row else None)
+        if reply_to_id:
+            from src.repositories.message_repository import get_parent_message
+            parent_msg = get_parent_message(reply_to_id)
+            if parent_msg and parent_msg.get("jira_issue_key"):
+                logger.info(
+                    f"Thread parent {reply_to_id} already has Jira ticket {parent_msg['jira_issue_key']}; skipping creation.",
+                    extra={"event": "THREAD_PARENT_ALREADY_HAS_TICKET", "parentMessageId": reply_to_id, "ticket": parent_msg["jira_issue_key"]},
+                )
+                return {"key": parent_msg["jira_issue_key"], "already_existed": True}
+            if parent_msg and parent_msg.get("message_text"):
+                raw_text = f"[In reply to thread: \"{parent_msg.get('message_text')}\"]\n\n{raw_text}"
+                if msg_id not in _message_attachment_cache and reply_to_id in _message_attachment_cache:
+                    _message_attachment_cache[msg_id] = _message_attachment_cache[reply_to_id]
+
+        if not is_client_message or not raw_text.strip():
+            logger.debug(f"Message {msg_id} is not a client message or has empty text; skipping Step 1 triage.")
+            return None
+
+        if not ai_ticket or not ai_ticket.get("summary"):
+            from src.services.ai_service import extract_jira_ticket
+            cached_atts = _message_attachment_cache.get(msg_id) or []
+            ai_ticket = await extract_jira_ticket(
+                raw_text,
+                sender_name=reporter_name,
+                sender_role=sender_role,
+                attachments=cached_atts,
             )
-            return {"key": parent_msg["jira_issue_key"], "already_existed": True}
-        if parent_msg and parent_msg.get("message_text"):
-            raw_text = f"[In reply to thread: \"{parent_msg.get('message_text')}\"]\n\n{raw_text}"
-            if msg_id not in _message_attachment_cache and reply_to_id in _message_attachment_cache:
-                _message_attachment_cache[msg_id] = _message_attachment_cache[reply_to_id]
 
-    if not is_client_message or not raw_text.strip():
-        logger.debug(f"Message {msg_id} is not a client message or has empty text; skipping Step 1 triage.")
-        return None
+        # Only send confirmation card if AI identifies an actual issue/bug
+        if not ai_ticket.get("is_ticket_request"):
+            logger.info(
+                "PM approved message, but content is not an issue/ticket request",
+                extra={"event": "PM_APPROVAL_NON_TICKET", "messageId": msg_id},
+            )
+            return None
 
-    if not ai_ticket or not ai_ticket.get("summary"):
-        from src.services.ai_service import extract_jira_ticket
-        cached_atts = _message_attachment_cache.get(msg_id) or []
-        ai_ticket = await extract_jira_ticket(
-            raw_text,
-            sender_name=reporter_name,
-            sender_role=sender_role,
-            attachments=cached_atts,
+        # Ensure issues list is populated
+        issues = ai_ticket.get("issues")
+        if not issues or not isinstance(issues, list):
+            issues = [{
+                "summary": ai_ticket.get("summary", "Issue Report"),
+                "description": ai_ticket.get("description", ""),
+                "issue_type": ai_ticket.get("issue_type", "Bug"),
+                "priority": ai_ticket.get("priority", "Medium"),
+                "affected_module": ai_ticket.get("affected_module", "General"),
+                "suggested_assignee": ai_ticket.get("suggested_assignee") or "Unassigned",
+                "observed_behavior": ai_ticket.get("observed_behavior") or ai_ticket.get("evidence"),
+                "evidence": ai_ticket.get("evidence") or [],
+            }]
+            ai_ticket["issues"] = issues
+
+        if not ai_ticket.get("reporter_name"):
+            ai_ticket["reporter_name"] = reporter_name
+        if not ai_ticket.get("reporter_role"):
+            ai_ticket["reporter_role"] = sender_role
+        if not ai_ticket.get("raw_message"):
+            ai_ticket["raw_message"] = raw_text
+
+        # Update SQLite: save ai_ticket and mark AWAITING_FINAL_CONFIRMATION immediately inside lock
+        db.execute(
+            "UPDATE messages SET confirmation_status = 'AWAITING_FINAL_CONFIRMATION', ai_ticket = ? WHERE message_id = ?",
+            (json.dumps(ai_ticket), msg_id),
         )
 
-    # Only send confirmation card if AI identifies an actual issue/bug
-    if not ai_ticket.get("is_ticket_request"):
+        # Check for potential recent duplicates
+        from src.repositories.message_repository import find_recent_similar_tickets
+        dup_candidates = find_recent_similar_tickets(
+            summary=ai_ticket.get("summary", ""),
+            chat_id=normalized_message.get("chatId") or (fresh_row["chat_id"] if fresh_row else None),
+        )
+        duplicate_warning = None
+        if dup_candidates:
+            other_candidates = [d for d in dup_candidates if d.get("message_id") != msg_id]
+            if other_candidates:
+                duplicate_warning = other_candidates[0]
+
+        extractor_mode = ai_ticket.get("extractor")
+
+        # Post Pending Approval Card to Teams
+        from src.services.teams_notifier import send_pending_approval_notification
+        notify_res = await send_pending_approval_notification(
+            message_id=msg_id,
+            issues=issues,
+            reporter=reporter_name,
+            raw_message=raw_text,
+            created_at=normalized_message.get("createdAt") or (fresh_row["created_at"] if fresh_row else None),
+            chat_id=normalized_message.get("chatId") or (fresh_row["chat_id"] if fresh_row else None),
+            team_id=normalized_message.get("teamId") or (fresh_row["team_id"] if fresh_row else None),
+            channel_id=normalized_message.get("channelId") or (fresh_row["channel_id"] if fresh_row else None),
+            parent_message_id=msg_id,
+            duplicate_warning=duplicate_warning,
+            extractor_mode=extractor_mode,
+        )
+
         logger.info(
-            "PM approved message, but content is not an issue/ticket request",
-            extra={"event": "PM_APPROVAL_NON_TICKET", "messageId": msg_id},
+            f"📋 Sent issue triage confirmation card to Teams for message {msg_id} ({len(issues)} issue(s))",
+            extra={"event": "PM_PENDING_CONFIRMATION_SENT", "messageId": msg_id, "issuesCount": len(issues)},
         )
-        return None
 
-    # Ensure issues list is populated
-    issues = ai_ticket.get("issues")
-    if not issues or not isinstance(issues, list):
-        issues = [{
-            "summary": ai_ticket.get("summary", "Issue Report"),
-            "description": ai_ticket.get("description", ""),
-            "issue_type": ai_ticket.get("issue_type", "Bug"),
-            "priority": ai_ticket.get("priority", "Medium"),
-            "affected_module": ai_ticket.get("affected_module", "General"),
-            "suggested_assignee": ai_ticket.get("suggested_assignee") or "Unassigned",
-            "observed_behavior": ai_ticket.get("observed_behavior") or ai_ticket.get("evidence"),
-            "evidence": ai_ticket.get("evidence") or [],
-        }]
-        ai_ticket["issues"] = issues
+        # Broadcast updated message state to dashboard
+        try:
+            from src.services.broadcaster import broadcast_message
+            normalized_message["confirmation_status"] = "AWAITING_FINAL_CONFIRMATION"
+            normalized_message["aiTicket"] = ai_ticket
+            await broadcast_message({
+                "type": "MESSAGE_UPDATED",
+                "message": normalized_message,
+                "senderRole": sender_role,
+                "stored": False,
+                "duplicate": True,
+                "updated": True,
+            })
+        except Exception:
+            pass
 
-    if not ai_ticket.get("reporter_name"):
-        ai_ticket["reporter_name"] = reporter_name
-    if not ai_ticket.get("reporter_role"):
-        ai_ticket["reporter_role"] = sender_role
-    if not ai_ticket.get("raw_message"):
-        ai_ticket["raw_message"] = raw_text
+        return {
+            "status": "AWAITING_FINAL_CONFIRMATION",
+            "issues_count": len(issues),
+            "notification": notify_res,
+        }
 
-    # Update SQLite: save ai_ticket and mark AWAITING_FINAL_CONFIRMATION
-    db.execute(
-        "UPDATE messages SET confirmation_status = 'AWAITING_FINAL_CONFIRMATION', ai_ticket = ? WHERE message_id = ?",
-        (json.dumps(ai_ticket), msg_id),
-    )
 
-    # Check for potential recent duplicates
-    from src.repositories.message_repository import find_recent_similar_tickets
-    dup_candidates = find_recent_similar_tickets(
-        summary=ai_ticket.get("summary", ""),
-        chat_id=normalized_message.get("chatId") or row["chat_id"],
-    )
-    duplicate_warning = None
-    if dup_candidates:
-        other_candidates = [d for d in dup_candidates if d.get("message_id") != msg_id]
-        if other_candidates:
-            duplicate_warning = other_candidates[0]
-
-    extractor_mode = ai_ticket.get("extractor")
-
-    # Post Pending Approval Card to Teams
-    from src.services.teams_notifier import send_pending_approval_notification
-    notify_res = await send_pending_approval_notification(
-        message_id=msg_id,
-        issues=issues,
-        reporter=reporter_name,
-        raw_message=raw_text,
-        created_at=normalized_message.get("createdAt") or (row["created_at"] if row else None),
-        chat_id=normalized_message.get("chatId") or row["chat_id"],
-        team_id=normalized_message.get("teamId") or row["team_id"],
-        channel_id=normalized_message.get("channelId") or row["channel_id"],
-        parent_message_id=msg_id,
-        duplicate_warning=duplicate_warning,
-        extractor_mode=extractor_mode,
-    )
-
-    logger.info(
-        f"📋 Sent issue triage confirmation card to Teams for message {msg_id} ({len(issues)} issue(s))",
-        extra={"event": "PM_PENDING_CONFIRMATION_SENT", "messageId": msg_id, "issuesCount": len(issues)},
-    )
-
-    # Broadcast updated message state to dashboard
-    try:
-        from src.services.broadcaster import broadcast_message
-        normalized_message["confirmation_status"] = "AWAITING_FINAL_CONFIRMATION"
-        normalized_message["aiTicket"] = ai_ticket
-        await broadcast_message({
-            "type": "MESSAGE_UPDATED",
-            "message": normalized_message,
-            "senderRole": sender_role,
-            "stored": False,
-            "duplicate": True,
-            "updated": True,
-        })
-    except Exception:
-        pass
-
-    return {
-        "status": "AWAITING_FINAL_CONFIRMATION",
-        "issues_count": len(issues),
-        "notification": notify_res,
-    }
+def _chat_has_existing_card_for_message(raw_messages: list, target_msg_id: str) -> bool:
+    """Check if any message in recent Graph messages references target_msg_id (e.g. Adaptive Card / notification)."""
+    if not target_msg_id or not raw_messages:
+        return False
+    target_str = str(target_msg_id).strip()
+    for m in raw_messages:
+        if str(m.get("id") or "").strip() == target_str:
+            continue
+        # Thread reply
+        if str(m.get("replyToId") or "").strip() == target_str:
+            return True
+        # Body text / HTML
+        body_content = ((m.get("body") or {}).get("content") or "")
+        if target_str in body_content:
+            return True
+        # Attachments (Adaptive Card JSON payload)
+        for att in (m.get("attachments") or []):
+            att_content = att.get("content") or ""
+            att_str = json.dumps(att_content) if isinstance(att_content, dict) else str(att_content)
+            if target_str in att_str:
+                return True
+    return False
 
 
 async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
@@ -1679,14 +1722,26 @@ async def sync_recent_messages(top: int = 15) -> Dict[str, Any]:
             ).fetchone()
             if not is_bot_or_ticket_created_message(normalized, m_row) and m_row and not m_row["jira_issue_key"]:
                 if not m_row["confirmation_status"]:
-                    logger.info(
-                        f"Sync detected untriaged message {msg_id} with PM reaction; triggering triage",
-                        extra={"event": "SYNC_TRIAGE_TRIGGER", "messageId": msg_id},
-                    )
-                    try:
-                        await check_and_auto_create_jira_ticket(normalized, sender_role)
-                    except Exception as t_err:
-                        logger.debug(f"Sync triage trigger error: {t_err}")
+                    # Guard: If Teams chat already contains a confirmation card / ticket card for this message
+                    # (e.g. from before a server restart / redeploy), restore DB state without sending duplicate cards.
+                    if _chat_has_existing_card_for_message(raw_messages, msg_id):
+                        logger.info(
+                            f"Sync detected that Teams chat already has a confirmation card for message {msg_id}; restoring status without sending duplicate card.",
+                            extra={"event": "SYNC_CARD_ALREADY_EXISTS", "messageId": msg_id},
+                        )
+                        db.execute(
+                            "UPDATE messages SET confirmation_status = 'AWAITING_FINAL_CONFIRMATION' WHERE message_id = ?",
+                            (msg_id,),
+                        )
+                    else:
+                        logger.info(
+                            f"Sync detected untriaged message {msg_id} with PM reaction; triggering triage",
+                            extra={"event": "SYNC_TRIAGE_TRIGGER", "messageId": msg_id},
+                        )
+                        try:
+                            await check_and_auto_create_jira_ticket(normalized, sender_role)
+                        except Exception as t_err:
+                            logger.debug(f"Sync triage trigger error: {t_err}")
 
         if result.get("stored"):
             new_count += 1

@@ -216,3 +216,68 @@ async def test_non_issue_message_ignored(tmp_path):
         assert res is None
         mock_pending_notify.assert_not_called()
         mock_create_jira.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reactions_prevent_duplicate_confirmation_cards(tmp_path):
+    """Verify that multiple concurrent reactions on the same message ONLY generate ONE confirmation card."""
+    import asyncio
+    test_db = tmp_path / "test_concurrency.db"
+    init_database(str(test_db))
+
+    msg_id = "msg-concurrent-1"
+    normalized_msg = {
+        "messageId": msg_id,
+        "chatId": "chat-concurrent",
+        "sender": {"userId": "client-1", "displayName": "Dhruv dobariya"},
+        "message": {"text": "i found the issue in the setting button .", "createdAt": "2026-10-21T14:50:00Z"},
+        "reactions": [{"userId": "pm-1", "displayName": "Hemil Ghori", "reactionType": "🎟️"}],
+    }
+    store_message(normalized_msg)
+
+    mock_ai_ticket = {
+        "is_ticket_request": True,
+        "summary": "[Settings] Settings button functionality issue",
+        "description": "Button issue reported",
+        "issues": [{"summary": "[Settings] Settings button functionality issue", "issue_type": "Bug", "priority": "Medium"}],
+    }
+
+    call_count = 0
+
+    async def fake_extract(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        await asyncio.sleep(0.05)  # simulate network latency
+        return mock_ai_ticket
+
+    with patch("src.config.JiraConfig.is_configured", new_callable=PropertyMock, return_value=True), \
+         patch("src.services.ai_service.extract_jira_ticket", side_effect=fake_extract), \
+         patch("src.services.teams_notifier.send_pending_approval_notification", AsyncMock(return_value={"success": True})) as mock_notify:
+
+        # Fire two concurrent triage requests simultaneously
+        res1, res2 = await asyncio.gather(
+            check_and_auto_create_jira_ticket(normalized_msg, "CLIENT"),
+            check_and_auto_create_jira_ticket(normalized_msg, "CLIENT"),
+        )
+
+        # Both return a valid result, but notification MUST only be sent ONCE
+        assert mock_notify.call_count == 1
+        assert call_count == 1
+
+
+def test_chat_has_existing_card_detection():
+    """Verify _chat_has_existing_card_for_message detects cards in raw_messages."""
+    from src.services.message_service import _chat_has_existing_card_for_message
+
+    target_id = "1792572590189"
+    raw_msgs = [
+        {"id": target_id, "body": {"content": "i found the issue in the setting button ."}},
+        {
+            "id": "card-msg-1",
+            "body": {"content": f"<div>Ticket Confirmation: <a href='https://app.com/api/jira/approve-issue/{target_id}'>Approve</a></div>"},
+            "attachments": [],
+        },
+    ]
+
+    assert _chat_has_existing_card_for_message(raw_msgs, target_id) is True
+    assert _chat_has_existing_card_for_message(raw_msgs, "non-existent-id") is False
