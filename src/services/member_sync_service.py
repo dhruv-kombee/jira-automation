@@ -1693,7 +1693,7 @@ def sync_teams_chat_roster(chat_id: Optional[str] = None, team_id: Optional[str]
 
 # Background periodic monitor for roster auto-discovery (every 15s)
 _roster_monitor_task: Optional[asyncio.Task] = None
-ROSTER_MONITOR_INTERVAL_SECONDS = 15  # Rapid 15s interval for accurate join/leave tracking
+ROSTER_MONITOR_INTERVAL_SECONDS = 60  # Polled every 60s to prevent event loop & bandwidth contention on Render
 
 
 async def _roster_monitor_loop():
@@ -1803,8 +1803,8 @@ async def _excel_file_watcher_loop():
                 except Exception as watch_err:
                     logger.debug(f"Excel file watcher check notice: {watch_err}")
 
-            # 3. Periodically poll OneDrive Cloud URL (every 15s) to catch live Excel Online edits
-            if cloud_poll_ticks >= 5:
+            # 3. Periodically poll OneDrive Cloud URL (every 60s) to catch live Excel Online edits
+            if cloud_poll_ticks >= 20:
                 cloud_poll_ticks = 0
                 try:
                     loop = asyncio.get_running_loop()

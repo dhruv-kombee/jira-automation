@@ -575,7 +575,7 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
             # retry with backoff and schedule a deferred safety-net check
             change_type = (notification.get("changeType") or "").lower()
             if change_type != "created" and not graph_message.get("reactions"):
-                for delay in (1.5, 2.5, 3.5):
+                for delay in (0.4, 0.8, 1.2):
                     await asyncio.sleep(delay)
                     try:
                         refreshed = await get_chat_message(chat_id, message_id)
@@ -642,7 +642,7 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
 
             change_type = (notification.get("changeType") or "").lower()
             if change_type != "created" and not graph_message.get("reactions"):
-                for delay in (1.5, 2.5, 3.5):
+                for delay in (0.4, 0.8, 1.2):
                     await asyncio.sleep(delay)
                     try:
                         refreshed = (
@@ -726,56 +726,74 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
 
     # Feed new members directly into shared Member.xlsx first (Single Source of Truth)
     # Existing members strictly preserve their configured roles and permissions.
+    # Fast path: skip expensive Excel loading on every message if member is already known.
     sender_id = normalized["sender"].get("userId")
     sender_name = normalized["sender"].get("displayName")
     if sender_name and sender_name.strip() and sender_name.lower() != "unknown":
         try:
-            from src.services.member_sync_service import feed_member_to_excel
-            feed_member_to_excel(
-                display_name=sender_name,
-                user_id=sender_id,
-                role=None,
-                level=None,
-                can_approve=None,
-            )
+            from src.services.member_sync_service import get_member_by_id_or_name, feed_member_to_excel
+            existing_m = get_member_by_id_or_name(user_id=sender_id, display_name=sender_name)
+            if not existing_m or not existing_m.get("user_id"):
+                await asyncio.to_thread(
+                    feed_member_to_excel,
+                    display_name=sender_name,
+                    user_id=sender_id,
+                    role=None,
+                    level=None,
+                    can_approve=None,
+                )
         except Exception as reg_err:
             logger.debug(f"Excel member feed check: {reg_err}")
 
     sender_role = identify_sender_role(sender_id, sender_name)
 
-    # Multimodal attachment downloading & caching
+    # Multimodal attachment downloading & caching (Concurrent parallel fetch)
     downloaded_attachments: List[Dict[str, Any]] = []
-    # 1. Inline hosted images (screenshots pasted directly in Teams)
-    for idx, img_url in enumerate(normalized.get("inlineImages", [])):
+
+    async def _download_one_inline_image(idx: int, img_url: str) -> Optional[Dict[str, Any]]:
         try:
             dl_res = await download_hosted_content(img_url)
             if dl_res:
                 b_data, c_type = dl_res
-                downloaded_attachments.append({
+                return {
                     "name": f"screenshot_{idx+1}.png",
                     "content_type": c_type,
                     "bytes": b_data,
-                })
+                }
         except Exception as dl_err:
             logger.debug(f"Could not download inline image {img_url}: {dl_err}")
+        return None
 
-    # 2. File attachments (logs, text files, images, PDFs)
-    for att in normalized.get("attachments", []):
+    async def _download_one_attachment(att: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         c_url = att.get("contentUrl")
         att_name = att.get("name") or "attachment"
         c_type = att.get("contentType") or "application/octet-stream"
-        if c_url:
-            try:
-                dl_res = await download_attachment_bytes(c_url)
-                if dl_res:
-                    b_data, resolved_ctype = dl_res
-                    downloaded_attachments.append({
-                        "name": att_name,
-                        "content_type": resolved_ctype or c_type,
-                        "bytes": b_data,
-                    })
-            except Exception as dl_err:
-                logger.debug(f"Could not download attachment {att_name}: {dl_err}")
+        if not c_url:
+            return None
+        try:
+            dl_res = await download_attachment_bytes(c_url)
+            if dl_res:
+                b_data, resolved_ctype = dl_res
+                return {
+                    "name": att_name,
+                    "content_type": resolved_ctype or c_type,
+                    "bytes": b_data,
+                }
+        except Exception as dl_err:
+            logger.debug(f"Could not download attachment {att_name}: {dl_err}")
+        return None
+
+    dl_tasks = []
+    for idx, img_url in enumerate(normalized.get("inlineImages", [])):
+        dl_tasks.append(_download_one_inline_image(idx, img_url))
+    for att in normalized.get("attachments", []):
+        dl_tasks.append(_download_one_attachment(att))
+
+    if dl_tasks:
+        results = await asyncio.gather(*dl_tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, dict) and r.get("bytes"):
+                downloaded_attachments.append(r)
 
     msg_id = normalized.get("messageId")
     if msg_id and downloaded_attachments:
@@ -1048,18 +1066,21 @@ async def execute_jira_ticket_creation(
                     except Exception as c_err:
                         logger.debug(f"Audit comment skipped ({c_err})")
 
-                # Upload cached attachments
+                # Upload cached attachments concurrently in parallel
                 if message_id in _message_attachment_cache:
-                    for att in _message_attachment_cache[message_id]:
+                    cached_atts = _message_attachment_cache[message_id]
+                    async def _upload_one_att(att_item: Dict[str, Any]):
                         try:
                             await upload_jira_attachment(
                                 issue_key=k,
-                                filename=att.get("name", "attachment"),
-                                file_bytes=att.get("bytes", b""),
-                                content_type=att.get("content_type", "application/octet-stream"),
+                                filename=att_item.get("name", "attachment"),
+                                file_bytes=att_item.get("bytes", b""),
+                                content_type=att_item.get("content_type", "application/octet-stream"),
                             )
                         except Exception as up_err:
                             logger.warning(f"Could not upload attachment to Jira {k}: {up_err}")
+
+                    await asyncio.gather(*[_upload_one_att(a) for a in cached_atts], return_exceptions=True)
 
                 # Send Jira ticket created card to Teams
                 notify_res = await send_ticket_created_notification(

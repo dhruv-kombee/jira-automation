@@ -3,6 +3,7 @@
 Interacts with Atlassian Jira Cloud REST API (v2 / v3) to verify credentials,
 inspect projects, and automatically create structured Jira tickets from Teams messages.
 """
+import asyncio
 import re
 from typing import Any, Dict, List, Optional
 import httpx
@@ -578,26 +579,26 @@ async def create_jira_issue(
 
     # Resolve assignee accountId if provided
     target_assignee = assignee_name or (ticket_data.get("suggested_assignee") if ticket_data else None)
-    resolved_account_id = None
-    if target_assignee:
-        try:
-            resolved_account_id = await resolve_jira_assignee(target_assignee, project_key)
-        except Exception as ass_err:
-            logger.debug(f"Assignee resolution skipped ({ass_err})")
-
-    # Resolve reporter accountId if provided (dynamically sets native Jira issue reporter)
     target_reporter = (
         reporter_name
         or (ticket_data.get("reporter_name") if ticket_data else None)
         or (ticket_data.get("sender_name") if ticket_data else None)
         or (ticket_data.get("reporter") if ticket_data else None)
     )
-    resolved_reporter_id = None
-    if target_reporter:
+
+    async def _resolve_account_safe(name: Optional[str]) -> Optional[str]:
+        if not name:
+            return None
         try:
-            resolved_reporter_id = await resolve_jira_assignee(target_reporter, project_key)
-        except Exception as rep_err:
-            logger.debug(f"Reporter resolution skipped ({rep_err})")
+            return await resolve_jira_assignee(name, project_key)
+        except Exception as u_err:
+            logger.debug(f"User resolution skipped for '{name}': {u_err}")
+            return None
+
+    resolved_account_id, resolved_reporter_id = await asyncio.gather(
+        _resolve_account_safe(target_assignee),
+        _resolve_account_safe(target_reporter),
+    )
 
     # Primary: Jira Cloud REST API v3 (Native ADF document support)
     v3_payload = {

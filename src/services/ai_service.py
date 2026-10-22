@@ -636,7 +636,7 @@ Message Content:
                         response_mime_type="application/json",
                         response_schema=JiraTicketDraft,
                         temperature=0.1,
-                        max_output_tokens=8192,
+                        max_output_tokens=4096,
                     ),
                 )
 
