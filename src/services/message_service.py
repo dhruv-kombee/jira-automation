@@ -838,6 +838,20 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     if parent_clarification_row and parent_clarification_row.get("confirmation_status") == "AWAITING_CLARIFICATION":
         eval_text = f"Reported issue: {parent_clarification_row.get('message_text', '')}\nClarification from reporter: {message_text}"
 
+    # Langfuse Pipeline - Step 1: Inbound Message Reported
+    try:
+        from src.services.langfuse_service import log_step1_message_reported
+        log_step1_message_reported(
+            message_id=normalized.get("messageId"),
+            reporter_name=normalized["sender"].get("displayName") or "Client",
+            reporter_role=sender_role,
+            text=message_text,
+            attachments_count=len(downloaded_attachments),
+            chat_id=normalized.get("chatId") or normalized.get("channelId"),
+        )
+    except Exception:
+        pass
+
     if any(tag in eval_text.lower() for tag in ["#issue", "#bug", "#task", "#ticket", "bug", "issue"]) or has_att or sender_role == "CLIENT" or (parent_clarification_row and parent_clarification_row.get("confirmation_status") == "AWAITING_CLARIFICATION"):
         try:
             from src.services.ai_service import extract_jira_ticket, ClassificationState
@@ -847,6 +861,22 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
                 sender_role=sender_role,
                 attachments=downloaded_attachments,
             )
+            # Langfuse Pipeline - Step 2: Issue Classified by AI
+            try:
+                from src.services.langfuse_service import log_step2_ai_classified
+                log_step2_ai_classified(
+                    message_id=normalized.get("messageId"),
+                    classification=ai_ticket.get("classification_state", "GENERAL_MESSAGE"),
+                    title=ai_ticket.get("summary") or "General Message",
+                    priority=ai_ticket.get("priority", "Medium"),
+                    suggested_dev=ai_ticket.get("suggested_assignee"),
+                    affected_module=ai_ticket.get("affected_module"),
+                    reporter_name=normalized["sender"].get("displayName"),
+                    missing_details=ai_ticket.get("missing_elements"),
+                )
+            except Exception:
+                pass
+
             if ai_ticket.get("is_ticket_request"):
                 normalized["aiTicket"] = ai_ticket
                 if parent_clarification_row and parent_clarification_row.get("confirmation_status") == "AWAITING_CLARIFICATION":
@@ -896,6 +926,23 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     triage_res = None
 
     reactions = normalized.get("reactions") or []
+    # Langfuse Pipeline - Step 3: Team Reaction Received
+    if reactions:
+        try:
+            from src.services.langfuse_service import log_step3_team_reaction
+            for r in reactions:
+                r_name = r.get("displayName") or r.get("userId") or "Team Member"
+                r_role = identify_sender_role(r.get("userId"), r.get("displayName"))
+                r_type = r.get("reactionType") or "reaction"
+                log_step3_team_reaction(
+                    message_id=normalized.get("messageId"),
+                    reactor_name=r_name,
+                    reactor_role=r_role,
+                    emoji=r_type,
+                )
+        except Exception:
+            pass
+
     from src.services.sender_service import (
         is_pm_approval,
         is_pm_confirmation_approval,
@@ -1208,6 +1255,28 @@ async def execute_jira_ticket_creation(
                 (conf_status, primary_key, primary_url, json.dumps(ai_ticket), message_id),
             )
 
+            # Langfuse Pipeline - Step 4: Management Approval & Step 5: Jira Ticket Created
+            try:
+                from src.services.langfuse_service import log_step4_management_approval, log_step5_jira_created
+                assigned_dev_name = assignee_override or (issues[0].get("assigned_to") if issues else None)
+                log_step4_management_approval(
+                    message_id=message_id,
+                    approver_name=approver_name or "Project Manager",
+                    approver_role="PM/TL",
+                    decision="APPROVED",
+                    method="Teams Card / Action",
+                    assigned_dev=assigned_dev_name,
+                )
+                log_step5_jira_created(
+                    message_id=message_id,
+                    jira_key=primary_key,
+                    jira_url=primary_url,
+                    assignee_name=assigned_dev_name,
+                    attachments_uploaded=len(_message_attachment_cache.get(message_id, [])),
+                )
+            except Exception:
+                pass
+
             try:
                 from src.services.broadcaster import broadcast_message
                 await broadcast_message({
@@ -1350,6 +1419,18 @@ async def execute_jira_ticket_decline(
             "UPDATE messages SET confirmation_status = ?, ai_ticket = ? WHERE message_id = ?",
             (new_status, json.dumps(ai_ticket) if ai_ticket else None, message_id),
         )
+
+        # Langfuse Pipeline - Step 4: Issue Declined by Management
+        try:
+            from src.services.langfuse_service import log_issue_declined
+            log_issue_declined(
+                message_id=message_id,
+                decliner_name=approver_name or "Project Manager",
+                decliner_role="PM/TL",
+                reason=reason or "Declined in Teams triage",
+            )
+        except Exception:
+            pass
 
         logger.info(
             f"❌ Ticket creation declined for {declined_label} by {approver_name} for message {message_id}",

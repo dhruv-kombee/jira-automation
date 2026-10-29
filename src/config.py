@@ -100,6 +100,18 @@ class EmailConfig:
         return bool(self.smtp_host and self.smtp_user and self.smtp_password)
 
 
+class LangfuseConfig:
+    def __init__(self):
+        self.public_key = os.getenv('LANGFUSE_PUBLIC_KEY')
+        self.secret_key = os.getenv('LANGFUSE_SECRET_KEY')
+        self.host = (os.getenv('LANGFUSE_HOST') or os.getenv('LANGFUSE_BASE_URL') or 'https://cloud.langfuse.com').rstrip('/')
+        self.enabled = os.getenv('LANGFUSE_ENABLED', 'true').lower() in ('true', '1', 'yes')
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.enabled and self.public_key and self.secret_key)
+
+
 class AppConfig:
     def __init__(self):
         self.reload()
@@ -113,6 +125,7 @@ class AppConfig:
         self.gemini = GeminiConfig()
         self.jira = JiraConfig()
         self.email = EmailConfig()
+        self.langfuse = LangfuseConfig()
         self.port = int(os.getenv('PORT', '3000'))
         self.webhook_public_url = os.getenv('WEBHOOK_PUBLIC_URL')
         self.log_level = os.getenv('LOG_LEVEL', 'INFO').upper()

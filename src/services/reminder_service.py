@@ -234,6 +234,20 @@ async def send_stage1_teams_followup_tl(
         (now_iso, f"TL_{t_status}", msg_id),
     )
 
+    # Langfuse Pipeline - Step 3: SLA Alert Triggered (Stage 1 TL)
+    try:
+        from src.services.langfuse_service import log_step3_sla_followup
+        log_step3_sla_followup(
+            message_id=msg_id,
+            stage="Stage 1: Teams Follow-up to TL",
+            target_name=names,
+            target_role=target_role,
+            channel="Teams Adaptive Card",
+            elapsed_minutes=elapsed_minutes,
+        )
+    except Exception:
+        pass
+
     try:
         from src.services.broadcaster import broadcast_message
         await broadcast_message({
@@ -308,6 +322,20 @@ async def send_stage2_teams_followup_pm(
         """,
         (f"PM_{t_status}", msg_id),
     )
+
+    # Langfuse Pipeline - Step 3: SLA Alert Triggered (Stage 2 PM)
+    try:
+        from src.services.langfuse_service import log_step3_sla_followup
+        log_step3_sla_followup(
+            message_id=msg_id,
+            stage="Stage 2: Teams Escalation to PM",
+            target_name=names,
+            target_role="PM",
+            channel="Teams Adaptive Card",
+            elapsed_minutes=elapsed_minutes,
+        )
+    except Exception:
+        pass
 
     try:
         from src.services.broadcaster import broadcast_message
@@ -386,6 +414,20 @@ async def send_stage3_email_escalation_hm(
         """,
         (f"HM_{e_status}", now_iso, msg_id),
     )
+
+    # Langfuse Pipeline - Step 3: SLA Alert Triggered (Stage 3 HM Email)
+    try:
+        from src.services.langfuse_service import log_step3_sla_followup
+        log_step3_sla_followup(
+            message_id=msg_id,
+            stage="Stage 3: Urgent Email Escalation to HM",
+            target_name=names,
+            target_role="Higher Management",
+            channel="Outlook / SMTP Email",
+            elapsed_minutes=elapsed_minutes,
+        )
+    except Exception:
+        pass
 
     try:
         from src.services.broadcaster import broadcast_message
