@@ -121,36 +121,59 @@ class JiraTicketDraft(BaseModel):
 
 
 
-SYSTEM_PROMPT = """You are an expert Agile Scrum Master and Senior QA Technical Lead with computer vision expertise.
-Your task is to analyze incoming messages and attachments (screenshots, logs, error reports) from a Microsoft Teams client support chat and convert ticket requests into professional, highly accurate Jira issue specifications.
+SYSTEM_PROMPT = """You are an expert Agile Scrum Master, Senior QA Technical Lead, and Multimodal Software Architect with advanced cross-lingual computer vision and natural language understanding.
+Your task is to analyze incoming messages and multi-format attachments (screenshots, logs, error reports, documents) from Microsoft Teams support channels and convert genuine, actionable ticket requests into professional, highly accurate Jira issue specifications.
 
-Rules:
-1. Classification & Location/Completeness Check:
-   - CONFIRMED_ISSUE: If the text, attached screenshot, or log clearly demonstrates broken behavior, an error, bug, defect, or explicit task request AND clearly identifies WHERE (screen, module, page, URL, or button) and WHAT (specific error message or broken behavior).
-   - INCOMPLETE_ISSUE (CRITICAL): If the message claims or mentions an issue/bug (e.g. "It's not working, please fix", "error on page", "there is an issue", "button broken") BUT FAILS to identify WHERE (which page/URL/screen) or WHAT specific defect occurred (no error code, no reproduction, no screenshot).
+Core Capabilities & Rules:
+
+1. Multilingual Understanding & Code-Switching (English, Hindi, Hinglish):
+   - You must fluently understand messages written in:
+     * Standard English (e.g., "The export button throws error 400 on reports page.")
+     * Pure Hindi in Devanagari script (e.g., "लॉगिन पेज लोड नहीं हो रहा है और 500 एरर आ रहा है।")
+     * Hinglish / Romanized Hindi (e.g., "bhai reports page pe export button dabane se 400 error aa raha hai", "payment gateway crash ho gaya")
+     * Mixed Code-Switching: Real-world technical conversations blending English terms, Hindi grammar, and colloquial slang.
+   - ALWAYS output all Jira fields (summary, description, observed_behavior, expected_behavior, steps_to_reproduce, acceptance_criteria) in CLEAN, PROFESSIONAL STANDARD ENGLISH, regardless of the input language!
+
+2. Noise Resilience & Filler Filtering:
+   - Real Teams chats contain significant noise. You must filter through:
+     * Greetings & Politeness Markers: "hello bhai", "hi team", "good morning sir", "plz check asap", "urgent dekh lo".
+     * Casual Acknowledgments & Status Replies: "understood", "got it", "samajh gaya", "theek hai dekh raha hu", "ho gaya", "ok bro", "done", "will check" -> MUST be classified as GENERAL_MESSAGE (is_ticket_request = false, NEVER create tickets).
+     * Slang & Colloquialisms: "fat raha hai", "ruk gaya", "blank ho gaya", "atak gaya", "crash maar raha hai".
+     * Typos & Abbreviations: "btn", "dwnld", "scrn", "err", "plz", "msg".
+   - Extract the TRUE TECHNICAL SIGNAL (what broke, on what screen/button, and what error code or visual symptom occurred).
+
+3. Classification & Location/Completeness Check:
+   - CONFIRMED_ISSUE:
+     * When the text OR attached screenshot/document clearly demonstrates broken behavior, an error, bug, defect, or explicit task request AND clearly identifies WHERE (screen, module, page, URL, or button) and WHAT (specific error message or broken behavior).
+     * Set is_ticket_request = true, classification_state = "CONFIRMED_ISSUE", has_specific_location = true.
+   - INCOMPLETE_ISSUE (CRITICAL):
+     * When the message claims or mentions an issue/bug (e.g., "It's not working, please fix", "issue found in app", "error on page", "bhai kuch kaam nahi kar raha", "button broken") BUT FAILS to identify WHERE (which page/URL/screen) or WHAT specific defect occurred (no error code, no reproduction, no screenshot).
      * For INCOMPLETE_ISSUE, you MUST set is_ticket_request = false, classification_state = "INCOMPLETE_ISSUE", and has_specific_location = false!
-     * Populate missing_elements (e.g. ["Affected page or URL", "Error details / observed behavior", "Screenshot or error log"]) and clarification_prompt.
-   - POSSIBLE_ISSUE: If the user is reporting confusion, potential problem, or ambiguous request without clear reproduction.
-   - GENERAL_MESSAGE: If the message is purely conversational greetings (e.g. "Good morning", "Thanks", "Can we hop on a call?") without any defect or task. For general messages, set is_ticket_request = false.
+     * Populate missing_elements (e.g., ["Affected page or URL", "Error details / observed behavior", "Screenshot or error log"]) and clarification_prompt in polite English.
+   - POSSIBLE_ISSUE:
+     * Inconclusive or ambiguous request without clear reproduction.
+   - GENERAL_MESSAGE:
+     * Conversational greetings, acknowledgments ("understood", "theek hai"), chit-chat, or questions without any defect or task. Set is_ticket_request = false.
 
-2. Multimodal Screenshot & Multi-Format Attachment Analysis:
+4. Multimodal Screenshot & Multi-Format Attachment Analysis:
    - IMAGES / SCREENSHOTS (.png, .jpg, .jpeg, .webp, .gif):
-     - Inspect the UI for red error badges, toast notifications, broken alignment, form validation errors, or DevTools consoles.
-     - Transcribe exact error message text into the "evidence" field.
-     - Identify the affected module/screen (e.g. Checkout, Login, Dashboard, Billing).
-   - EXCEL SPREADSHEETS (.xlsx, .xlsm, .xls):
-     - Carefully inspect the tabular sheets, test case rows, bug lists, and column headers.
-     - Extract reported defects, steps, expected/observed behaviors, and severities into individual Jira issue items.
-   - WORD DOCUMENTS (.docx):
-     - Read specifications, bug write-ups, requirements, and tables to capture the complete problem statement.
-   - ZIP ARCHIVES (.zip):
-     - Examine the archive tree, internal error logs, configuration files, and tracebacks to uncover root causes.
+     * Inspect the UI for red error badges, toast notifications, broken alignment, form validation errors, or DevTools consoles.
+     * Transcribe exact error message text into the "evidence" field.
+     * Identify the affected module/screen (e.g. Checkout, Login, Dashboard, Billing).
+     * Even if the text is short or informal (e.g. "bhai ye dekho" + screenshot), cross-reference the visual evidence to establish a CONFIRMED_ISSUE!
+   - EXCEL SPREADSHEETS (.xlsx, .xlsm, .xls, .csv):
+     * Inspect tabular sheets, test case rows, bug lists, and column headers.
+     * Extract reported defects, steps, expected/observed behaviors into individual Jira issue items.
+   - WORD DOCUMENTS (.docx, .doc):
+     * Read specifications, bug write-ups, requirements, and tables to capture the complete problem statement.
    - PDF DOCUMENTS (.pdf):
-     - Analyze all text, sections, error reports, and specification pages.
-   - LOG FILES & CODE (.log, .txt, .json, .csv, .py, .js, .sql, etc.):
-     - Extract exact exception names, stack trace lines, HTTP status codes (500, 502, 504, 404), and error snippets into the "evidence" field.
+     * Analyze all text, sections, error reports, and specification pages.
+   - LOG FILES & CODE (.log, .txt, .json, .py, .js, .sql, etc.):
+     * Extract exact exception names, stack trace lines, HTTP status codes (500, 502, 504, 400, 404), and error snippets into the "evidence" field.
+   - ZIP ARCHIVES (.zip):
+     * Examine internal error logs, configuration files, and tracebacks to uncover root causes.
 
-3. Professional Ticket Perspective (CRITICAL ASTERISK FORBIDDEN RULE):
+5. Professional Ticket Formatting (CRITICAL ASTERISK FORBIDDEN RULE):
    - Provide a comprehensive, accurate defect or task specification from a senior QA / Scrum perspective.
    - NEVER use markdown bold asterisks (such as **Reported By**: or **Observed Behavior**:) in any output field.
    - Jira uses native Atlassian Document Format (ADF) UI components. Raw asterisks cause formatting glitches. Always output clean, readable plain text.
@@ -161,23 +184,24 @@ Rules:
    - evidence: Specific error codes, log snippets, or visual UI details observed.
    - acceptance_criteria: Definite conditions to verify resolution.
 
-4. Multi-Issue Extraction (Single or Multiple Issues):
-   - If the client's message reports multiple distinct bugs, errors, or requests (e.g. numbered items '1. ... 2. ...' or multiple bullet points), extract EACH distinct problem into the `issues` array as a separate issue object!
+6. Multi-Issue Extraction (Single or Multiple Issues):
+   - If the message reports multiple distinct bugs, errors, or requests (e.g., numbered items '1. ... 2. ...' or multiple bullet points), extract EACH distinct problem into the `issues` array as a separate issue object!
    - If only a single issue is reported, `issues` must contain exactly 1 issue object.
    - Populate `general_summary` with an overall summary of the message.
    - Set top-level `summary` to the first/primary issue.
 
-5. Issue Type & Priority:
+7. Issue Type & Priority:
    - "Bug" for defects, broken features, errors, visual glitches.
    - "Task" for general work, configuration, credentials, access.
    - "Story" for new feature requests.
    - Priority: "Highest" or "High" if affecting the entire application, blocking checkouts/auth, or causing downtime. "Medium" for standard bugs. "Low" for minor cosmetic issues.
 
-6. Developer Assignment Routing:
+8. Developer Assignment Routing:
    - Direct Mentions: If message @mentions or specifies a team member or developer by name, assign to that person.
    - Module Specialty: If no direct mention, match against the active developer specialties in the team roster.
    - Ambiguous or No Match: Set suggested_assignee = null (Awaiting PM Triage).
 """
+
 
 
 class GeminiKeyPool:
@@ -319,23 +343,38 @@ def _rule_based_fallback(
 
     lower_text = combined_body.lower()
 
+    # Detect casual conversational acknowledgments & greetings (NEVER tickets)
+    chatter_patterns = [
+        r"^(?:ok|okay|k|got it|understood|will check|thanks|thank you|done|noted|thx|cool)$",
+        r"^(?:samajh gaya|theek hai|thik hai|dekh raha hu|ho gaya|theek hai bhai|ha bhai|accha|sahi hai)$",
+        r"^(?:hello|hi|hey|good morning|gm|good afternoon|good evening|namaste)$",
+    ]
+    is_chatter = any(re.match(p, clean_text.strip(), re.IGNORECASE) for p in chatter_patterns)
+
     # Detect if ticket request
     is_ticket = (
-        any(kw in lower_text for kw in [
-            "#issue", "#bug", "#task", "bug", "issue", "error", "fix", "fail",
-            "broken", "crash", "not working", "404", "500", "exception", "timeout"
-        ])
-        or has_attachments
+        not is_chatter and (
+            any(kw in lower_text for kw in [
+                "#issue", "#bug", "#task", "bug", "issue", "error", "fix", "fail",
+                "broken", "crash", "not working", "404", "500", "exception", "timeout",
+                "kaam nahi kar", "fat raha", "chal nahi raha", "band ho gaya", "atak gaya",
+            ])
+            or has_attachments
+        )
     )
 
     # Check for INCOMPLETE_ISSUE (vague report lacking location/details)
-    # e.g., "it's not working, please fix", "error on page", "there is an issue", "button broken" without specific module/evidence
+    # e.g., "it's not working, please fix", "issue found in app", "error on page", "there is an issue"
     vague_patterns = [
         r"^(?:(?:#issue|#bug)\s*)?(?:it'?s?\s+)?not\s+working(?:,?\s*please\s+fix\.?)?$",
         r"^(?:(?:#issue|#bug)\s*)?(?:please\s+)?fix\s+this(?:,?\s*please)?\.?$",
         r"^(?:(?:#issue|#bug)\s*)?error(?:\s+on\s+page)?\.?$",
         r"^(?:(?:#issue|#bug)\s*)?there\s+is\s+an?\s+issue\.?$",
         r"^(?:(?:#issue|#bug)\s*)?something\s+is\s+broken\.?$",
+        r"^(?:(?:#issue|#bug)\s*)?issue\s+found(?:\s+in\s+app)?\.?$",
+        r"^(?:(?:#issue|#bug)\s*)?(?:kuch\s+)?kaam\s+nahi\s+kar\s+raha(?:,?\s*dekh\s+lo)?\.?$",
+        r"^(?:(?:#issue|#bug)\s*)?(?:problem|dikkat)\s+aa\s+rahi\s+hai\.?$",
+        r"^(?:(?:#issue|#bug)\s*)?nahi\s+chal\s+raha\.?$",
     ]
     is_vague = not has_attachments and any(re.match(p, clean_text.strip(), re.IGNORECASE) for p in vague_patterns)
     has_specific_location = not is_vague
@@ -349,6 +388,7 @@ def _rule_based_fallback(
         classification_state = ClassificationState.CONFIRMED_ISSUE.value
     else:
         classification_state = ClassificationState.GENERAL_MESSAGE.value
+
 
     # Determine type
     issue_type = "Bug" if any(w in lower_text for w in ["bug", "error", "broken", "failed", "crash", "500", "404", "exception", "timeout"]) else "Task"

@@ -132,11 +132,29 @@ def is_issue_handled_or_replied(
         return True, "Jira ticket already created"
     if msg.get("confirmation_status") == "DECLINED":
         return True, "Ticket was declined"
+    if msg.get("confirmation_status") == "AWAITING_CLARIFICATION":
+        return True, "Awaiting client clarification — SLA follow-up suspended"
+
+    # Check parsed AI ticket: if not confirmed or marked incomplete/general, suspend follow-up
+    raw_ai = msg.get("ai_ticket")
+    if raw_ai:
+        try:
+            ai_ticket = json.loads(raw_ai) if isinstance(raw_ai, str) else raw_ai
+            if isinstance(ai_ticket, dict):
+                cls_state = str(ai_ticket.get("classification_state") or "").upper()
+                if cls_state in ("INCOMPLETE_ISSUE", "GENERAL_MESSAGE"):
+                    return True, f"Issue classified as {cls_state} — SLA follow-up suspended"
+                if ai_ticket.get("is_ticket_request") is False:
+                    return True, "Not an actionable ticket request — SLA follow-up suspended"
+        except Exception:
+            pass
+
     if has_pm_reacted(msg.get("reactions"), pm_user_id, pm_name):
         return True, "Management (TL/PM/HM) has already reacted"
     if has_message_reply(msg.get("message_id")):
         return True, "Message thread has received a reply"
     return False, None
+
 
 
 def extract_issues_for_message(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -167,6 +185,10 @@ async def send_stage1_teams_followup_tl(
     elapsed_minutes: int,
 ) -> Dict[str, Any]:
     """Execute Stage 1 (10-minute): Dispatch compact Teams follow-up card tagging Level 1 (TL)."""
+    if msg.get("confirmation_status") == "AWAITING_CLARIFICATION":
+        logger.info(f"Skipping Stage 1 TL follow-up for {msg.get('message_id')}: Awaiting clarification from reporter")
+        return {"skipped": True, "reason": "Awaiting client clarification"}
+
     from src.services.member_sync_service import get_active_tls, get_active_pms
     tls = get_active_tls()
     target_users = tls if tls else get_active_pms()
@@ -242,6 +264,10 @@ async def send_stage2_teams_followup_pm(
     elapsed_minutes: int,
 ) -> Dict[str, Any]:
     """Execute Stage 2 (20-minute): Dispatch compact Teams follow-up card tagging Level 2 (PM)."""
+    if msg.get("confirmation_status") == "AWAITING_CLARIFICATION":
+        logger.info(f"Skipping Stage 2 PM escalation for {msg.get('message_id')}: Awaiting clarification from reporter")
+        return {"skipped": True, "reason": "Awaiting client clarification"}
+
     from src.services.member_sync_service import get_active_pms
     pms = get_active_pms()
     names = ", ".join(u.get("display_name", "") for u in pms) or "Project Manager"
@@ -313,6 +339,10 @@ async def send_stage3_email_escalation_hm(
     elapsed_minutes: int,
 ) -> Dict[str, Any]:
     """Execute Stage 3 (>20-minute): Dispatch urgent escalation email strictly to Level 3 (HM) members."""
+    if msg.get("confirmation_status") == "AWAITING_CLARIFICATION":
+        logger.info(f"Skipping Stage 3 HM email escalation for {msg.get('message_id')}: Awaiting clarification from reporter")
+        return {"skipped": True, "reason": "Awaiting client clarification"}
+
     from src.services.member_sync_service import get_active_hms, get_active_pms
     hms = get_active_hms()
     recipients = hms if hms else get_active_pms()
@@ -489,7 +519,7 @@ async def check_unanswered_client_issues():
         SELECT * FROM messages
         WHERE (ai_ticket IS NOT NULL OR message_text LIKE '%#issue%' OR message_text LIKE '%#bug%')
           AND jira_issue_key IS NULL
-          AND (confirmation_status IS NULL OR confirmation_status != 'DECLINED')
+          AND (confirmation_status IS NULL OR confirmation_status NOT IN ('DECLINED', 'AWAITING_CLARIFICATION'))
           AND (
               reminder_sent_at IS NULL
               OR reminder_email_status IS NULL

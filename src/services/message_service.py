@@ -815,6 +815,25 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             parent_clarification_row = None
 
+    if not parent_clarification_row or parent_clarification_row.get("confirmation_status") != "AWAITING_CLARIFICATION":
+        chat_id = normalized.get("chatId")
+        sender_id = (normalized.get("sender") or {}).get("userId")
+        if chat_id and sender_id:
+            try:
+                db = get_db()
+                candidate = db.execute(
+                    """
+                    SELECT * FROM messages
+                    WHERE chat_id = ? AND sender_user_id = ? AND confirmation_status = 'AWAITING_CLARIFICATION'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (chat_id, sender_id),
+                ).fetchone()
+                if candidate:
+                    parent_clarification_row = dict(candidate)
+            except Exception:
+                pass
+
     eval_text = message_text
     if parent_clarification_row and parent_clarification_row.get("confirmation_status") == "AWAITING_CLARIFICATION":
         eval_text = f"Reported issue: {parent_clarification_row.get('message_text', '')}\nClarification from reporter: {message_text}"
@@ -832,16 +851,18 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
                 normalized["aiTicket"] = ai_ticket
                 if parent_clarification_row and parent_clarification_row.get("confirmation_status") == "AWAITING_CLARIFICATION":
                     # Clarification received! Update parent message in DB so it can proceed to triage
+                    parent_id = parent_clarification_row.get("message_id") or reply_to_id
                     db = get_db()
                     db.execute(
                         "UPDATE messages SET confirmation_status = 'AWAITING_FINAL_CONFIRMATION', ai_ticket = ? WHERE message_id = ?",
-                        (json.dumps(ai_ticket), reply_to_id),
+                        (json.dumps(ai_ticket), parent_id),
                     )
             elif ai_ticket.get("classification_state") == ClassificationState.INCOMPLETE_ISSUE.value:
                 normalized["aiTicket"] = ai_ticket
                 normalized["confirmation_status"] = "AWAITING_CLARIFICATION"
         except Exception as ai_err:
             logger.debug(f"AI ticket extraction skipped/failed: {ai_err}")
+
 
     # Pretty-print
     print_message_summary(normalized, sender_role)
