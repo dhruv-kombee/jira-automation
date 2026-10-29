@@ -513,7 +513,8 @@ async def _schedule_deferred_reaction_check(
             is_pm_confirmation_approval,
             is_pm_disapproval,
         )
-        if is_pm_approval(reactions) or is_pm_confirmation_approval(reactions) or is_pm_disapproval(reactions):
+        has_positive_pm_approval = is_pm_approval(reactions) or is_pm_confirmation_approval(reactions)
+        if has_positive_pm_approval or is_pm_disapproval(reactions):
             from src.database import get_db
             db = get_db()
             row = db.execute(
@@ -521,7 +522,7 @@ async def _schedule_deferred_reaction_check(
                 (message_id,),
             ).fetchone()
             if not is_bot_or_ticket_created_message(normalized, row) and row and not row["jira_issue_key"]:
-                if not row["confirmation_status"] or row["confirmation_status"] in ("AWAITING_FINAL_CONFIRMATION", "DECLINED"):
+                if not row["confirmation_status"] or row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION" or (row["confirmation_status"] == "DECLINED" and has_positive_pm_approval):
                     await check_and_auto_create_jira_ticket(normalized, sender_role)
 
         if result.get("updated") and result.get("reactions_changed"):
@@ -879,9 +880,9 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
         is_pm_confirmation_approval,
         is_pm_disapproval,
     )
+    has_positive_pm_rx = is_pm_approval(reactions) or is_pm_confirmation_approval(reactions)
     has_approval_rx = (
-        is_pm_approval(reactions)
-        or is_pm_confirmation_approval(reactions)
+        has_positive_pm_rx
         or is_pm_disapproval(reactions)
     )
 
@@ -904,7 +905,7 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
                 should_triage = True
         elif row["confirmation_status"] == "AWAITING_FINAL_CONFIRMATION" and has_approval_rx:
             should_triage = True
-        elif row["confirmation_status"] == "DECLINED" and has_approval_rx:
+        elif row["confirmation_status"] == "DECLINED" and has_positive_pm_rx:
             should_triage = True
     elif not row:
         if (change_type != "created" and result.get("reactions_changed", False)) or has_approval_rx:
@@ -1233,6 +1234,18 @@ async def execute_jira_ticket_decline(
         if not row:
             return {"success": False, "error": f"Message {message_id} not found in database"}
 
+        # IDEMPOTENCY GUARD: If entire message is already DECLINED, do not send duplicate card!
+        if row["confirmation_status"] == "DECLINED" and issue_idx is None:
+            logger.info(
+                f"Message {message_id} is already declined; skipping duplicate rejection notification.",
+                extra={"event": "TICKET_ALREADY_DECLINED", "messageId": message_id},
+            )
+            return {
+                "success": True,
+                "already_declined": True,
+                "message": f"Message {message_id} was already declined.",
+            }
+
         ai_ticket = None
         if row["ai_ticket"]:
             try:
@@ -1453,6 +1466,11 @@ async def check_and_auto_create_jira_ticket(
 
     # Check if this message is a client text message
     is_client_message = bool(row and row["message_text"])
+
+    # IDEMPOTENCY GUARD: If already DECLINED and no new approval reaction was added, exit immediately!
+    if confirmation_status == "DECLINED" and not has_approval:
+        logger.debug(f"Message {msg_id} is already declined and has no new approval; skipping triage.")
+        return None
 
     # If this is a client issue message that has not yet been triaged:
     # A reaction with ticket emoji (🎟️, 🎫) starts ticket creation (STEP 1)
