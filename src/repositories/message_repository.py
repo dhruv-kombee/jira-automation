@@ -82,9 +82,15 @@ def store_message(normalized_message: Dict[str, Any]) -> Dict[str, Any]:
         )
         return {"stored": True, "duplicate": False, "record": {"id": last_id}}
 
-    except sqlite3.IntegrityError as err:
+    except Exception as err:
         err_msg = str(err)
-        if "UNIQUE constraint failed" in err_msg or "messages.team_id" in err_msg or "messages.message_id" in err_msg:
+        if (
+            isinstance(err, sqlite3.IntegrityError)
+            or "unique" in err_msg.lower()
+            or "duplicate key" in err_msg.lower()
+            or "messages.team_id" in err_msg
+            or "messages.message_id" in err_msg
+        ):
             msg_id = normalized_message.get("messageId")
             try:
                 row = cursor.execute(
@@ -235,15 +241,17 @@ def find_recent_similar_tickets(
     import re
     if not summary:
         return []
+    from datetime import datetime, timezone, timedelta
+    cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=hours_window)).strftime("%Y-%m-%d %H:%M:%S")
     db = get_db()
     cursor = db.cursor()
     query = """
         SELECT message_id, jira_issue_key, jira_issue_url, ai_ticket, message_text, created_at
         FROM messages
         WHERE jira_issue_key IS NOT NULL
-          AND datetime(received_at) >= datetime('now', ?)
+          AND received_at >= ?
     """
-    params = [f"-{hours_window} hours"]
+    params = [cutoff_time]
     if chat_id:
         query += " AND chat_id = ?"
         params.append(chat_id)

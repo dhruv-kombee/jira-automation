@@ -37,12 +37,14 @@ def get_active_pm() -> Dict[str, str]:
     return get_active_pm_from_excel()
 
 
-def parse_timestamp_to_utc(ts_str: Optional[str]) -> Optional[datetime]:
+def parse_timestamp_to_utc(ts_str: Any) -> Optional[datetime]:
     """Parse various timestamp formats safely into a UTC datetime object."""
     if not ts_str:
         return None
+    if isinstance(ts_str, datetime):
+        return ts_str if ts_str.tzinfo else ts_str.replace(tzinfo=timezone.utc)
     try:
-        clean = ts_str.strip().replace("Z", "+00:00")
+        clean = str(ts_str).strip().replace("Z", "+00:00")
         if " " in clean and "+" not in clean and "-" not in clean[10:]:
             # SQLite format: '2026-10-06 09:30:00'
             dt = datetime.fromisoformat(clean)
@@ -50,6 +52,7 @@ def parse_timestamp_to_utc(ts_str: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(clean)
     except Exception:
         return None
+
 
 
 def has_pm_reacted(

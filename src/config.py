@@ -116,6 +116,7 @@ class AppConfig:
         self.port = int(os.getenv('PORT', '3000'))
         self.webhook_public_url = os.getenv('WEBHOOK_PUBLIC_URL')
         self.log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+        self.database_url = os.getenv('DATABASE_URL')
         self.database_path = os.getenv('DATABASE_PATH', './data/messages.db')
         self.pm_followup_timeout_minutes = int(os.getenv('PM_FOLLOWUP_TIMEOUT_MINUTES', '10'))
         self.pm_email_timeout_minutes = int(os.getenv('PM_EMAIL_TIMEOUT_MINUTES', '15'))
