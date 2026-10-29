@@ -802,17 +802,43 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     # AI Ticket Extraction (Phase 2: Gemini Multimodal / Heuristic)
     message_text = (normalized.get("message") or {}).get("text", "")
     has_att = len(downloaded_attachments) > 0
-    if any(tag in message_text.lower() for tag in ["#issue", "#bug", "#task", "#ticket", "bug", "issue"]) or has_att or sender_role == "CLIENT":
+    ai_ticket = None
+
+    # Context stitching: If this is a reply in a thread to a message awaiting clarification
+    reply_to_id = normalized.get("replyToId")
+    parent_clarification_row = None
+    if reply_to_id:
         try:
-            from src.services.ai_service import extract_jira_ticket
+            from src.repositories.message_repository import get_parent_message
+            parent_clarification_row = get_parent_message(reply_to_id)
+        except Exception:
+            parent_clarification_row = None
+
+    eval_text = message_text
+    if parent_clarification_row and parent_clarification_row.get("confirmation_status") == "AWAITING_CLARIFICATION":
+        eval_text = f"Reported issue: {parent_clarification_row.get('message_text', '')}\nClarification from reporter: {message_text}"
+
+    if any(tag in eval_text.lower() for tag in ["#issue", "#bug", "#task", "#ticket", "bug", "issue"]) or has_att or sender_role == "CLIENT" or (parent_clarification_row and parent_clarification_row.get("confirmation_status") == "AWAITING_CLARIFICATION"):
+        try:
+            from src.services.ai_service import extract_jira_ticket, ClassificationState
             ai_ticket = await extract_jira_ticket(
-                message_text,
+                eval_text,
                 sender_name=normalized["sender"].get("displayName"),
                 sender_role=sender_role,
                 attachments=downloaded_attachments,
             )
             if ai_ticket.get("is_ticket_request"):
                 normalized["aiTicket"] = ai_ticket
+                if parent_clarification_row and parent_clarification_row.get("confirmation_status") == "AWAITING_CLARIFICATION":
+                    # Clarification received! Update parent message in DB so it can proceed to triage
+                    db = get_db()
+                    db.execute(
+                        "UPDATE messages SET confirmation_status = 'AWAITING_FINAL_CONFIRMATION', ai_ticket = ? WHERE message_id = ?",
+                        (json.dumps(ai_ticket), reply_to_id),
+                    )
+            elif ai_ticket.get("classification_state") == ClassificationState.INCOMPLETE_ISSUE.value:
+                normalized["aiTicket"] = ai_ticket
+                normalized["confirmation_status"] = "AWAITING_CLARIFICATION"
         except Exception as ai_err:
             logger.debug(f"AI ticket extraction skipped/failed: {ai_err}")
 
@@ -822,8 +848,29 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     # Persist in SQLite
     result = store_message(normalized)
 
-    # Closed-loop: Trigger PM triage & approval check
+    # If classified as INCOMPLETE_ISSUE on a new message, send Clarification Request Card to Teams
     change_type = (notification.get("changeType") or "").lower()
+    is_new = bool(result.get("stored")) and not bool(result.get("duplicate"))
+    if ai_ticket and ai_ticket.get("classification_state") == "INCOMPLETE_ISSUE" and (is_new or change_type == "created"):
+        try:
+            from src.services.teams_notifier import send_clarification_request_notification
+            await send_clarification_request_notification(
+                message_id=normalized.get("messageId"),
+                reporter=normalized["sender"].get("displayName") or "Client",
+                reporter_user_id=normalized["sender"].get("userId"),
+                raw_message=message_text,
+                created_at=normalized.get("createdAt"),
+                web_url=normalized.get("webUrl"),
+                missing_details=ai_ticket.get("missing_elements"),
+                clarification_prompt=ai_ticket.get("clarification_prompt"),
+                chat_id=normalized.get("chatId"),
+                team_id=normalized.get("teamId"),
+                channel_id=normalized.get("channelId"),
+            )
+        except Exception as clar_err:
+            logger.error(f"Failed to post clarification request card to Teams: {clar_err}")
+
+    # Closed-loop: Trigger PM triage & approval check
     triage_res = None
 
     reactions = normalized.get("reactions") or []
@@ -847,6 +894,9 @@ async def process_teams_message(notification: Dict[str, Any]) -> Dict[str, Any]:
     ).fetchone()
 
     if is_bot_or_ticket_created_message(normalized, row):
+        should_triage = False
+    elif row and (row["confirmation_status"] == "AWAITING_CLARIFICATION" or (ai_ticket and ai_ticket.get("classification_state") == "INCOMPLETE_ISSUE")):
+        # Incomplete / vague issues MUST NOT be triaged or converted into Jira tickets!
         should_triage = False
     elif row and not row["jira_issue_key"]:
         if not row["confirmation_status"]:
@@ -909,6 +959,12 @@ async def execute_jira_ticket_creation(
         row = db.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
         if not row:
             return {"success": False, "error": f"Message {message_id} not found in database"}
+
+        if row["confirmation_status"] == "AWAITING_CLARIFICATION":
+            return {
+                "success": False,
+                "error": "Cannot create Jira ticket: issue report is incomplete (missing location/details). Please provide clarification first.",
+            }
 
         if issue_idx is None and row["jira_issue_key"]:
             return {
@@ -1354,6 +1410,13 @@ async def check_and_auto_create_jira_ticket(
         # Already created in Jira
         return {"key": row["jira_issue_key"], "url": row["jira_issue_url"], "already_existed": True}
 
+    if row["confirmation_status"] == "AWAITING_CLARIFICATION":
+        logger.info(
+            f"Message {msg_id} is awaiting clarification from reporter (missing location/details); blocking ticket creation.",
+            extra={"event": "AWAITING_CLARIFICATION_BLOCKED", "messageId": msg_id},
+        )
+        return None
+
     if is_bot_or_ticket_created_message(normalized_message, row):
         logger.info(
             f"Message {msg_id} is a bot or ticket-created notification card; ignoring reaction to prevent duplicate tickets.",
@@ -1534,10 +1597,10 @@ async def check_and_auto_create_jira_ticket(
                 attachments=cached_atts,
             )
 
-        # Only send confirmation card if AI identifies an actual issue/bug
-        if not ai_ticket.get("is_ticket_request"):
+        # Only send confirmation card if AI identifies an actual complete issue/bug
+        if not ai_ticket.get("is_ticket_request") or ai_ticket.get("classification_state") == "INCOMPLETE_ISSUE":
             logger.info(
-                "PM approved message, but content is not an issue/ticket request",
+                "PM approved message, but content is not an issue/ticket request or is awaiting clarification",
                 extra={"event": "PM_APPROVAL_NON_TICKET", "messageId": msg_id},
             )
             return None

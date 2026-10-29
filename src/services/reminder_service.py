@@ -190,6 +190,8 @@ async def send_stage1_teams_followup_tl(
         channel_id=msg.get("channel_id"),
         target_role=target_role,
         mention_users=target_users,
+        created_at=msg.get("created_at"),
+        web_url=msg.get("web_url"),
     )
 
     db = get_db()
@@ -260,6 +262,8 @@ async def send_stage2_teams_followup_pm(
         channel_id=msg.get("channel_id"),
         target_role="PM",
         mention_users=pms,
+        created_at=msg.get("created_at"),
+        web_url=msg.get("web_url"),
     )
 
     db = get_db()

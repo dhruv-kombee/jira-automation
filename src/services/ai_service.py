@@ -21,8 +21,9 @@ from src.logger import logger
 
 
 class ClassificationState(str, Enum):
-    CONFIRMED_ISSUE = "CONFIRMED_ISSUE"  # Clear defect/bug/task; ready for PM approval
-    POSSIBLE_ISSUE = "POSSIBLE_ISSUE"    # Inconclusive/ambiguous; PM can still approve
+    CONFIRMED_ISSUE = "CONFIRMED_ISSUE"  # Clear defect/bug/task with specific location & behavior; ready for PM approval
+    INCOMPLETE_ISSUE = "INCOMPLETE_ISSUE"  # Issue claimed but lacks location/screen/details; hold ticket & request clarification
+    POSSIBLE_ISSUE = "POSSIBLE_ISSUE"    # Inconclusive/ambiguous; PM can still review
     GENERAL_MESSAGE = "GENERAL_MESSAGE"  # General conversation/greeting; no action needed
 
 
@@ -87,11 +88,23 @@ class JiraTicketItem(BaseModel):
 class JiraTicketDraft(BaseModel):
     is_ticket_request: bool = Field(
         default=True,
-        description="Whether this message or attachment represents an issue, bug, task, or request that should become a Jira ticket",
+        description="Whether this message represents an actionable, complete defect that should become a Jira ticket. MUST be false for GENERAL_MESSAGE and INCOMPLETE_ISSUE.",
     )
     classification_state: str = Field(
         default=ClassificationState.CONFIRMED_ISSUE.value,
-        description="CONFIRMED_ISSUE, POSSIBLE_ISSUE, or GENERAL_MESSAGE",
+        description="CONFIRMED_ISSUE, INCOMPLETE_ISSUE, POSSIBLE_ISSUE, or GENERAL_MESSAGE",
+    )
+    has_specific_location: bool = Field(
+        default=True,
+        description="Whether the issue specifies a concrete module, page, URL, screen, or UI element",
+    )
+    missing_elements: List[str] = Field(
+        default_factory=list,
+        description="Missing details if INCOMPLETE_ISSUE (e.g. ['location_or_screen', 'observed_error', 'screenshot'])",
+    )
+    clarification_prompt: Optional[str] = Field(
+        default=None,
+        description="Prompt asking reporter for missing location/evidence",
     )
     confidence: float = Field(
         default=0.95,
@@ -112,8 +125,11 @@ SYSTEM_PROMPT = """You are an expert Agile Scrum Master and Senior QA Technical 
 Your task is to analyze incoming messages and attachments (screenshots, logs, error reports) from a Microsoft Teams client support chat and convert ticket requests into professional, highly accurate Jira issue specifications.
 
 Rules:
-1. Classification:
-   - CONFIRMED_ISSUE: If the text, attached screenshot, or log clearly demonstrates broken behavior, an error, bug, defect, or explicit task request.
+1. Classification & Location/Completeness Check:
+   - CONFIRMED_ISSUE: If the text, attached screenshot, or log clearly demonstrates broken behavior, an error, bug, defect, or explicit task request AND clearly identifies WHERE (screen, module, page, URL, or button) and WHAT (specific error message or broken behavior).
+   - INCOMPLETE_ISSUE (CRITICAL): If the message claims or mentions an issue/bug (e.g. "It's not working, please fix", "error on page", "there is an issue", "button broken") BUT FAILS to identify WHERE (which page/URL/screen) or WHAT specific defect occurred (no error code, no reproduction, no screenshot).
+     * For INCOMPLETE_ISSUE, you MUST set is_ticket_request = false, classification_state = "INCOMPLETE_ISSUE", and has_specific_location = false!
+     * Populate missing_elements (e.g. ["Affected page or URL", "Error details / observed behavior", "Screenshot or error log"]) and clarification_prompt.
    - POSSIBLE_ISSUE: If the user is reporting confusion, potential problem, or ambiguous request without clear reproduction.
    - GENERAL_MESSAGE: If the message is purely conversational greetings (e.g. "Good morning", "Thanks", "Can we hop on a call?") without any defect or task. For general messages, set is_ticket_request = false.
 
@@ -312,7 +328,27 @@ def _rule_based_fallback(
         or has_attachments
     )
 
-    classification_state = ClassificationState.CONFIRMED_ISSUE.value if is_ticket else ClassificationState.GENERAL_MESSAGE.value
+    # Check for INCOMPLETE_ISSUE (vague report lacking location/details)
+    # e.g., "it's not working, please fix", "error on page", "there is an issue", "button broken" without specific module/evidence
+    vague_patterns = [
+        r"^(?:(?:#issue|#bug)\s*)?(?:it'?s?\s+)?not\s+working(?:,?\s*please\s+fix\.?)?$",
+        r"^(?:(?:#issue|#bug)\s*)?(?:please\s+)?fix\s+this(?:,?\s*please)?\.?$",
+        r"^(?:(?:#issue|#bug)\s*)?error(?:\s+on\s+page)?\.?$",
+        r"^(?:(?:#issue|#bug)\s*)?there\s+is\s+an?\s+issue\.?$",
+        r"^(?:(?:#issue|#bug)\s*)?something\s+is\s+broken\.?$",
+    ]
+    is_vague = not has_attachments and any(re.match(p, clean_text.strip(), re.IGNORECASE) for p in vague_patterns)
+    has_specific_location = not is_vague
+    missing_elements = ["Affected page, screen, or URL", "Specific error code or observed defect", "Screenshot or error log"] if is_vague else []
+    clarification_prompt = "Could you please specify which page or button is affected, and share a screenshot or error code if possible?" if is_vague else None
+
+    if is_vague:
+        classification_state = ClassificationState.INCOMPLETE_ISSUE.value
+        is_ticket = False
+    elif is_ticket:
+        classification_state = ClassificationState.CONFIRMED_ISSUE.value
+    else:
+        classification_state = ClassificationState.GENERAL_MESSAGE.value
 
     # Determine type
     issue_type = "Bug" if any(w in lower_text for w in ["bug", "error", "broken", "failed", "crash", "500", "404", "exception", "timeout"]) else "Task"
@@ -474,6 +510,9 @@ Details & Investigation:
     return {
         "is_ticket_request": is_ticket,
         "classification_state": classification_state,
+        "has_specific_location": has_specific_location,
+        "missing_elements": missing_elements,
+        "clarification_prompt": clarification_prompt,
         "general_summary": summary,
         "issues": issues,
         "summary": summary,
@@ -646,6 +685,9 @@ Message Content:
             parsed["reporter_name"] = sender_name
             parsed["reporter_role"] = sender_role
             parsed["raw_message"] = clean_text
+
+            if parsed.get("classification_state") == ClassificationState.INCOMPLETE_ISSUE.value:
+                parsed["is_ticket_request"] = False
 
             raw_issues = parsed.get("issues") or []
             if not raw_issues and parsed.get("summary"):

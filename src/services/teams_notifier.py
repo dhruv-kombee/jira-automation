@@ -32,6 +32,24 @@ def format_card_timestamp(ts: Optional[str] = None) -> str:
         return str(ts) or get_current_timestamp_str()
 
 
+def format_card_timestamp_ist(ts: Optional[str] = None) -> str:
+    """Format timestamp into an explicit Indian Standard Time (IST) date and time string."""
+    from datetime import timezone, timedelta
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    if not ts:
+        now = datetime.now(ist_tz)
+        return now.strftime("%Y-%m-%d %I:%M:%S %p IST")
+    try:
+        clean_ts = str(ts).strip()
+        if clean_ts.endswith("Z"):
+            clean_ts = clean_ts[:-1] + "+00:00"
+        dt = datetime.fromisoformat(clean_ts)
+        ist_dt = dt.astimezone(ist_tz)
+        return ist_dt.strftime("%Y-%m-%d %I:%M:%S %p IST")
+    except Exception:
+        return format_card_timestamp(ts)
+
+
 def build_adaptive_card_payload(
     ticket_key: str,
     ticket_url: str,
@@ -1011,8 +1029,11 @@ def build_pm_followup_reminder_card(
     raw_message: str,
     base_url: Optional[str] = None,
     mention_users: Optional[List[Dict[str, Any]]] = None,
+    created_at: Optional[str] = None,
+    web_url: Optional[str] = None,
+    target_role: str = "TL",
 ) -> Dict[str, Any]:
-    """Build a compact one-line Adaptive Card mentioning PM / TL for follow-up on client issue."""
+    """Build an Adaptive Card mentioning PM / TL for follow-up on client issue with IST timestamp & jump link."""
     app_base = base_url or get_app_base_url()
 
     first_summary = ""
@@ -1055,20 +1076,45 @@ def build_pm_followup_reminder_card(
         tag_str = "@Reviewers"
         plain_tag = "@Reviewers"
 
-    # One-line concise message mentioning PM directly
+    display_timestamp = format_card_timestamp_ist(created_at)
+    time_badge = f"🕒 {display_timestamp} (Reported {elapsed_minutes}m ago)"
+    stage_header = f"⏰ [{elapsed_minutes}m {target_role} Review] Ticket Review Pending"
+
     card_text = (
-        f"⏰ {tag_str} Please review client issue from **{reporter}**: "
+        f"🔔 {tag_str} Please review client issue from **{reporter}**: "
         f"*\"{clean_snippet}\"* — react 🎟️ to approve or ❌ to decline."
     )
-    plain_text = f"⏰ {plain_tag} Please review client issue from {reporter}: \"{clean_snippet}\" (React 🎟️ to approve, ❌ to decline)"
+    plain_text = f"{stage_header} ({display_timestamp}): {plain_tag} Please review client issue from {reporter}: \"{clean_snippet}\" (React 🎟️ to approve, ❌ to decline)"
 
     body_elements: list = [
+        {
+            "type": "Container",
+            "style": "warning",
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": stage_header,
+                    "weight": "Bolder",
+                    "size": "Medium",
+                    "color": "Warning",
+                    "wrap": True,
+                },
+                {
+                    "type": "TextBlock",
+                    "text": time_badge,
+                    "size": "Small",
+                    "spacing": "None",
+                    "isSubtle": True,
+                    "wrap": True,
+                },
+            ],
+        },
         {
             "type": "TextBlock",
             "text": card_text,
             "wrap": True,
             "size": "Medium",
-        }
+        },
     ]
 
     actions: list = [
@@ -1083,6 +1129,13 @@ def build_pm_followup_reminder_card(
             "url": f"{app_base}/api/jira/decline-issue/{message_id}",
         },
     ]
+
+    if web_url:
+        actions.append({
+            "type": "Action.OpenUrl",
+            "title": "🔗 Jump to Message",
+            "url": web_url,
+        })
 
     card_content: Dict[str, Any] = {
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
@@ -1111,6 +1164,206 @@ def build_pm_followup_reminder_card(
     }
 
 
+def build_clarification_request_card(
+    message_id: str,
+    reporter: str,
+    reporter_user_id: Optional[str],
+    raw_message: str,
+    created_at: Optional[str] = None,
+    web_url: Optional[str] = None,
+    missing_details: Optional[List[str]] = None,
+    clarification_prompt: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build an Adaptive Card requesting location and details from reporter for vague/incomplete issue messages."""
+    display_timestamp = format_card_timestamp_ist(created_at)
+
+    mention_entities = []
+    if reporter_user_id and reporter:
+        mention_entities.append({
+            "type": "mention",
+            "text": f"<at>{reporter}</at>",
+            "mentioned": {
+                "id": reporter_user_id,
+                "name": reporter,
+            },
+        })
+        tag_str = f"<at>{reporter}</at>"
+    elif reporter:
+        tag_str = f"@{reporter}"
+    else:
+        tag_str = "@Reporter"
+
+    clean_msg = (raw_message or "").replace("\n", " ").strip()
+    if len(clean_msg) > 160:
+        clean_msg = clean_msg[:157] + "..."
+
+    details_list = missing_details or [
+        "Which page, screen, or URL were you using?",
+        "What unexpected error or behavior occurred?",
+        "Can you attach a screenshot or error log if available?",
+    ]
+    bullet_points = "\n".join(f"• {item}" for item in details_list)
+
+    body_elements: list = [
+        {
+            "type": "Container",
+            "style": "accent",
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": "⚠️ Issue Report Needs More Details",
+                    "weight": "Bolder",
+                    "size": "Medium",
+                    "color": "Accent",
+                    "wrap": True,
+                },
+                {
+                    "type": "TextBlock",
+                    "text": f"🕒 {display_timestamp}",
+                    "size": "Small",
+                    "spacing": "None",
+                    "isSubtle": True,
+                    "wrap": True,
+                },
+            ],
+        },
+        {
+            "type": "TextBlock",
+            "text": f"🔔 {tag_str} We received your issue report, but our team needs a few more details to investigate:",
+            "wrap": True,
+            "weight": "Bolder",
+            "size": "Small",
+        },
+        {
+            "type": "TextBlock",
+            "text": f"💬 *\"{clean_msg}\"*",
+            "wrap": True,
+            "isSubtle": True,
+            "size": "Small",
+        },
+        {
+            "type": "TextBlock",
+            "text": f"📋 **Please reply directly to this thread with:**\n{bullet_points}",
+            "wrap": True,
+            "size": "Small",
+        },
+    ]
+
+    actions: list = []
+    if web_url:
+        actions.append({
+            "type": "Action.OpenUrl",
+            "title": "🔗 Jump to Message",
+            "url": web_url,
+        })
+
+    card_content: Dict[str, Any] = {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": body_elements,
+    }
+    if actions:
+        card_content["actions"] = actions
+    if mention_entities:
+        card_content["msteams"] = {"entities": mention_entities}
+
+    plain_text = f"⚠️ Issue Report Needs More Details ({display_timestamp}): {tag_str} Please reply with location, error details, and screenshot for: \"{clean_msg}\""
+    return {
+        "type": "message",
+        "text": plain_text,
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "contentUrl": None,
+                "content": card_content,
+            }
+        ],
+    }
+
+
+async def send_clarification_request_notification(
+    message_id: str,
+    reporter: str,
+    reporter_user_id: Optional[str],
+    raw_message: str,
+    created_at: Optional[str] = None,
+    web_url: Optional[str] = None,
+    missing_details: Optional[List[str]] = None,
+    clarification_prompt: Optional[str] = None,
+    chat_id: Optional[str] = None,
+    team_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Send Teams clarification request card tagging reporter with IST timestamp and missing details checklist."""
+    webhook_url = (config.teams.webhook_url or "").strip()
+    effective_chat_id = chat_id or config.teams.chat_id
+    effective_team_id = team_id or config.teams.team_id
+    effective_channel_id = channel_id or config.teams.channel_id
+
+    card_payload = build_clarification_request_card(
+        message_id=message_id,
+        reporter=reporter,
+        reporter_user_id=reporter_user_id,
+        raw_message=raw_message,
+        created_at=created_at,
+        web_url=web_url,
+        missing_details=missing_details,
+        clarification_prompt=clarification_prompt,
+    )
+
+    # 1. Post via Teams Webhook
+    if webhook_url:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res = await client.post(webhook_url, json=card_payload)
+                if res.status_code in (200, 201, 202):
+                    logger.info(
+                        f"📋 Successfully posted clarification request card to Teams for message {message_id}",
+                        extra={"event": "TEAMS_CLARIFICATION_POST_SUCCESS", "messageId": message_id},
+                    )
+                    return {"success": True, "method": "webhook", "status": res.status_code}
+        except Exception as webhook_err:
+            logger.error(f"Error calling Teams Webhook for clarification request: {webhook_err}")
+
+    # 2. Direct thread reply fallback via Microsoft Graph
+    display_timestamp = format_card_timestamp_ist(created_at)
+    html_msg = (
+        f"⚠️ <b>Issue Report Needs More Details</b> (<i>{display_timestamp}</i>)<br/>"
+        f"🔔 <b>{reporter}</b>: We received your issue report, but our engineering team needs a few more details to investigate:<br/>"
+        f"<i>\"{raw_message}\"</i><br/><br/>"
+        f"<b>Please reply with:</b><br/>"
+        f"• Which page, screen, or URL were you using?<br/>"
+        f"• What specific error message or unexpected behavior occurred?<br/>"
+        f"• A screenshot or error log if available."
+    )
+    if effective_team_id and effective_channel_id and message_id:
+        try:
+            from src.graph_client import send_channel_reply
+            reply_res = await send_channel_reply(
+                team_id=effective_team_id,
+                channel_id=effective_channel_id,
+                parent_message_id=message_id,
+                content=html_msg,
+            )
+            if reply_res:
+                return {"success": True, "method": "channel_reply", "result": reply_res}
+        except Exception as c_err:
+            logger.debug(f"Graph channel reply error for clarification: {c_err}")
+
+    if effective_chat_id:
+        try:
+            from src.graph_client import send_chat_message
+            graph_res = await send_chat_message(effective_chat_id, html_msg)
+            if graph_res:
+                return {"success": True, "method": "graph_chat", "result": graph_res}
+        except Exception as g_err:
+            logger.debug(f"Graph chat clarification error: {g_err}")
+
+    return {"success": False, "method": "none", "error": "No delivery channel succeeded for clarification"}
+
+
 async def send_pm_followup_reminder(
     message_id: str,
     pm_name: str,
@@ -1124,9 +1377,11 @@ async def send_pm_followup_reminder(
     channel_id: Optional[str] = None,
     target_role: str = "PM",
     mention_users: Optional[List[Dict[str, Any]]] = None,
+    created_at: Optional[str] = None,
+    web_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send Teams follow-up card with mention in reply mode to client's message if possible, falling back to webhook.
-    Supports single or multiple @mentions for TLs and PMs.
+    Supports single or multiple @mentions for TLs and PMs with IST timestamp and location jump link.
     """
     webhook_url = (config.teams.webhook_url or "").strip()
     effective_chat_id = chat_id or config.teams.chat_id
@@ -1177,9 +1432,10 @@ async def send_pm_followup_reminder(
         tag_str = f"@{target_role}"
         mentions_payload = None
 
-    stage_prefix = "⏰ [10m TL Review]" if target_role == "TL" else ("🚨 [20m PM Escalation]" if target_role == "PM" else "⏰ Follow-up:")
+    display_timestamp = format_card_timestamp_ist(created_at)
+    stage_prefix = f"⏰ [{elapsed_minutes}m {target_role} Review]" if target_role == "TL" else (f"🚨 [{elapsed_minutes}m {target_role} Escalation]" if target_role == "PM" else "⏰ Follow-up:")
     html_msg = (
-        f"{stage_prefix} {tag_str} Please review client issue from <b>{reporter}</b>: "
+        f"{stage_prefix} (<i>{display_timestamp}</i>) {tag_str} Please review client issue from <b>{reporter}</b>: "
         f"<i>\"{snippet}\"</i> (React 🎟️ to approve, ❌ to decline)"
     )
 
@@ -1234,6 +1490,9 @@ async def send_pm_followup_reminder(
             issues=issues,
             raw_message=raw_message,
             mention_users=mention_users,
+            created_at=created_at,
+            web_url=web_url,
+            target_role=target_role,
         )
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -1251,6 +1510,7 @@ async def send_pm_followup_reminder(
                     )
         except Exception as webhook_err:
             logger.error(f"Error calling Teams Webhook for reminder: {webhook_err}")
+
 
     # Step 3: Fallback to Graph API chat message
     if effective_chat_id:
